@@ -240,41 +240,12 @@ test "buffer length and capacity tracking" {
 }
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_enqueue_dequeue_one_with]
-test "enqueue and dequeue one with error conditions" {
-    var backing = [_]u8{ 0, 0, 0, 0, 0 };
-    var ring = RingBufU8.init(&backing);
-
-    // Dequeue from empty -> error
-    try testing.expectError(error.Empty, ring.dequeueOne());
-
-    // Enqueue one (default value)
-    _ = try ring.enqueueOne();
-    try testing.expect(!ring.isEmpty());
-    try testing.expect(!ring.isFull());
-
-    // Fill the rest
-    for (1..5) |i| {
-        const e = try ring.enqueueOne();
-        e.* = @intCast(i);
-        try testing.expect(!ring.isEmpty());
-    }
-    try testing.expect(ring.isFull());
-    try testing.expectError(error.Full, ring.enqueueOne());
-
-    // Dequeue all and verify values
-    for (0..5) |i| {
-        const e = try ring.dequeueOne();
-        try testing.expectEqual(@as(u8, @intCast(i)), e.*);
-        try testing.expect(!ring.isFull());
-    }
-    try testing.expectError(error.Empty, ring.dequeueOne());
-    try testing.expect(ring.isEmpty());
-}
-
 // [smoltcp:storage/ring_buffer.rs:test_buffer_enqueue_dequeue_one]
+// (merged: smoltcp had separate _with(closure) and non-_with APIs; we have one API)
 test "enqueue and dequeue one" {
     var backing = [_]u8{ 0, 0, 0, 0, 0 };
     var ring = RingBufU8.init(&backing);
+
     try testing.expectError(error.Empty, ring.dequeueOne());
 
     _ = try ring.enqueueOne();

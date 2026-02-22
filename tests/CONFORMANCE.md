@@ -13,7 +13,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/tcp | ~20 | 6 | 6 | PASS |
 | wire/udp | ~8 | 4 | 4 | PASS |
 | wire/icmp | ~10 | 4 | 4 | PASS |
-| storage/ring_buffer | ~15 | 15 | 15 | PASS |
+| storage/ring_buffer | ~15 | 14 | 14 | PASS |
 | storage/assembler | ~37 | 37 | 37 | PASS |
 | socket/tcp | 175 | 0 | -- | TODO |
 | socket/udp | ~15 | 0 | -- | TODO |
@@ -92,8 +92,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | smoltcp Reference | zmoltcp Test | Status |
 |---|---|---|
 | storage/ring_buffer.rs:test_buffer_length_changes | "buffer length and capacity tracking" | PASS |
-| storage/ring_buffer.rs:test_buffer_enqueue_dequeue_one_with | "enqueue and dequeue one with error conditions" | PASS |
-| storage/ring_buffer.rs:test_buffer_enqueue_dequeue_one | "enqueue and dequeue one" | PASS |
+| storage/ring_buffer.rs:test_buffer_enqueue_dequeue_one{,_with} | "enqueue and dequeue one" | PASS |
 | storage/ring_buffer.rs:test_buffer_enqueue_many_with | "enqueue many with wrap-around" | PASS |
 | storage/ring_buffer.rs:test_buffer_enqueue_many | "enqueue many contiguous" | PASS |
 | storage/ring_buffer.rs:test_buffer_enqueue_slice | "enqueue slice with wrap-around" | PASS |
