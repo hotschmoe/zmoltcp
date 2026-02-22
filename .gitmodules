@@ -1,0 +1,3 @@
+[submodule "ref/smoltcp"]
+	path = ref/smoltcp
+	url = https://github.com/smoltcp-rs/smoltcp.git

@@ -1,0 +1,14 @@
+.{
+    .name = .zmoltcp,
+    .version = "0.1.0",
+    .fingerprint = 0x46a16d6c419cca00,
+    .minimum_zig_version = "0.15.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+        "SPEC.md",
+        "LICENSE",
+    },
+}
