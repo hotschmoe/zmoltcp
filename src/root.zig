@@ -13,6 +13,11 @@ pub const wire = struct {
     pub const icmp = @import("wire/icmp.zig");
 };
 
+pub const storage = struct {
+    pub const ring_buffer = @import("storage/ring_buffer.zig");
+    pub const assembler = @import("storage/assembler.zig");
+};
+
 test {
     @import("std").testing.refAllDecls(@This());
 }
