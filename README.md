@@ -14,7 +14,22 @@ container-native research kernel for ARM64. But zmoltcp has no kernel
 dependencies -- it is a pure protocol library that any freestanding Zig
 project can use.
 
-## Design Principles (from smoltcp)
+## Development Philosophy
+
+**Make it work, make it right, make it fast** -- in that order.
+
+**This codebase will outlive you** -- every shortcut becomes someone else's
+burden. Patterns you establish will be copied. Corners you cut will be cut
+again.
+
+**Fight entropy** -- leave the codebase better than you found it.
+
+**Inspiration vs. Recreation** -- we take inspiration from well-established
+patterns (smoltcp, RFCs) and make them our own in idiomatic Zig. We do not
+reinvent the wheel for the sake of it, but we also do not shy away from
+unconventional approaches when they serve the design better.
+
+## Design Principles
 
 - **Explicit poll model**: No background timers or callbacks. Call `poll()`
   with a timestamp, it tells you what to do. Your event loop owns the
@@ -83,6 +98,12 @@ zig build
 Tests are transliterated from smoltcp's test suite (see SPEC.md for the full
 conformance testing methodology). The smoltcp source is included as a git
 submodule under `ref/smoltcp/` for reference.
+
+**Tests are diagnostic tools, not success criteria.** A passing suite does not
+mean the code is good. A failing test does not mean the code is wrong. Tests
+are valuable for regression detection, sanity checks, and documenting current
+behavior -- but they are not a definition of correctness. The real metric is
+whether the code furthers the project's vision.
 
 ```bash
 # Run all unit tests
