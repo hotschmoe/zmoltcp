@@ -10,13 +10,22 @@
 const std = @import("std");
 const ipv4 = @import("../wire/ipv4.zig");
 const icmp = @import("../wire/icmp.zig");
-const checksum_mod = @import("../wire/checksum.zig");
 const ring_buffer_mod = @import("../storage/ring_buffer.zig");
 
 const UNSPECIFIED_ADDR: ipv4.Address = .{ 0, 0, 0, 0 };
 
 fn isUnspecified(addr: ipv4.Address) bool {
     return std.mem.eql(u8, &addr, &UNSPECIFIED_ADDR);
+}
+
+// Extract the transport-layer source port from an ICMP error payload.
+// The payload contains: [embedded IPv4 header][transport header fragment].
+// Returns null if the payload is too short to contain a valid port.
+fn embeddedSrcPort(payload: []const u8) ?u16 {
+    if (payload.len < ipv4.HEADER_LEN) return null;
+    const ihl: usize = @as(usize, payload[0] & 0x0F) * 4;
+    if (ihl < ipv4.HEADER_LEN or payload.len < ihl + 2) return null;
+    return @as(u16, payload[ihl]) << 8 | @as(u16, payload[ihl + 1]);
 }
 
 // -------------------------------------------------------------------------
@@ -111,10 +120,7 @@ pub fn Socket(comptime config: Config) type {
         }
 
         pub fn isOpen(self: Self) bool {
-            return switch (self.endpoint) {
-                .unspecified => false,
-                .ident, .udp => true,
-            };
+            return self.endpoint.isSpecified();
         }
 
         pub fn canSend(self: Self) bool {
@@ -180,42 +186,20 @@ pub fn Socket(comptime config: Config) type {
                     if (udp_ep.addr) |bound_addr| {
                         if (!std.mem.eql(u8, &bound_addr, &dst_addr)) return false;
                     }
-                    // Payload contains: [embedded IPv4 header][transport header fragment]
-                    // Extract IHL to find transport header offset, then read src_port.
-                    if (payload.len < ipv4.HEADER_LEN) return false;
-                    const ihl: usize = @as(usize, payload[0] & 0x0F) * 4;
-                    if (ihl < ipv4.HEADER_LEN or payload.len < ihl + 2) return false;
-                    const src_port: u16 = @as(u16, payload[ihl]) << 8 | @as(u16, payload[ihl + 1]);
+                    const src_port = embeddedSrcPort(payload) orelse return false;
                     return src_port == udp_ep.port;
                 },
             }
         }
 
         pub fn process(self: *Self, src_addr: ipv4.Address, repr: icmp.Repr, payload: []const u8) void {
-            const total_len = icmp.HEADER_LEN + payload.len;
-            if (total_len > config.payload_size) return;
+            if (icmp.HEADER_LEN + payload.len > config.payload_size) return;
 
             const pkt = self.rx.enqueueOne() catch return;
-            switch (repr) {
-                .echo => |echo| {
-                    pkt.payload_len = icmp.emitEcho(echo, payload, &pkt.payload) catch unreachable;
-                },
-                .other => |other| {
-                    pkt.payload[0] = @intFromEnum(other.icmp_type);
-                    pkt.payload[1] = other.code;
-                    pkt.payload[2] = 0;
-                    pkt.payload[3] = 0;
-                    pkt.payload[4] = @truncate(other.data >> 24);
-                    pkt.payload[5] = @truncate(other.data >> 16);
-                    pkt.payload[6] = @truncate(other.data >> 8);
-                    pkt.payload[7] = @truncate(other.data);
-                    @memcpy(pkt.payload[icmp.HEADER_LEN..][0..payload.len], payload);
-                    const cksum = checksum_mod.internetChecksum(pkt.payload[0..total_len]);
-                    pkt.payload[2] = @truncate(cksum >> 8);
-                    pkt.payload[3] = @truncate(cksum & 0xFF);
-                    pkt.payload_len = total_len;
-                },
-            }
+            pkt.payload_len = switch (repr) {
+                .echo => |echo| icmp.emitEcho(echo, payload, &pkt.payload) catch unreachable,
+                .other => |other| icmp.emitOther(other, payload, &pkt.payload) catch unreachable,
+            };
             pkt.addr = src_addr;
         }
 
@@ -405,26 +389,13 @@ test "accepts ICMP error for bound UDP port" {
     s.process(REMOTE_ADDR, icmp_repr, &embedded_payload);
     try testing.expect(s.canRecv());
 
-    // Build expected serialized ICMP error packet
-    const expected_len = icmp.HEADER_LEN + embedded_payload.len;
-    var expected: [expected_len]u8 = undefined;
-    expected[0] = @intFromEnum(icmp.Type.dest_unreachable);
-    expected[1] = 3;
-    expected[2] = 0;
-    expected[3] = 0;
-    expected[4] = 0;
-    expected[5] = 0;
-    expected[6] = 0;
-    expected[7] = 0;
-    @memcpy(expected[8..], &embedded_payload);
-    const cksum = checksum_mod.internetChecksum(&expected);
-    expected[2] = @truncate(cksum >> 8);
-    expected[3] = @truncate(cksum & 0xFF);
+    var expected_buf: [icmp.HEADER_LEN + embedded_payload.len]u8 = undefined;
+    const expected_len = icmp.emitOther(icmp_repr.other, &embedded_payload, &expected_buf) catch unreachable;
 
     var recv_buf: [64]u8 = undefined;
     const result = try s.recvSlice(&recv_buf);
     try testing.expectEqual(expected_len, result.data_len);
-    try testing.expectEqualSlices(u8, &expected, recv_buf[0..result.data_len]);
+    try testing.expectEqualSlices(u8, expected_buf[0..expected_len], recv_buf[0..result.data_len]);
     try testing.expectEqualSlices(u8, &REMOTE_ADDR, &result.src_addr);
     try testing.expect(!s.canRecv());
 }

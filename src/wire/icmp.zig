@@ -97,6 +97,30 @@ pub fn emitEcho(repr: EchoRepr, payload_data: []const u8, buf: []u8) error{Buffe
     return total;
 }
 
+/// Serialize a non-echo ICMP message (error, redirect, etc.) into a buffer.
+/// Computes checksum over the entire ICMP message (header + payload).
+pub fn emitOther(repr: OtherRepr, payload_data: []const u8, buf: []u8) error{BufferTooSmall}!usize {
+    const total = HEADER_LEN + payload_data.len;
+    if (buf.len < total) return error.BufferTooSmall;
+
+    buf[0] = @intFromEnum(repr.icmp_type);
+    buf[1] = repr.code;
+    buf[2] = 0;
+    buf[3] = 0;
+    buf[4] = @truncate(repr.data >> 24);
+    buf[5] = @truncate(repr.data >> 16);
+    buf[6] = @truncate(repr.data >> 8);
+    buf[7] = @truncate(repr.data);
+
+    @memcpy(buf[HEADER_LEN..][0..payload_data.len], payload_data);
+
+    const cksum = checksum_mod.internetChecksum(buf[0..total]);
+    buf[2] = @truncate(cksum >> 8);
+    buf[3] = @truncate(cksum & 0xFF);
+
+    return total;
+}
+
 /// Verify ICMP checksum. Returns true if valid.
 pub fn verifyChecksum(data: []const u8) bool {
     if (data.len < HEADER_LEN) return false;
