@@ -6,21 +6,21 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 
 | Module | smoltcp Tests | zmoltcp Tests | Passing | Status |
 |--------|--------------|---------------|---------|--------|
-| wire/checksum | ~5 | 5 | 5 | PASS |
-| wire/ethernet | ~8 | 4 | 4 | PASS |
-| wire/arp | ~6 | 5 | 5 | PASS |
-| wire/ipv4 | ~15 | 6 | 6 | PASS |
-| wire/tcp | ~20 | 13 | 13 | PASS |
-| wire/udp | ~8 | 4 | 4 | PASS |
-| wire/icmp | ~10 | 4 | 4 | PASS |
+| wire/checksum | 5 | 5 | 5 | PASS |
+| wire/ethernet | 5 | 5 | 5 | PASS |
+| wire/arp | 4 | 5 | 5 | PASS |
+| wire/ipv4 | 15 | 7 | 7 | PASS |
+| wire/tcp | 9 | 13 | 13 | PASS |
+| wire/udp | 8 | 4 | 4 | PASS |
+| wire/icmp | 5 | 4 | 4 | PASS |
 | storage/ring_buffer | 15 | 14 | 14 | PASS |
 | storage/assembler | 38 | 37 | 37 | PASS |
-| time | ~10 | 8 | 8 | PASS |
+| time | 10 | 8 | 8 | PASS |
 | socket/tcp | 175 | 172 | 172 | PASS |
-| socket/udp | ~15 | 16 | 16 | PASS |
+| socket/udp | 16 | 16 | 16 | PASS |
 | socket/dhcp | ~12 | 0 | -- | TODO |
 | socket/dns | ~10 | 0 | -- | TODO |
-| socket/icmp | ~8 | 6 | 6 | PASS |
+| socket/icmp | 6 | 6 | 6 | PASS |
 | iface | ~25 | 0 | -- | TODO |
 
 ## Wire Layer Tests
@@ -38,6 +38,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | smoltcp Reference | zmoltcp Test | Status |
 |---|---|---|
 | wire/ethernet.rs:test_parse | "parse ethernet frame" | PASS |
+| (original) | "parse ethernet truncated" | PASS |
 | wire/ethernet.rs:test_emit | "emit ethernet frame" | PASS |
 | wire/ethernet.rs:roundtrip | "ethernet roundtrip" | PASS |
 | (original) | "payload extraction" | PASS |
@@ -60,6 +61,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | (original) | "parse IPv4 bad IHL" | PASS |
 | wire/ipv4.rs:roundtrip | "IPv4 roundtrip" | PASS |
 | (original) | "IPv4 emit produces valid checksum" | PASS |
+| (original) | "IPv4 payload extraction" | PASS |
 
 ### wire/tcp.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -70,6 +72,13 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/tcp.rs:test_parse_options | "parse TCP with MSS option" | PASS |
 | wire/tcp.rs:roundtrip | "TCP SYN roundtrip" | PASS |
 | (original) | "TCP checksum computation" | PASS |
+| (original) | "SeqNumber wrapping add and sub" | PASS |
+| (original) | "SeqNumber signed comparison across wrap boundary" | PASS |
+| (original) | "SeqNumber diff" | PASS |
+| (original) | "SeqNumber max and min" | PASS |
+| (original) | "Control seqLen" | PASS |
+| (original) | "Control from and to Flags" | PASS |
+| (original) | "Control quashPsh" | PASS |
 
 ### wire/udp.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -147,6 +156,20 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | storage/assembler.rs:test_add_then_remove_front_at_front_touch | "add then remove front touching" | PASS |
 | storage/assembler.rs:test_add_then_remove_front_at_front_full | "add then remove front when full" | PASS |
 | storage/assembler.rs:test_add_then_remove_front_at_front_full_offset_0 | "add then remove front offset 0 when full" | PASS |
+
+## Time Tests
+
+### time.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| time.rs:test_instant_ops | "instant arithmetic" | PASS |
+| time.rs:test_instant_getters | "instant getters" | PASS |
+| time.rs:test_duration_ops | "duration arithmetic" | PASS |
+| time.rs:test_duration_getters | "duration getters" | PASS |
+| (original) | "instant diff" | PASS |
+| (original) | "instant comparison" | PASS |
+| (original) | "duration clamp" | PASS |
+| time.rs:test_sub_from_zero_overflow | "duration saturating subtract" | PASS |
 
 ## Socket Layer Tests
 
