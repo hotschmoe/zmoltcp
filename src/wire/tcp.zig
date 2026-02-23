@@ -2,10 +2,117 @@
 //
 // Reference: RFC 793, smoltcp src/wire/tcp.rs
 
+const std = @import("std");
 const checksum = @import("checksum.zig");
 
 pub const HEADER_LEN = 20; // Minimum (no options)
 pub const MAX_HEADER_LEN = 60; // data_offset=15 * 4
+
+// -------------------------------------------------------------------------
+// Sequence Number (modular 2^32 arithmetic)
+// -------------------------------------------------------------------------
+
+// [smoltcp:wire/tcp.rs:SeqNumber]
+pub const SeqNumber = struct {
+    value: i32,
+
+    pub const ZERO: SeqNumber = .{ .value = 0 };
+
+    pub fn fromU32(v: u32) SeqNumber {
+        return .{ .value = @bitCast(v) };
+    }
+
+    pub fn toU32(self: SeqNumber) u32 {
+        return @bitCast(self.value);
+    }
+
+    pub fn add(self: SeqNumber, n: usize) SeqNumber {
+        std.debug.assert(n <= std.math.maxInt(i32));
+        return .{ .value = self.value +% @as(i32, @intCast(n)) };
+    }
+
+    pub fn sub(self: SeqNumber, n: usize) SeqNumber {
+        std.debug.assert(n <= std.math.maxInt(i32));
+        return .{ .value = self.value -% @as(i32, @intCast(n)) };
+    }
+
+    pub fn diff(self: SeqNumber, other: SeqNumber) usize {
+        const result = self.value -% other.value;
+        std.debug.assert(result >= 0);
+        return @intCast(result);
+    }
+
+    pub fn cmp(self: SeqNumber, other: SeqNumber) std.math.Order {
+        const d = self.value -% other.value;
+        return std.math.order(d, @as(i32, 0));
+    }
+
+    pub fn lessThan(self: SeqNumber, other: SeqNumber) bool {
+        return self.cmp(other) == .lt;
+    }
+
+    pub fn greaterThan(self: SeqNumber, other: SeqNumber) bool {
+        return self.cmp(other) == .gt;
+    }
+
+    pub fn greaterThanOrEqual(self: SeqNumber, other: SeqNumber) bool {
+        return self.cmp(other) != .lt;
+    }
+
+    pub fn eql(self: SeqNumber, other: SeqNumber) bool {
+        return self.value == other.value;
+    }
+
+    pub fn max(self: SeqNumber, other: SeqNumber) SeqNumber {
+        return if (self.greaterThanOrEqual(other)) self else other;
+    }
+
+    pub fn min(self: SeqNumber, other: SeqNumber) SeqNumber {
+        return if (self.lessThan(other)) self else other;
+    }
+};
+
+// -------------------------------------------------------------------------
+// Control (abstract single control signal for socket layer)
+// -------------------------------------------------------------------------
+
+// [smoltcp:wire/tcp.rs:Control]
+pub const Control = enum {
+    none,
+    psh,
+    syn,
+    fin,
+    rst,
+
+    pub fn seqLen(self: Control) usize {
+        return switch (self) {
+            .syn, .fin => 1,
+            .none, .psh, .rst => 0,
+        };
+    }
+
+    pub fn quashPsh(self: Control) Control {
+        return if (self == .psh) .none else self;
+    }
+
+    pub fn fromFlags(flags: Flags) Control {
+        if (flags.rst) return .rst;
+        if (flags.fin) return .fin;
+        if (flags.syn) return .syn;
+        if (flags.psh) return .psh;
+        return .none;
+    }
+
+    pub fn applyToFlags(self: Control, flags: *Flags) void {
+        switch (self) {
+            .none => {},
+            .psh => flags.psh = true,
+            .syn => flags.syn = true,
+            .fin => flags.fin = true,
+            .rst => flags.rst = true,
+        }
+    }
+};
 
 pub const Flags = struct {
     fin: bool = false,
@@ -296,4 +403,82 @@ test "TCP checksum computation" {
     tcp_bytes[16] = @truncate(cksum >> 8);
     tcp_bytes[17] = @truncate(cksum & 0xFF);
     try testing.expectEqual(@as(u16, 0), computeChecksum(src_ip, dst_ip, &tcp_bytes));
+}
+
+// [smoltcp:wire/tcp.rs:SeqNumber - wrapping arithmetic]
+test "SeqNumber wrapping add and sub" {
+    const s = SeqNumber.fromU32(0xFFFF_FFFE);
+    const s2 = s.add(5);
+    try testing.expectEqual(@as(u32, 3), s2.toU32());
+    const s3 = s2.sub(5);
+    try testing.expect(s3.eql(s));
+}
+
+test "SeqNumber signed comparison across wrap boundary" {
+    // smoltcp uses REMOTE_SEQ = TcpSeqNumber(-10001)
+    const remote_seq = SeqNumber{ .value = -10001 };
+    const remote_seq_plus1 = remote_seq.add(1);
+
+    // -10001 < -10000 in sequence space (adjacent)
+    try testing.expect(remote_seq.lessThan(remote_seq_plus1));
+
+    // Wrapping across 2^31 boundary
+    const a = SeqNumber{ .value = @as(i32, std.math.maxInt(i32)) };
+    const b = a.add(1);
+    try testing.expect(a.lessThan(b));
+    try testing.expect(b.greaterThan(a));
+}
+
+test "SeqNumber diff" {
+    const a = SeqNumber{ .value = 100 };
+    const b = SeqNumber{ .value = 90 };
+    try testing.expectEqual(@as(usize, 10), a.diff(b));
+
+    // Wrapping diff
+    const c = SeqNumber.fromU32(5);
+    const d = SeqNumber.fromU32(0xFFFF_FFFC);
+    try testing.expectEqual(@as(usize, 9), c.diff(d));
+}
+
+test "SeqNumber max and min" {
+    const a = SeqNumber{ .value = 100 };
+    const b = SeqNumber{ .value = 200 };
+    try testing.expect(a.max(b).eql(b));
+    try testing.expect(a.min(b).eql(a));
+}
+
+test "Control seqLen" {
+    try testing.expectEqual(@as(usize, 1), Control.syn.seqLen());
+    try testing.expectEqual(@as(usize, 1), Control.fin.seqLen());
+    try testing.expectEqual(@as(usize, 0), Control.none.seqLen());
+    try testing.expectEqual(@as(usize, 0), Control.psh.seqLen());
+    try testing.expectEqual(@as(usize, 0), Control.rst.seqLen());
+}
+
+test "Control from and to Flags" {
+    var flags = Flags{ .syn = true };
+    try testing.expectEqual(Control.syn, Control.fromFlags(flags));
+
+    flags = Flags{ .fin = true };
+    try testing.expectEqual(Control.fin, Control.fromFlags(flags));
+
+    flags = Flags{ .rst = true, .fin = true };
+    try testing.expectEqual(Control.rst, Control.fromFlags(flags));
+
+    flags = Flags{ .psh = true };
+    try testing.expectEqual(Control.psh, Control.fromFlags(flags));
+
+    flags = Flags{};
+    try testing.expectEqual(Control.none, Control.fromFlags(flags));
+
+    // applyToFlags roundtrip
+    var out_flags = Flags{};
+    Control.syn.applyToFlags(&out_flags);
+    try testing.expect(out_flags.syn);
+}
+
+test "Control quashPsh" {
+    try testing.expectEqual(Control.none, Control.psh.quashPsh());
+    try testing.expectEqual(Control.syn, Control.syn.quashPsh());
+    try testing.expectEqual(Control.fin, Control.fin.quashPsh());
 }

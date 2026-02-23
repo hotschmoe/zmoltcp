@@ -18,6 +18,12 @@ pub const storage = struct {
     pub const assembler = @import("storage/assembler.zig");
 };
 
+pub const time = @import("time.zig");
+
+pub const socket = struct {
+    pub const tcp = @import("socket/tcp.zig");
+};
+
 test {
     @import("std").testing.refAllDecls(@This());
 }
