@@ -23,8 +23,28 @@ pub const time = @import("time.zig");
 pub const socket = struct {
     pub const tcp = @import("socket/tcp.zig");
     pub const udp = @import("socket/udp.zig");
+    pub const icmp = @import("socket/icmp.zig");
 };
 
 test {
+    // refAllDecls ensures all declarations compile but does NOT discover
+    // tests inside modules imported within struct namespaces. Explicit
+    // imports below make the test runner collect every module's tests.
     @import("std").testing.refAllDecls(@This());
+
+    _ = @import("wire/checksum.zig");
+    _ = @import("wire/ethernet.zig");
+    _ = @import("wire/arp.zig");
+    _ = @import("wire/ipv4.zig");
+    _ = @import("wire/udp.zig");
+    _ = @import("wire/icmp.zig");
+    _ = @import("storage/ring_buffer.zig");
+    _ = @import("storage/assembler.zig");
+    _ = @import("socket/udp.zig");
+    _ = @import("socket/icmp.zig");
+    // TODO: wire/tcp.zig has a switch exhaustiveness issue (sack/timestamps);
+    // socket/tcp.zig test helpers pass *const to []u8 params. Both are
+    // pre-existing and need separate fixes before inclusion here.
+    // _ = @import("wire/tcp.zig");
+    // _ = @import("socket/tcp.zig");
 }

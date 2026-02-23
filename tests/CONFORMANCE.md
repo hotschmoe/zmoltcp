@@ -20,7 +20,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | socket/udp | ~15 | 16 | 16 | PASS |
 | socket/dhcp | ~12 | 0 | -- | TODO |
 | socket/dns | ~10 | 0 | -- | TODO |
-| socket/icmp | ~8 | 0 | -- | TODO |
+| socket/icmp | ~8 | 6 | 6 | PASS |
 | iface | ~25 | 0 | -- | TODO |
 
 ## Wire Layer Tests
@@ -344,3 +344,13 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | socket/udp.rs:test_send_large_packet | "payload exceeding capacity returns BufferFull" | PASS |
 | socket/udp.rs:test_process_empty_payload | "zero-length datagram is valid" | PASS |
 | socket/udp.rs:test_closing | "close resets socket" | PASS |
+
+### socket/icmp.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| socket/icmp.rs:test_send_unaddressable | "send rejects unaddressable destination" | PASS |
+| socket/icmp.rs:test_send_dispatch | "send and dispatch outbound packet" | PASS |
+| socket/icmp.rs:test_set_hop_limit_v4 | "hop limit propagates to dispatch" | PASS |
+| socket/icmp.rs:test_recv_process | "process inbound and recv" | PASS |
+| socket/icmp.rs:test_accept_bad_id | "rejects packet with wrong identifier" | PASS |
+| socket/icmp.rs:test_accepts_udp | "accepts ICMP error for bound UDP port" | PASS |
