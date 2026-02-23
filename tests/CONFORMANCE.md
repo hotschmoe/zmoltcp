@@ -16,7 +16,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | storage/ring_buffer | 15 | 14 | 14 | PASS |
 | storage/assembler | 38 | 37 | 37 | PASS |
 | time | ~10 | 8 | 8 | PASS |
-| socket/tcp | 175 | 178 | 178 | PASS |
+| socket/tcp | 175 | 172 | 172 | PASS |
 | socket/udp | ~15 | 0 | -- | TODO |
 | socket/dhcp | ~12 | 0 | -- | TODO |
 | socket/dns | ~10 | 0 | -- | TODO |
@@ -171,9 +171,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | test_listen_sack_option | "listen sack option disabled" | PASS |
 | test_syn_received_ack | "SYN-RECEIVED receives ACK -> ESTABLISHED" | PASS |
 | test_syn_received_close | "SYN-RECEIVED close -> FIN-WAIT-1" | PASS |
-| test_syn_received_close | "SYN-RECEIVED close goes to FIN-WAIT-1" | PASS |
 | test_syn_received_rst | "SYN-RECEIVED RST returns to LISTEN" | PASS |
-| test_syn_received_bad_ack | "SYN-RECEIVED rejects ACK with wrong number" | PASS |
 | test_syn_received_bad_ack | "SYN-RECEIVED rejects ACK too high" | PASS |
 | test_syn_received_bad_ack | "SYN-RECEIVED rejects ACK too low" | PASS |
 | test_syn_received_fin | "SYN-RECEIVED recv FIN -> CLOSE-WAIT" | PASS |
@@ -200,7 +198,6 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | test_established_send_recv | "ESTABLISHED send and receive" | PASS |
 | test_established_recv_fin | "ESTABLISHED recv FIN -> CLOSE-WAIT" | PASS |
 | test_established_recv_fin | "ESTABLISHED recv FIN with ACK" | PASS |
-| test_established_close | "ESTABLISHED close -> FIN-WAIT-1" | PASS |
 | test_established_close | "ESTABLISHED close sets FIN-WAIT-1 state" | PASS |
 | test_established_abort | "ESTABLISHED abort sends RST" | PASS |
 | test_established_rst | "ESTABLISHED recv RST -> CLOSED" | PASS |
@@ -208,7 +205,6 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | test_established_recv_fin_data | "ESTABLISHED recv FIN while send data queued" | PASS |
 | test_established_send_buf_gt_win | "ESTABLISHED send more data than window" | PASS |
 | test_established_send_no_ack_send | "ESTABLISHED send two segments without ACK (nagle off)" | PASS |
-| test_established_no_ack | "ESTABLISHED rejects packet without ACK" | PASS |
 | test_established_no_ack | "ESTABLISHED rejects packet without ACK and stays established" | PASS |
 | test_established_bad_ack | "ESTABLISHED ignores ACK too low" | PASS |
 | test_established_bad_seq | "ESTABLISHED bad seq gets challenge ACK" | PASS |
@@ -239,10 +235,8 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | test_time_wait_retransmit | "time wait retransmit" | PASS |
 | test_time_wait_no_window_update | "TIME-WAIT no window update" | PASS |
 | test_close_wait_ack | "CLOSE-WAIT send data and receive ACK" | PASS |
-| test_close_wait_close | "CLOSE-WAIT close -> LAST-ACK" | PASS |
 | test_close_wait_close | "CLOSE-WAIT close sets LAST-ACK state" | PASS |
 | test_close_wait_no_window_update | "close wait no window update" | PASS |
-| test_last_ack_ack | "LAST-ACK recv ACK of FIN -> CLOSED" | PASS |
 | test_last_ack_fin_ack | "LAST-ACK dispatches FIN then ACK -> CLOSED" | PASS |
 | test_last_ack_ack_not_of_fin | "LAST-ACK stays until FIN is acked" | PASS |
 | test_last_ack_close | "LAST-ACK close is noop" | PASS |
