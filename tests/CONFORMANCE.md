@@ -13,8 +13,8 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/tcp | ~20 | 6 | 6 | PASS |
 | wire/udp | ~8 | 4 | 4 | PASS |
 | wire/icmp | ~10 | 4 | 4 | PASS |
-| storage/ring_buffer | ~15 | 14 | 14 | PASS |
-| storage/assembler | ~37 | 37 | 37 | PASS |
+| storage/ring_buffer | 15 | 14 | 14 | PASS |
+| storage/assembler | 38 | 37 | 37 | PASS |
 | socket/tcp | 175 | 0 | -- | TODO |
 | socket/udp | ~15 | 0 | -- | TODO |
 | socket/dhcp | ~12 | 0 | -- | TODO |

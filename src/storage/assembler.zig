@@ -18,10 +18,10 @@ pub fn Assembler(comptime max_segment_count: usize) type {
         const Self = @This();
 
         const Contig = struct {
-            hole_size: usize,
-            data_size: usize,
+            hole_size: usize = 0,
+            data_size: usize = 0,
 
-            const empty_val: Contig = .{ .hole_size = 0, .data_size = 0 };
+            const empty: Contig = .{};
 
             fn hasHole(self: Contig) bool {
                 return self.hole_size != 0;
@@ -33,10 +33,6 @@ pub fn Assembler(comptime max_segment_count: usize) type {
 
             fn totalSize(self: Contig) usize {
                 return self.hole_size + self.data_size;
-            }
-
-            fn shrinkHoleBy(self: *Contig, size: usize) void {
-                self.hole_size -= size;
             }
 
             fn shrinkHoleTo(self: *Contig, size: usize) void {
@@ -51,12 +47,12 @@ pub fn Assembler(comptime max_segment_count: usize) type {
 
         pub fn init() Self {
             return .{
-                .contigs = [_]Contig{Contig.empty_val} ** max_segment_count,
+                .contigs = [_]Contig{Contig.empty} ** max_segment_count,
             };
         }
 
         pub fn clear(self: *Self) void {
-            self.contigs = [_]Contig{Contig.empty_val} ** max_segment_count;
+            self.contigs = [_]Contig{Contig.empty} ** max_segment_count;
         }
 
         pub fn isEmpty(self: Self) bool {
@@ -75,7 +71,7 @@ pub fn Assembler(comptime max_segment_count: usize) type {
                 if (!self.contigs[i].hasData()) return;
                 self.contigs[i] = self.contigs[i + 1];
             }
-            self.contigs[max_segment_count - 1] = Contig.empty_val;
+            self.contigs[max_segment_count - 1] = Contig.empty;
         }
 
         fn addContigAt(self: *Self, at: usize) error{TooManyHoles}!*Contig {
@@ -86,7 +82,7 @@ pub fn Assembler(comptime max_segment_count: usize) type {
             while (i > at) : (i -= 1) {
                 self.contigs[i] = self.contigs[i - 1];
             }
-            self.contigs[at] = Contig.empty_val;
+            self.contigs[at] = Contig.empty;
             return &self.contigs[at];
         }
 
@@ -120,7 +116,7 @@ pub fn Assembler(comptime max_segment_count: usize) type {
                     const new_contig = try self.addContigAt(i);
                     new_contig.hole_size = offset;
                     new_contig.data_size = size;
-                    self.contigs[i + 1].shrinkHoleBy(offset + size);
+                    self.contigs[i + 1].hole_size -= offset + size;
                     return;
                 }
                 // Range covers part of hole and part of data.
@@ -144,7 +140,7 @@ pub fn Assembler(comptime max_segment_count: usize) type {
                     if (x + shift < max_segment_count) {
                         self.contigs[x] = self.contigs[x + shift];
                     } else {
-                        self.contigs[x] = Contig.empty_val;
+                        self.contigs[x] = Contig.empty;
                     }
                 }
             }
@@ -165,7 +161,6 @@ pub fn Assembler(comptime max_segment_count: usize) type {
                 return 0;
             }
             self.removeContigAt(0);
-            std.debug.assert(front.data_size > 0);
             return front.data_size;
         }
 
@@ -399,15 +394,7 @@ test "remove front boundary case max contigs" {
         asmb.contigs[i] = .{ .hole_size = 1, .data_size = 1 };
     }
     try testing.expectEqual(@as(usize, 2), asmb.removeFront());
-    // After removal, shift left: 3 contigs of (1,1), last slot empty
-    try testing.expectEqual(@as(usize, 1), asmb.contigs[0].hole_size);
-    try testing.expectEqual(@as(usize, 1), asmb.contigs[0].data_size);
-    try testing.expectEqual(@as(usize, 1), asmb.contigs[1].hole_size);
-    try testing.expectEqual(@as(usize, 1), asmb.contigs[1].data_size);
-    try testing.expectEqual(@as(usize, 1), asmb.contigs[2].hole_size);
-    try testing.expectEqual(@as(usize, 1), asmb.contigs[2].data_size);
-    try testing.expectEqual(@as(usize, 0), asmb.contigs[3].hole_size);
-    try testing.expectEqual(@as(usize, 0), asmb.contigs[3].data_size);
+    try expectContigs(&.{ .{ 1, 1 }, .{ 1, 1 }, .{ 1, 1 } }, &asmb);
 }
 
 // [smoltcp:storage/assembler.rs:test_shrink_next_hole]

@@ -58,19 +58,15 @@ pub fn RingBuffer(comptime T: type) type {
         }
 
         fn getIdx(self: Self, idx: usize) usize {
-            const cap = self.capacity();
-            if (cap > 0) {
-                return (self.read_at + idx) % cap;
-            } else {
-                return 0;
-            }
+            if (self.storage.len == 0) return 0;
+            return (self.read_at + idx) % self.storage.len;
         }
 
         // -- Discrete (single element) --
 
         pub fn enqueueOne(self: *Self) error{Full}!*T {
             if (self.isFull()) return error.Full;
-            const index = (self.read_at + self.length) % self.capacity();
+            const index = self.getIdx(self.length);
             self.length += 1;
             return &self.storage[index];
         }
@@ -97,13 +93,11 @@ pub fn RingBuffer(comptime T: type) type {
         }
 
         pub fn dequeueMany(self: *Self, max: usize) []T {
-            const cap = self.capacity();
-            const contig = @min(self.length, cap - self.read_at);
+            if (self.storage.len == 0) return self.storage[0..0];
+            const contig = @min(self.length, self.storage.len - self.read_at);
             const size = @min(max, contig);
             const start = self.read_at;
-            if (cap > 0) {
-                self.read_at = (self.read_at + size) % cap;
-            }
+            self.read_at = (self.read_at + size) % self.storage.len;
             self.length -= size;
             return self.storage[start..][0..size];
         }
@@ -111,59 +105,36 @@ pub fn RingBuffer(comptime T: type) type {
         // -- Slice Copy (handles wrap-around via two calls) --
 
         pub fn enqueueSlice(self: *Self, data: []const T) usize {
-            const size_1 = blk: {
-                const buf = self.enqueueMany(data.len);
-                @memcpy(buf, data[0..buf.len]);
-                break :blk buf.len;
-            };
-            const size_2 = blk: {
-                const remaining = data[size_1..];
-                const buf = self.enqueueMany(remaining.len);
-                @memcpy(buf, remaining[0..buf.len]);
-                break :blk buf.len;
-            };
-            return size_1 + size_2;
+            const first = self.enqueueMany(data.len);
+            @memcpy(first, data[0..first.len]);
+            const second = self.enqueueMany(data[first.len..].len);
+            @memcpy(second, data[first.len..][0..second.len]);
+            return first.len + second.len;
         }
 
         pub fn dequeueSlice(self: *Self, data: []T) usize {
-            const size_1 = blk: {
-                const buf = self.dequeueMany(data.len);
-                @memcpy(data[0..buf.len], buf);
-                break :blk buf.len;
-            };
-            const size_2 = blk: {
-                const remaining = data[size_1..];
-                const buf = self.dequeueMany(remaining.len);
-                @memcpy(remaining[0..buf.len], buf);
-                break :blk buf.len;
-            };
-            return size_1 + size_2;
+            const first = self.dequeueMany(data.len);
+            @memcpy(data[0..first.len], first);
+            const second = self.dequeueMany(data[first.len..].len);
+            @memcpy(data[first.len..][0..second.len], second);
+            return first.len + second.len;
         }
 
         // -- Random Access (for TCP out-of-order segments) --
 
         pub fn getUnallocated(self: *Self, offset: usize, max: usize) []T {
-            const start_at = self.getIdx(self.length + offset);
             if (offset > self.window()) return self.storage[0..0];
-            const clamped = self.window() - offset;
-            var size = @min(max, clamped);
-            const until_end = self.capacity() - start_at;
-            size = @min(size, until_end);
+            const start_at = self.getIdx(self.length + offset);
+            const size = @min(max, @min(self.window() - offset, self.storage.len - start_at));
             return self.storage[start_at..][0..size];
         }
 
         pub fn writeUnallocated(self: *Self, offset: usize, data: []const T) usize {
-            const size_1 = blk: {
-                const slice = self.getUnallocated(offset, data.len);
-                @memcpy(slice, data[0..slice.len]);
-                break :blk slice.len;
-            };
-            const size_2 = blk: {
-                const slice = self.getUnallocated(offset + size_1, data[size_1..].len);
-                @memcpy(slice, data[size_1..][0..slice.len]);
-                break :blk slice.len;
-            };
-            return size_1 + size_2;
+            const first = self.getUnallocated(offset, data.len);
+            @memcpy(first, data[0..first.len]);
+            const second = self.getUnallocated(offset + first.len, data[first.len..].len);
+            @memcpy(second, data[first.len..][0..second.len]);
+            return first.len + second.len;
         }
 
         pub fn enqueueUnallocated(self: *Self, count: usize) void {
@@ -172,27 +143,18 @@ pub fn RingBuffer(comptime T: type) type {
         }
 
         pub fn getAllocated(self: Self, offset: usize, max: usize) []const T {
-            const start_at = self.getIdx(offset);
             if (offset > self.length) return self.storage[0..0];
-            const clamped = self.length - offset;
-            var size = @min(max, clamped);
-            const until_end = self.capacity() - start_at;
-            size = @min(size, until_end);
+            const start_at = self.getIdx(offset);
+            const size = @min(max, @min(self.length - offset, self.storage.len - start_at));
             return self.storage[start_at..][0..size];
         }
 
         pub fn readAllocated(self: *Self, offset: usize, data: []T) usize {
-            const size_1 = blk: {
-                const slice = self.getAllocated(offset, data.len);
-                @memcpy(data[0..slice.len], slice);
-                break :blk slice.len;
-            };
-            const size_2 = blk: {
-                const slice = self.getAllocated(offset + size_1, data[size_1..].len);
-                @memcpy(data[size_1..][0..slice.len], slice);
-                break :blk slice.len;
-            };
-            return size_1 + size_2;
+            const first = self.getAllocated(offset, data.len);
+            @memcpy(data[0..first.len], first);
+            const second = self.getAllocated(offset + first.len, data[first.len..].len);
+            @memcpy(data[first.len..][0..second.len], second);
+            return first.len + second.len;
         }
 
         pub fn dequeueAllocated(self: *Self, count: usize) void {
@@ -209,10 +171,6 @@ pub fn RingBuffer(comptime T: type) type {
 
 const testing = std.testing;
 const RingBufU8 = RingBuffer(u8);
-
-fn storageAsStr(ring: *const RingBufU8) []const u8 {
-    return ring.storage;
-}
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_length_changes]
 test "buffer length and capacity tracking" {
@@ -274,38 +232,26 @@ test "enqueue many with wrap-around" {
     var backing = [_]u8{'.'} ** 12;
     var ring = RingBufU8.init(&backing);
 
-    // First enqueue: buffer empty, read_at resets to 0, full 12 contiguous
-    {
-        const buf = ring.enqueueMany(12);
-        try testing.expectEqual(@as(usize, 12), buf.len);
-        @memcpy(buf[0..2], "ab");
-        // enqueueMany committed 12, but we only wrote 2 -- adjust
-        ring.length = 2;
-    }
-    // Redo: use enqueueMany properly
-    ring.clear();
-    @memset(ring.storage, '.');
-
     {
         const buf = ring.enqueueMany(2);
         @memcpy(buf, "ab");
     }
     try testing.expectEqual(@as(usize, 2), ring.len());
-    try testing.expectEqualStrings("ab..........", storageAsStr(&ring));
+    try testing.expectEqualStrings("ab..........", ring.storage);
 
     {
         const buf = ring.enqueueMany(2);
         @memcpy(buf, "cd");
     }
     try testing.expectEqual(@as(usize, 4), ring.len());
-    try testing.expectEqualStrings("abcd........", storageAsStr(&ring));
+    try testing.expectEqualStrings("abcd........", ring.storage);
 
     {
         const buf = ring.enqueueMany(4);
         @memcpy(buf, "efgh");
     }
     try testing.expectEqual(@as(usize, 8), ring.len());
-    try testing.expectEqualStrings("abcdefgh....", storageAsStr(&ring));
+    try testing.expectEqualStrings("abcdefgh....", ring.storage);
 
     // Dequeue 4 from front
     for (0..4) |_| {
@@ -313,7 +259,7 @@ test "enqueue many with wrap-around" {
         e.* = '.';
     }
     try testing.expectEqual(@as(usize, 4), ring.len());
-    try testing.expectEqualStrings("....efgh....", storageAsStr(&ring));
+    try testing.expectEqualStrings("....efgh....", ring.storage);
 
     // Enqueue 4 at tail (positions 8..12)
     {
@@ -322,7 +268,7 @@ test "enqueue many with wrap-around" {
         @memcpy(buf, "ijkl");
     }
     try testing.expectEqual(@as(usize, 8), ring.len());
-    try testing.expectEqualStrings("....efghijkl", storageAsStr(&ring));
+    try testing.expectEqualStrings("....efghijkl", ring.storage);
 
     // Enqueue 4 more -- wraps to positions 0..4
     {
@@ -331,7 +277,7 @@ test "enqueue many with wrap-around" {
         @memcpy(buf, "abcd");
     }
     try testing.expectEqual(@as(usize, 12), ring.len());
-    try testing.expectEqualStrings("abcdefghijkl", storageAsStr(&ring));
+    try testing.expectEqualStrings("abcdefghijkl", ring.storage);
 
     // Dequeue 4 again
     for (0..4) |_| {
@@ -339,7 +285,7 @@ test "enqueue many with wrap-around" {
         e.* = '.';
     }
     try testing.expectEqual(@as(usize, 8), ring.len());
-    try testing.expectEqualStrings("abcd....ijkl", storageAsStr(&ring));
+    try testing.expectEqualStrings("abcd....ijkl", ring.storage);
 }
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_enqueue_many]
@@ -352,7 +298,7 @@ test "enqueue many contiguous" {
         @memcpy(buf, "abcdefgh");
     }
     try testing.expectEqual(@as(usize, 8), ring.len());
-    try testing.expectEqualStrings("abcdefgh....", storageAsStr(&ring));
+    try testing.expectEqualStrings("abcdefgh....", ring.storage);
 
     // Request 8 but only 4 contiguous remain at end
     {
@@ -361,7 +307,7 @@ test "enqueue many contiguous" {
         @memcpy(buf, "ijkl");
     }
     try testing.expectEqual(@as(usize, 12), ring.len());
-    try testing.expectEqualStrings("abcdefghijkl", storageAsStr(&ring));
+    try testing.expectEqualStrings("abcdefghijkl", ring.storage);
 }
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_enqueue_slice]
@@ -371,18 +317,18 @@ test "enqueue slice with wrap-around" {
 
     try testing.expectEqual(@as(usize, 8), ring.enqueueSlice("abcdefgh"));
     try testing.expectEqual(@as(usize, 8), ring.len());
-    try testing.expectEqualStrings("abcdefgh....", storageAsStr(&ring));
+    try testing.expectEqualStrings("abcdefgh....", ring.storage);
 
     for (0..4) |_| {
         const e = try ring.dequeueOne();
         e.* = '.';
     }
     try testing.expectEqual(@as(usize, 4), ring.len());
-    try testing.expectEqualStrings("....efgh....", storageAsStr(&ring));
+    try testing.expectEqualStrings("....efgh....", ring.storage);
 
     try testing.expectEqual(@as(usize, 8), ring.enqueueSlice("ijklabcd"));
     try testing.expectEqual(@as(usize, 12), ring.len());
-    try testing.expectEqualStrings("abcdefghijkl", storageAsStr(&ring));
+    try testing.expectEqualStrings("abcdefghijkl", ring.storage);
 }
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_dequeue_many_with]
@@ -390,19 +336,6 @@ test "dequeue many with wrap-around" {
     var backing = [_]u8{'.'} ** 12;
     var ring = RingBufU8.init(&backing);
 
-    try testing.expectEqual(@as(usize, 12), ring.enqueueSlice("abcdefghijkl"));
-
-    // Dequeue first 4
-    {
-        const buf = ring.dequeueMany(12);
-        try testing.expectEqual(@as(usize, 12), buf.len);
-        try testing.expectEqualStrings("abcdefghijkl", buf);
-        @memcpy(buf[0..4], "....");
-        // dequeueMany committed 12 but we want only 4 consumed -- adjust
-    }
-    // Redo: proper step-by-step
-    ring.clear();
-    @memset(ring.storage, '.');
     _ = ring.enqueueSlice("abcdefghijkl");
 
     {
@@ -411,7 +344,7 @@ test "dequeue many with wrap-around" {
         @memset(buf, '.');
     }
     try testing.expectEqual(@as(usize, 8), ring.len());
-    try testing.expectEqualStrings("....efghijkl", storageAsStr(&ring));
+    try testing.expectEqualStrings("....efghijkl", ring.storage);
 
     {
         const buf = ring.dequeueMany(4);
@@ -419,7 +352,7 @@ test "dequeue many with wrap-around" {
         @memset(buf, '.');
     }
     try testing.expectEqual(@as(usize, 4), ring.len());
-    try testing.expectEqualStrings("........ijkl", storageAsStr(&ring));
+    try testing.expectEqualStrings("........ijkl", ring.storage);
 
     _ = ring.enqueueSlice("abcd");
     try testing.expectEqual(@as(usize, 8), ring.len());
@@ -436,7 +369,7 @@ test "dequeue many with wrap-around" {
         @memset(buf, '.');
     }
     try testing.expectEqual(@as(usize, 0), ring.len());
-    try testing.expectEqualStrings("............", storageAsStr(&ring));
+    try testing.expectEqualStrings("............", ring.storage);
 }
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_dequeue_many]
@@ -452,7 +385,7 @@ test "dequeue many contiguous" {
         @memset(buf, '.');
     }
     try testing.expectEqual(@as(usize, 4), ring.len());
-    try testing.expectEqualStrings("........ijkl", storageAsStr(&ring));
+    try testing.expectEqualStrings("........ijkl", ring.storage);
 
     {
         const buf = ring.dequeueMany(8);
@@ -460,7 +393,7 @@ test "dequeue many contiguous" {
         @memset(buf, '.');
     }
     try testing.expectEqual(@as(usize, 0), ring.len());
-    try testing.expectEqualStrings("............", storageAsStr(&ring));
+    try testing.expectEqualStrings("............", ring.storage);
 }
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_dequeue_slice]
@@ -500,7 +433,7 @@ test "get unallocated with offset and wrap" {
         const buf = ring.getUnallocated(0, 4);
         @memcpy(buf, "abcd");
     }
-    try testing.expectEqualStrings("abcd........", storageAsStr(&ring));
+    try testing.expectEqualStrings("abcd........", ring.storage);
 
     // Commit 4 via enqueueMany
     {
@@ -514,20 +447,20 @@ test "get unallocated with offset and wrap" {
         const buf = ring.getUnallocated(4, 8);
         @memcpy(buf, "ijkl");
     }
-    try testing.expectEqualStrings("abcd....ijkl", storageAsStr(&ring));
+    try testing.expectEqualStrings("abcd....ijkl", ring.storage);
 
     // Fill 8 more, dequeue 4
     @memcpy(ring.enqueueMany(8), "EFGHIJKL");
     @memset(ring.dequeueMany(4), '.');
     try testing.expectEqual(@as(usize, 8), ring.len());
-    try testing.expectEqualStrings("....EFGHIJKL", storageAsStr(&ring));
+    try testing.expectEqualStrings("....EFGHIJKL", ring.storage);
 
     // Write at offset 0 past allocated (wraps to position 0..4)
     {
         const buf = ring.getUnallocated(0, 8);
         @memcpy(buf, "ABCD");
     }
-    try testing.expectEqualStrings("ABCDEFGHIJKL", storageAsStr(&ring));
+    try testing.expectEqualStrings("ABCDEFGHIJKL", ring.storage);
 }
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_write_unallocated]
