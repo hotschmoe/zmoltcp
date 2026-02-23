@@ -22,6 +22,7 @@ pub const time = @import("time.zig");
 
 pub const socket = struct {
     pub const tcp = @import("socket/tcp.zig");
+    pub const udp = @import("socket/udp.zig");
 };
 
 test {

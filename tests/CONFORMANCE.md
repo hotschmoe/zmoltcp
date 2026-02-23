@@ -17,7 +17,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | storage/assembler | 38 | 37 | 37 | PASS |
 | time | ~10 | 8 | 8 | PASS |
 | socket/tcp | 175 | 172 | 172 | PASS |
-| socket/udp | ~15 | 0 | -- | TODO |
+| socket/udp | ~15 | 16 | 16 | PASS |
 | socket/dhcp | ~12 | 0 | -- | TODO |
 | socket/dns | ~10 | 0 | -- | TODO |
 | socket/icmp | ~8 | 0 | -- | TODO |
@@ -324,3 +324,23 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | test_recv_error | "recv error when not established" | PASS |
 | test_syn_sent_syn_received_ack | "SYN-SENT simultaneous open SYN then ACK -> ESTABLISHED" | PASS |
 | test_fin_with_data_queued | "FIN with data queued" | PASS |
+
+### socket/udp.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| socket/udp.rs:test_bind_unaddressable | "bind rejects port 0" | PASS |
+| socket/udp.rs:test_bind_twice | "bind twice fails" | PASS |
+| socket/udp.rs:test_set_hop_limit_zero | "set hop limit zero rejected" | PASS |
+| socket/udp.rs:test_send_unaddressable | "send before bind and with bad addresses" | PASS |
+| socket/udp.rs:test_send_with_source | "send with explicit local address" | PASS |
+| socket/udp.rs:test_send_dispatch | "send and dispatch outbound packet" | PASS |
+| socket/udp.rs:test_recv_process | "process inbound and recv" | PASS |
+| socket/udp.rs:test_peek_process | "peek returns data without consuming" | PASS |
+| socket/udp.rs:test_recv_truncated_slice | "recv_slice truncated with small buffer" | PASS |
+| socket/udp.rs:test_peek_truncated_slice | "peek_slice non-destructive, recv_slice destructive" | PASS |
+| socket/udp.rs:test_set_hop_limit | "hop limit propagates to dispatch" | PASS |
+| socket/udp.rs:test_doesnt_accept_wrong_port | "rejects packet with wrong destination port" | PASS |
+| socket/udp.rs:test_doesnt_accept_wrong_ip | "port-only bind accepts any addr; addr+port rejects wrong" | PASS |
+| socket/udp.rs:test_send_large_packet | "payload exceeding capacity returns BufferFull" | PASS |
+| socket/udp.rs:test_process_empty_payload | "zero-length datagram is valid" | PASS |
+| socket/udp.rs:test_closing | "close resets socket" | PASS |
