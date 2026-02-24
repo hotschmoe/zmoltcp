@@ -70,27 +70,27 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
 
             if (comptime has_tcp) {
                 for (self.sockets.tcp_sockets) |sock| {
-                    if (sock.pollAt()) |t| {
-                        result = if (result) |r| (if (t.lessThan(r)) t else r) else t;
-                    }
+                    result = minOptInstant(result, sock.pollAt());
                 }
             }
             if (comptime has_udp) {
                 for (self.sockets.udp_sockets) |sock| {
-                    if (sock.pollAt()) |t| {
-                        result = if (result) |r| (if (t.lessThan(r)) t else r) else t;
-                    }
+                    result = minOptInstant(result, sock.pollAt());
                 }
             }
             if (comptime has_icmp) {
                 for (self.sockets.icmp_sockets) |sock| {
-                    if (sock.pollAt()) |t| {
-                        result = if (result) |r| (if (t.lessThan(r)) t else r) else t;
-                    }
+                    result = minOptInstant(result, sock.pollAt());
                 }
             }
 
             return result;
+        }
+
+        fn minOptInstant(a: ?Instant, b: ?Instant) ?Instant {
+            const bv = b orelse return a;
+            const av = a orelse return bv;
+            return if (bv.lessThan(av)) bv else av;
         }
 
         fn processIngress(self: *Self, timestamp: Instant, frame: []const u8, device: *Device) void {
