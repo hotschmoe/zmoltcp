@@ -24,7 +24,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | socket/dns | 0 | 12 | 0 | 12 | PASS |
 | socket/icmp | 6 | 7 | 0 | 7 | PASS |
 | iface | ~25 | 15 | 9 | 15 | PASS |
-| stack | 0 | 22 | 0 | 22 | PASS |
+| stack | 0 | 23 | 0 | 23 | PASS |
 
 ## Wire Layer Tests
 
@@ -232,7 +232,7 @@ were never actually run despite being listed here. The test module runs with
 | test_listen_twice | "listen twice on same port is ok" | PASS |
 | test_listen_syn | "listen receives SYN -> SYN-RECEIVED" | PASS |
 | test_listen_rst | "listen rejects RST" | PASS |
-| test_listen_syn_ack | "listen rejects SYN with ACK" | PASS |
+| test_listen_syn_reject_ack | "listen rejects SYN with ACK" | PASS |
 | test_listen_close | "listen close goes to closed" | PASS |
 | test_listen_timeout | "listen never times out" | PASS |
 | test_listen_sack_option | "listen sack option enabled" | PASS |
@@ -240,23 +240,23 @@ were never actually run despite being listed here. The test module runs with
 | test_syn_received_ack | "SYN-RECEIVED receives ACK -> ESTABLISHED" | PASS |
 | test_syn_received_close | "SYN-RECEIVED close -> FIN-WAIT-1" | PASS |
 | test_syn_received_rst | "SYN-RECEIVED RST returns to LISTEN" | PASS |
-| test_syn_received_bad_ack | "SYN-RECEIVED rejects ACK too high" | PASS |
-| test_syn_received_bad_ack | "SYN-RECEIVED rejects ACK too low" | PASS |
+| test_syn_received_ack_too_high | "SYN-RECEIVED rejects ACK too high" | PASS |
+| test_syn_received_ack_too_low | "SYN-RECEIVED rejects ACK too low" | PASS |
 | test_syn_received_fin | "SYN-RECEIVED recv FIN -> CLOSE-WAIT" | PASS |
 | test_syn_received_no_window_scaling | "SYN-RECEIVED no window scaling" | PASS |
 | test_syn_received_window_scaling | "SYN-RECEIVED window scaling" | PASS |
 | test_syn_sent_sanity | "SYN-SENT sanity" | PASS |
 | test_syn_sent_dispatch | "SYN-SENT dispatch emits SYN" | PASS |
 | test_syn_sent_syn_ack | "SYN-SENT receives SYN\|ACK -> ESTABLISHED" | PASS |
-| test_syn_sent_rst_ack | "SYN-SENT receives RST\|ACK -> CLOSED" | PASS |
+| test_syn_sent_rst | "SYN-SENT receives RST\|ACK -> CLOSED" | PASS |
 | test_syn_sent_close | "SYN-SENT close goes to CLOSED" | PASS |
-| test_syn_sent_rst_bad_ack | "SYN-SENT sends RST for bad ACK seq too high" | PASS |
-| test_syn_sent_rst_bad_ack | "SYN-SENT sends RST for bad ACK seq too low" | PASS |
+| test_syn_sent_bad_ack_seq_1 | "SYN-SENT sends RST for bad ACK seq too high" | PASS |
+| test_syn_sent_bad_ack_seq_2 | "SYN-SENT sends RST for bad ACK seq too low" | PASS |
 | test_syn_sent_rst_no_ack | "SYN-SENT ignores RST without ACK" | PASS |
 | test_syn_sent_rst_bad_ack | "SYN-SENT ignores RST with wrong ACK" | PASS |
-| test_syn_sent_ignore_bare_ack | "SYN-SENT ignores bare ACK with correct seq" | PASS |
-| test_syn_sent_syn | "SYN-SENT receives SYN (simultaneous open) -> SYN-RECEIVED" | PASS |
-| test_syn_sent_simultaneous_rst | "SYN-SENT simultaneous open then RST" | PASS |
+| test_syn_sent_bad_ack | "SYN-SENT ignores bare ACK with correct seq" | PASS |
+| test_syn_sent_syn_received_ack | "SYN-SENT receives SYN (simultaneous open) -> SYN-RECEIVED" | PASS |
+| test_syn_sent_syn_received_rst | "SYN-SENT simultaneous open then RST" | PASS |
 | test_syn_sent_sack_option | "SYN-SENT sack option" | PASS |
 | test_syn_sent_syn_ack_window_scaling | "SYN-SENT syn ack window scaling" | PASS |
 | test_syn_sent_syn_ack_not_incremented | "SYN-SENT rejects SYN\|ACK with un-incremented ACK" | PASS |
@@ -265,27 +265,27 @@ were never actually run despite being listed here. The test module runs with
 | test_established_recv | "ESTABLISHED recv data" | PASS |
 | test_established_send | "ESTABLISHED send data" | PASS |
 | test_established_send_recv | "ESTABLISHED send and receive" | PASS |
-| test_established_recv_fin | "ESTABLISHED recv FIN -> CLOSE-WAIT" | PASS |
-| test_established_recv_fin | "ESTABLISHED recv FIN with ACK" | PASS |
+| test_established_fin | "ESTABLISHED recv FIN -> CLOSE-WAIT" | PASS |
+| test_established_fin | "ESTABLISHED recv FIN with ACK" | PASS |
 | test_established_close | "ESTABLISHED close sets FIN-WAIT-1 state" | PASS |
 | test_established_abort | "ESTABLISHED abort sends RST" | PASS |
 | test_established_rst | "ESTABLISHED recv RST -> CLOSED" | PASS |
 | test_established_rst | "ESTABLISHED recv RST without ACK -> CLOSED" | PASS |
-| test_established_recv_fin_data | "ESTABLISHED recv FIN while send data queued" | PASS |
+| test_established_send_fin | "ESTABLISHED recv FIN while send data queued" | PASS |
 | test_established_send_buf_gt_win | "ESTABLISHED send more data than window" | PASS |
 | test_established_send_no_ack_send | "ESTABLISHED send two segments without ACK (nagle off)" | PASS |
 | test_established_no_ack | "ESTABLISHED rejects packet without ACK and stays established" | PASS |
 | test_established_bad_ack | "ESTABLISHED ignores ACK too low" | PASS |
 | test_established_bad_seq | "ESTABLISHED bad seq gets challenge ACK" | PASS |
-| test_established_bad_seq | "ESTABLISHED RST bad seq gets challenge ACK" | PASS |
-| test_established_bad_seq | "ESTABLISHED FIN after missing segment stays established" | PASS |
+| test_established_rst_bad_seq | "ESTABLISHED RST bad seq gets challenge ACK" | PASS |
+| test_established_fin_after_missing | "ESTABLISHED FIN after missing segment stays established" | PASS |
 | test_established_receive_partially_outside_window | "ESTABLISHED receive partially outside window" | PASS |
 | test_established_receive_partially_outside_window_fin | "ESTABLISHED receive partially outside window with FIN" | PASS |
 | test_established_send_wrap | "ESTABLISHED send wrap around seq boundary" | PASS |
 | test_established_send_window_shrink | "ESTABLISHED send window shrink" | PASS |
-| test_fin_wait_1_fin_ack | "FIN-WAIT-1 recv FIN+ACK -> TIME-WAIT" | PASS |
-| test_fin_wait_1_ack | "FIN-WAIT-1 recv ACK of FIN -> FIN-WAIT-2" | PASS |
-| test_fin_wait_1_fin_no_ack | "FIN-WAIT-1 recv FIN without ACK of our FIN -> CLOSING" | PASS |
+| (original) | "FIN-WAIT-1 recv FIN+ACK -> TIME-WAIT" | PASS |
+| test_fin_wait_1_fin_ack | "FIN-WAIT-1 recv ACK of FIN -> FIN-WAIT-2" | PASS |
+| test_fin_wait_1_fin_fin | "FIN-WAIT-1 recv FIN without ACK of our FIN -> CLOSING" | PASS |
 | test_fin_wait_1_fin_fin | "FIN-WAIT-1 recv FIN without data and no ack of our FIN -> CLOSING" | PASS |
 | test_fin_wait_1_close | "FIN-WAIT-1 close is noop" | PASS |
 | test_fin_wait_1_recv | "FIN-WAIT-1 recv data" | PASS |
@@ -293,12 +293,12 @@ were never actually run despite being listed here. The test module runs with
 | test_fin_wait_2_fin | "FIN-WAIT-2 recv FIN -> TIME-WAIT" | PASS |
 | test_fin_wait_2_close | "FIN-WAIT-2 close is noop" | PASS |
 | test_fin_wait_2_recv | "FIN-WAIT-2 recv data" | PASS |
-| test_closing_ack | "CLOSING recv ACK -> TIME-WAIT" | PASS |
+| (original) | "CLOSING recv ACK -> TIME-WAIT" | PASS |
 | test_closing_ack_fin | "CLOSING recv ACK of FIN -> TIME-WAIT via ack_fin" | PASS |
 | test_closing_close | "CLOSING close is noop" | PASS |
 | test_time_wait_from_fin_wait_2_ack | "TIME-WAIT from FIN-WAIT-2 dispatches ACK" | PASS |
-| test_time_wait_from_closing_ack | "TIME-WAIT from CLOSING dispatches nothing" | PASS |
-| test_time_wait_expire | "TIME-WAIT expires to CLOSED" | PASS |
+| test_time_wait_from_closing_no_ack | "TIME-WAIT from CLOSING dispatches nothing" | PASS |
+| (original) | "TIME-WAIT expires to CLOSED" | PASS |
 | test_time_wait_timeout | "TIME-WAIT timeout expires to CLOSED" | PASS |
 | test_time_wait_close | "TIME-WAIT close is noop" | PASS |
 | test_time_wait_retransmit | "time wait retransmit" | PASS |
@@ -315,12 +315,12 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "remote close full sequence" | PASS |
 | (original) | "simultaneous close" | PASS |
 | (original) | "simultaneous close combined FIN+ACK" | PASS |
-| test_close_raced | "simultaneous close raced" | PASS |
-| test_close_raced_with_data | "simultaneous close raced with data" | PASS |
+| test_simultaneous_close_raced | "simultaneous close raced" | PASS |
+| test_simultaneous_close_raced_with_data | "simultaneous close raced with data" | PASS |
 | test_mutual_close_with_data_1 | "mutual close with data 1" | PASS |
 | test_mutual_close_with_data_2 | "mutual close with data 2" | PASS |
-| test_retransmit | "data retransmit on RTO" | PASS |
-| test_retransmit | "retransmission after timeout" | PASS |
+| test_data_retransmit | "data retransmit on RTO" | PASS |
+| test_data_retransmit | "retransmission after timeout" | PASS |
 | test_data_retransmit_bursts | "data retransmit bursts" | PASS |
 | test_data_retransmit_bursts_half_ack | "data retransmit bursts half ack" | PASS |
 | test_retransmit_timer_restart_on_partial_ack | "retransmit timer restart on partial ack" | PASS |
@@ -328,16 +328,16 @@ were never actually run despite being listed here. The test module runs with
 | test_retransmit_exponential_backoff | "retransmit exponential backoff" | PASS |
 | test_retransmit_fin | "retransmit FIN" | PASS |
 | test_retransmit_fin_wait | "retransmit in CLOSING state" | PASS |
-| test_dup_ack_replace_timer | "dup ack does not replace retransmit timer" | PASS |
-| test_dup_ack_reset_after_ack_windowed | "retransmit reset after ack windowed" | PASS |
-| test_dup_ack_queue_during_retransmission | "queue during retransmission" | PASS |
-| test_fast_retransmit | "fast retransmit after triple dup ack" | PASS |
+| test_established_retransmit_for_dup_ack | "dup ack does not replace retransmit timer" | PASS |
+| test_established_retransmit_reset_after_ack | "retransmit reset after ack windowed" | PASS |
+| test_established_queue_during_retransmission | "queue during retransmission" | PASS |
+| test_fast_retransmit_after_triple_duplicate_ack | "fast retransmit after triple dup ack" | PASS |
 | test_fast_retransmit_dup_acks_counter | "dup ack counter saturates" | PASS |
-| test_fast_retransmit_dup_acks_reset | "dup ack counter reset on data" | PASS |
-| test_fast_retransmit_dup_acks_reset | "dup ack counter reset on window update" | PASS |
+| test_fast_retransmit_duplicate_detection_with_data | "dup ack counter reset on data" | PASS |
+| test_fast_retransmit_duplicate_detection_with_window_update | "dup ack counter reset on window update" | PASS |
 | test_fast_retransmit_duplicate_detection | "fast retransmit duplicate detection with no data" | PASS |
 | test_fast_retransmit_zero_window | "fast retransmit zero window" | PASS |
-| test_retransmit_ack_more_than_expected | "retransmit ack more than expected" | PASS |
+| test_data_retransmit_ack_more_than_expected | "retransmit ack more than expected" | PASS |
 | test_close_wait_retransmit_reset | "close wait retransmit reset after ack" | PASS |
 | test_fin_wait_1_retransmit_reset | "fin wait 1 retransmit reset after ack" | PASS |
 | test_send_data_after_syn_ack_retransmit | "send data after SYN-ACK retransmit" | PASS |
@@ -367,10 +367,10 @@ were never actually run despite being listed here. The test module runs with
 | test_delayed_ack_every_rmss | "delayed ack every rmss" | PASS |
 | test_delayed_ack_every_rmss_or_more | "delayed ack every rmss or more" | PASS |
 | test_nagle | "nagle algorithm" | PASS |
-| test_nagle_fin | "FIN bypasses Nagle" | PASS |
+| test_final_packet_in_stream_doesnt_wait_for_nagle | "FIN bypasses Nagle" | PASS |
 | test_fill_peer_window | "fill peer window" | PASS |
-| test_psh_on_recv | "PSH on receive is treated as normal data" | PASS |
-| test_psh_on_send | "PSH set on last segment in burst" | PASS |
+| test_psh_receive | "PSH on receive is treated as normal data" | PASS |
+| test_psh_transmit | "PSH set on last segment in burst" | PASS |
 | test_zero_window_probe | "zero window probe enters on send" | PASS |
 | test_zero_window_probe | "zero window probe enters on window update" | PASS |
 | test_zero_window_probe | "zero window probe exits on window open" | PASS |
@@ -385,15 +385,15 @@ were never actually run despite being listed here. The test module runs with
 | test_duplicate_seq_ack | "duplicate seq ack (remote retransmission)" | PASS |
 | test_doesnt_accept_wrong_ip | "doesnt accept wrong ip" | PASS |
 | test_doesnt_accept_wrong_port | "doesnt accept wrong port" | PASS |
-| test_closed_rejects_syn | "closed rejects SYN" | PASS |
-| test_closed_rejects_after_listen_close | "closed rejects after listen+close" | PASS |
-| test_close_on_closed | "close on closed is noop" | PASS |
+| test_closed_reject | "closed rejects SYN" | PASS |
+| test_closed_reject_after_listen | "closed rejects after listen+close" | PASS |
+| test_closed_close | "close on closed is noop" | PASS |
 | test_peek_slice | "peek slice" | PASS |
 | test_peek_slice_buffer_wrap | "peek slice buffer wrap" | PASS |
 | test_send_error | "send error when not established" | PASS |
 | test_recv_error | "recv error when not established" | PASS |
 | test_syn_sent_syn_received_ack | "SYN-SENT simultaneous open SYN then ACK -> ESTABLISHED" | PASS |
-| test_fin_with_data_queued | "FIN with data queued" | PASS |
+| test_fin_with_data | "FIN with data queued" | PASS |
 | test_set_hop_limit | "set hop limit propagates to dispatch" | PASS |
 | test_set_hop_limit_zero | "set hop limit zero rejected" | PASS |
 | test_listen_syn_win_scale_buffers | "listen syn window scale for various buffer sizes" | PASS |
@@ -504,6 +504,7 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "stack UDP to bound socket delivers data" | PASS |
 | (original) | "stack ICMP echo with bound socket delivers and auto-replies" | PASS |
 | (original) | "stack TCP egress dispatches SYN on connect" | PASS |
+| (original) | "stack TCP handshake completes via listen" | PASS |
 | (original) | "stack UDP egress dispatches datagram" | PASS |
 | (original) | "stack ICMP egress dispatches echo request" | PASS |
 | (original) | "stack poll returns true for egress-only activity" | PASS |

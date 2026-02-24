@@ -21,6 +21,28 @@ const Instant = time.Instant;
 /// Maximum frame size for serialization scratch buffers.
 pub const MAX_FRAME_LEN = 1514; // Ethernet MTU 1500 + 14-byte header
 
+/// Maximum IP payload size (frame minus Ethernet + IPv4 headers).
+const IP_PAYLOAD_MAX = MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv4.HEADER_LEN;
+
+/// Serialize a TCP repr (header + payload + checksum) into buf.
+/// Returns total byte length on success, or null if buf is too small.
+fn serializeTcp(
+    repr: tcp_socket.TcpRepr,
+    src_addr: ipv4.Address,
+    dst_addr: ipv4.Address,
+    buf: []u8,
+) ?usize {
+    const wire_repr = repr.toWireRepr();
+    const tcp_len = tcp_wire.emit(wire_repr, buf) catch return null;
+    const total = tcp_len + repr.payload.len;
+    if (total > buf.len) return null;
+    @memcpy(buf[tcp_len..][0..repr.payload.len], repr.payload);
+    const cksum = tcp_wire.computeChecksum(src_addr, dst_addr, buf[0..total]);
+    buf[16] = @truncate(cksum >> 8);
+    buf[17] = @truncate(cksum & 0xFF);
+    return total;
+}
+
 /// Comptime-generic stack over a Device and optional SocketConfig.
 ///
 /// Device must implement:
@@ -365,24 +387,13 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             hop_limit: u8,
             device: *Device,
         ) void {
-            var payload_buf: [iface_mod.IPV4_MIN_MTU]u8 = undefined;
-            const wire_repr = repr.toWireRepr();
-            const tcp_len = tcp_wire.emit(wire_repr, &payload_buf) catch return;
-            const total_tcp = tcp_len + repr.payload.len;
-            if (total_tcp > payload_buf.len) return;
-            @memcpy(payload_buf[tcp_len..][0..repr.payload.len], repr.payload);
-            const cksum = tcp_wire.computeChecksum(
-                src_addr,
-                dst_addr,
-                payload_buf[0..total_tcp],
-            );
-            payload_buf[16] = @truncate(cksum >> 8);
-            payload_buf[17] = @truncate(cksum & 0xFF);
+            var payload_buf: [IP_PAYLOAD_MAX]u8 = undefined;
+            const total_tcp = serializeTcp(repr, src_addr, dst_addr, &payload_buf) orelse return;
             self.emitIpv4Frame(src_addr, dst_addr, .tcp, hop_limit, payload_buf[0..total_tcp], device);
         }
 
         fn emitUdpEgress(self: *Self, result: anytype, device: *Device) void {
-            var payload_buf: [iface_mod.IPV4_MIN_MTU]u8 = undefined;
+            var payload_buf: [IP_PAYLOAD_MAX]u8 = undefined;
             const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + result.payload.len);
             const hdr_len = udp_wire.emit(.{
                 .src_port = result.repr.src_port,
@@ -412,7 +423,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
         }
 
         fn emitDhcpEgress(self: *Self, sock: anytype, result: dhcp_socket_mod.DispatchResult, device: *Device) void {
-            var udp_buf: [MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv4.HEADER_LEN]u8 = undefined;
+            var udp_buf: [IP_PAYLOAD_MAX]u8 = undefined;
             const dhcp_len = dhcp_wire.bufferLen(result.dhcp_repr);
             const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + dhcp_len);
             const hdr_len = udp_wire.emit(.{
@@ -430,7 +441,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
         }
 
         fn emitDnsEgress(self: *Self, result: dns_socket_mod.DispatchResult, device: *Device) void {
-            var udp_buf: [MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv4.HEADER_LEN]u8 = undefined;
+            var udp_buf: [IP_PAYLOAD_MAX]u8 = undefined;
             const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + result.payload.len);
             const hdr_len = udp_wire.emit(.{
                 .src_port = result.src_port,
@@ -489,7 +500,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
         }
 
         fn serializeIpv4Response(self: *const Self, resp: iface_mod.Ipv4Response, buf: []u8) ?[]const u8 {
-            var payload_buf: [iface_mod.IPV4_MIN_MTU]u8 = undefined;
+            var payload_buf: [IP_PAYLOAD_MAX]u8 = undefined;
             const payload_len: usize = switch (resp.payload) {
                 .icmp_echo => |echo| icmp.emitEcho(echo.echo, echo.data, &payload_buf) catch return null,
                 .icmp_dest_unreachable => |du| blk: {
@@ -504,18 +515,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                         .data = 0,
                     }, inner_buf[0 .. inv_len + data_len], &payload_buf) catch return null;
                 },
-                .tcp => |tcp_repr| blk: {
-                    const wire_repr = tcp_repr.toWireRepr();
-                    const tcp_len = tcp_wire.emit(wire_repr, &payload_buf) catch return null;
-                    const cksum = tcp_wire.computeChecksum(
-                        resp.ip.src_addr,
-                        resp.ip.dst_addr,
-                        payload_buf[0..tcp_len],
-                    );
-                    payload_buf[16] = @truncate(cksum >> 8);
-                    payload_buf[17] = @truncate(cksum & 0xFF);
-                    break :blk tcp_len;
-                },
+                .tcp => |tcp_repr| serializeTcp(tcp_repr, resp.ip.src_addr, resp.ip.dst_addr, &payload_buf) orelse return null,
             };
 
             const ip_repr = ipv4.Repr{
@@ -986,6 +986,108 @@ test "stack TCP egress dispatches SYN on connect" {
         ip_repr.dst_addr,
         tcp_data,
     ));
+}
+
+test "stack TCP handshake completes via listen" {
+    const TcpSock = tcp_socket.Socket(4);
+    const Sockets = struct { tcp_sockets: []*TcpSock };
+    const TcpStack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    const S = struct {
+        var rx_buf: [256]u8 = .{0} ** 256;
+        var tx_buf: [256]u8 = .{0} ** 256;
+    };
+    @memset(&S.rx_buf, 0);
+    @memset(&S.tx_buf, 0);
+    var sock = TcpSock.init(&S.rx_buf, &S.tx_buf);
+    sock.ack_delay = null;
+    try sock.listen(.{ .port = 4243 });
+
+    var sock_arr = [_]*TcpSock{&sock};
+    var stack = TcpStack.init(LOCAL_HW, .{ .tcp_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    // Populate neighbor cache via ARP.
+    var arp_buf: [128]u8 = undefined;
+    device.enqueueRx(buildArpRequest(&arp_buf));
+    _ = stack.poll(Instant.ZERO, &device);
+    _ = device.dequeueTx();
+
+    // -- Step 1: Inject SYN from remote --
+    const REMOTE_SEQ: u32 = 1000;
+    var syn_buf: [tcp_wire.HEADER_LEN]u8 = undefined;
+    _ = tcp_wire.emit(.{
+        .src_port = 4242,
+        .dst_port = 4243,
+        .seq_number = REMOTE_SEQ,
+        .ack_number = 0,
+        .data_offset = 5,
+        .flags = .{ .syn = true },
+        .window_size = 1024,
+        .checksum = 0,
+        .urgent_pointer = 0,
+    }, &syn_buf) catch unreachable;
+
+    var frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv4Frame(&frame_buf, .tcp, &syn_buf));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    // -- Step 2: Dequeue SYN-ACK, verify flags, extract server ISN --
+    const synack_frame = device.dequeueTx() orelse return error.ExpectedSynAck;
+    const synack_ip = try ethernet.payload(synack_frame);
+    const synack_tcp = try ipv4.payloadSlice(synack_ip);
+    const synack_repr = try tcp_wire.parse(synack_tcp);
+    try testing.expect(synack_repr.flags.syn);
+    try testing.expect(synack_repr.flags.ack);
+    try testing.expectEqual(REMOTE_SEQ + 1, synack_repr.ack_number);
+    const server_isn = synack_repr.seq_number;
+
+    // -- Step 3: Inject ACK to complete handshake --
+    var ack_buf: [tcp_wire.HEADER_LEN]u8 = undefined;
+    _ = tcp_wire.emit(.{
+        .src_port = 4242,
+        .dst_port = 4243,
+        .seq_number = REMOTE_SEQ + 1,
+        .ack_number = server_isn + 1,
+        .data_offset = 5,
+        .flags = .{ .ack = true },
+        .window_size = 1024,
+        .checksum = 0,
+        .urgent_pointer = 0,
+    }, &ack_buf) catch unreachable;
+
+    var ack_frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv4Frame(&ack_frame_buf, .tcp, &ack_buf));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    try testing.expectEqual(tcp_socket.State.established, sock.state);
+
+    // -- Step 4: Inject data segment with "Hi" --
+    const payload = "Hi";
+    var data_tcp_buf: [tcp_wire.HEADER_LEN + payload.len]u8 = undefined;
+    _ = tcp_wire.emit(.{
+        .src_port = 4242,
+        .dst_port = 4243,
+        .seq_number = REMOTE_SEQ + 1,
+        .ack_number = server_isn + 1,
+        .data_offset = 5,
+        .flags = .{ .ack = true, .psh = true },
+        .window_size = 1024,
+        .checksum = 0,
+        .urgent_pointer = 0,
+    }, &data_tcp_buf) catch unreachable;
+    @memcpy(data_tcp_buf[tcp_wire.HEADER_LEN..], payload);
+
+    var data_frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv4Frame(&data_frame_buf, .tcp, &data_tcp_buf));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    try testing.expect(sock.canRecv());
+    var recv_buf: [64]u8 = undefined;
+    const n = try sock.recvSlice(&recv_buf);
+    try testing.expectEqualSlices(u8, payload, recv_buf[0..n]);
 }
 
 test "stack UDP egress dispatches datagram" {
