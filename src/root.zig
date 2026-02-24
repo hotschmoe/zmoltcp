@@ -11,6 +11,7 @@ pub const wire = struct {
     pub const tcp = @import("wire/tcp.zig");
     pub const udp = @import("wire/udp.zig");
     pub const icmp = @import("wire/icmp.zig");
+    pub const dhcp = @import("wire/dhcp.zig");
 };
 
 pub const storage = struct {
@@ -24,6 +25,7 @@ pub const socket = struct {
     pub const tcp = @import("socket/tcp.zig");
     pub const udp = @import("socket/udp.zig");
     pub const icmp = @import("socket/icmp.zig");
+    pub const dhcp = @import("socket/dhcp.zig");
 };
 
 test {
@@ -43,5 +45,7 @@ test {
     _ = @import("socket/udp.zig");
     _ = @import("socket/icmp.zig");
     _ = @import("wire/tcp.zig");
+    _ = @import("wire/dhcp.zig");
+    _ = @import("socket/dhcp.zig");
     _ = @import("socket/tcp.zig");
 }

@@ -18,7 +18,8 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | time | 10 | 8 | 8 | PASS |
 | socket/tcp | 175 | 172 | 172 | PASS |
 | socket/udp | 16 | 16 | 16 | PASS |
-| socket/dhcp | ~12 | 0 | -- | TODO |
+| wire/dhcp | 9 | 9 | 9 | PASS |
+| socket/dhcp | 11 | 11 | 11 | PASS |
 | socket/dns | ~10 | 0 | -- | TODO |
 | socket/icmp | 6 | 6 | 6 | PASS |
 | iface | ~25 | 0 | -- | TODO |
@@ -95,6 +96,19 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | (original) | "parse ICMP dest unreachable" | PASS |
 | (original) | "ICMP echo emit with valid checksum" | PASS |
 | (original) | "ICMP echo roundtrip" | PASS |
+
+### wire/dhcp.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| wire/dhcpv4.rs:test_deconstruct_discover | "deconstruct discover raw fields" | PASS |
+| wire/dhcpv4.rs:test_parse_discover | "parse discover" | PASS |
+| wire/dhcpv4.rs:test_emit_discover | "emit discover" | PASS |
+| wire/dhcpv4.rs:test_emit_offer | "emit offer" | PASS |
+| wire/dhcpv4.rs:test_emit_offer_dns | "emit offer with dns servers roundtrip" | PASS |
+| wire/dhcpv4.rs:test_emit_dhcp_option | "emit dhcp option TLV" | PASS |
+| wire/dhcpv4.rs:test_parse_ack_dns_servers | "parse ack with dns servers capped at 3" | PASS |
+| wire/dhcpv4.rs:test_parse_ack_lease_duration | "parse ack with lease duration" | PASS |
+| wire/dhcpv4.rs:test_construct_discover | "construct discover from bytes" | PASS |
 
 ## Storage Layer Tests
 
@@ -382,3 +396,18 @@ were never actually run despite being listed here. The test module runs with
 | socket/icmp.rs:test_recv_process | "process inbound and recv" | PASS |
 | socket/icmp.rs:test_accept_bad_id | "rejects packet with wrong identifier" | PASS |
 | socket/icmp.rs:test_accepts_udp | "accepts ICMP error for bound UDP port" | PASS |
+
+### socket/dhcp.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| socket/dhcpv4.rs:test_bind | "bind" | PASS |
+| socket/dhcpv4.rs:test_bind_different_ports | "bind different ports" | PASS |
+| socket/dhcpv4.rs:test_discover_retransmit | "discover retransmit" | PASS |
+| socket/dhcpv4.rs:test_request_retransmit | "request retransmit" | PASS |
+| socket/dhcpv4.rs:test_request_timeout | "request timeout" | PASS |
+| socket/dhcpv4.rs:test_request_nak | "request nak" | PASS |
+| socket/dhcpv4.rs:test_renew | "renew" | PASS |
+| socket/dhcpv4.rs:test_renew_rebind_retransmit | "renew rebind retransmit" | PASS |
+| socket/dhcpv4.rs:test_renew_rebind_timeout | "renew rebind timeout" | PASS |
+| socket/dhcpv4.rs:test_min_max_renew_timeout | "min max renew timeout" | PASS |
+| socket/dhcpv4.rs:test_renew_nak | "renew nak" | PASS |
