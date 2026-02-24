@@ -75,7 +75,6 @@ src/
 
   iface.zig          Network interface (packet routing, neighbor cache)
   stack.zig          Top-level poll loop, socket set management
-  buf.zig            Packet buffer descriptor
   time.zig           Timestamp/duration types
   root.zig           Library entry point (public API)
 ```

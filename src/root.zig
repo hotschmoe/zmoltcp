@@ -31,6 +31,7 @@ pub const socket = struct {
 };
 
 pub const iface = @import("iface.zig");
+pub const fragmentation = @import("fragmentation.zig");
 pub const stack = @import("stack.zig");
 
 test {
@@ -56,5 +57,6 @@ test {
     _ = @import("wire/dns.zig");
     _ = @import("socket/dns.zig");
     _ = @import("iface.zig");
+    _ = @import("fragmentation.zig");
     _ = @import("stack.zig");
 }

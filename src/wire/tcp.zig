@@ -141,6 +141,9 @@ pub const OptionKind = enum(u8) {
     _,
 };
 
+pub const SackRange = struct { left: u32, right: u32 };
+pub const Timestamp = struct { tsval: u32, tsecr: u32 };
+
 /// High-level representation of a TCP segment header.
 pub const Repr = struct {
     src_port: u16,
@@ -156,6 +159,8 @@ pub const Repr = struct {
     max_seg_size: ?u16 = null,
     window_scale: ?u8 = null,
     sack_permitted: bool = false,
+    sack_ranges: [3]?SackRange = .{ null, null, null },
+    timestamp: ?Timestamp = null,
 };
 
 /// Parse a TCP header from raw bytes (after IP header).
@@ -226,8 +231,37 @@ fn parseOptions(options: []const u8, repr: *Repr) void {
                 repr.sack_permitted = true;
                 i += 2;
             },
-            .sack, .timestamps, _ => {
-                // Known-but-unhandled and unknown options: skip using length field
+            .sack => {
+                if (i + 1 >= options.len) return;
+                const opt_len = options[i + 1];
+                if (opt_len < 2 or i + opt_len > options.len) return;
+                const range_count = (@as(usize, opt_len) - 2) / 8;
+                var ri: usize = 0;
+                while (ri < @min(range_count, 3)) : (ri += 1) {
+                    const start = i + 2 + ri * 8;
+                    if (start + 8 > i + opt_len) break;
+                    repr.sack_ranges[ri] = .{
+                        .left = @as(u32, options[start]) << 24 | @as(u32, options[start + 1]) << 16 |
+                            @as(u32, options[start + 2]) << 8 | @as(u32, options[start + 3]),
+                        .right = @as(u32, options[start + 4]) << 24 | @as(u32, options[start + 5]) << 16 |
+                            @as(u32, options[start + 6]) << 8 | @as(u32, options[start + 7]),
+                    };
+                }
+                i += opt_len;
+            },
+            .timestamps => {
+                if (i + 1 >= options.len) return;
+                const opt_len = options[i + 1];
+                if (opt_len != 10 or i + 10 > options.len) return;
+                repr.timestamp = .{
+                    .tsval = @as(u32, options[i + 2]) << 24 | @as(u32, options[i + 3]) << 16 |
+                        @as(u32, options[i + 4]) << 8 | @as(u32, options[i + 5]),
+                    .tsecr = @as(u32, options[i + 6]) << 24 | @as(u32, options[i + 7]) << 16 |
+                        @as(u32, options[i + 8]) << 8 | @as(u32, options[i + 9]),
+                };
+                i += 10;
+            },
+            _ => {
                 if (i + 1 >= options.len) return;
                 const opt_len = options[i + 1];
                 if (opt_len < 2) return;
@@ -237,11 +271,32 @@ fn parseOptions(options: []const u8, repr: *Repr) void {
     }
 }
 
+/// Compute the header length from populated options, rounded up to 4 bytes.
+pub fn headerLen(repr: Repr) usize {
+    var length: usize = HEADER_LEN;
+    if (repr.max_seg_size != null) length += 4;
+    if (repr.window_scale != null) length += 3;
+    if (repr.sack_permitted) {
+        length += 2;
+    } else {
+        var sack_count: usize = 0;
+        for (repr.sack_ranges) |range| {
+            if (range != null) sack_count += 1;
+        }
+        if (sack_count > 0) length += 2 + 8 * sack_count;
+    }
+    if (repr.timestamp != null) length += 10;
+    return (length + 3) & ~@as(usize, 3);
+}
+
 /// Serialize a TCP header into a buffer. Does NOT compute checksum
 /// (caller must provide pseudo-header context). Returns header length.
+/// The data_offset field on repr is ignored; it is computed from options.
 pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
-    const header_len: usize = @as(usize, repr.data_offset) * 4;
+    const header_len = headerLen(repr);
     if (buf.len < header_len) return error.BufferTooSmall;
+
+    const data_offset: u4 = @intCast(header_len / 4);
 
     buf[0] = @truncate(repr.src_port >> 8);
     buf[1] = @truncate(repr.src_port & 0xFF);
@@ -258,7 +313,7 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
     buf[10] = @truncate(repr.ack_number >> 8);
     buf[11] = @truncate(repr.ack_number & 0xFF);
 
-    buf[12] = @as(u8, repr.data_offset) << 4;
+    buf[12] = @as(u8, data_offset) << 4;
 
     var flags_byte: u8 = 0;
     if (repr.flags.fin) flags_byte |= 0x01;
@@ -280,9 +335,73 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
     buf[18] = @truncate(repr.urgent_pointer >> 8);
     buf[19] = @truncate(repr.urgent_pointer & 0xFF);
 
-    // Zero option bytes
+    // Serialize options
     if (header_len > HEADER_LEN) {
-        @memset(buf[HEADER_LEN..header_len], 0);
+        var i: usize = HEADER_LEN;
+
+        if (repr.max_seg_size) |mss| {
+            buf[i] = @intFromEnum(OptionKind.mss);
+            buf[i + 1] = 4;
+            buf[i + 2] = @truncate(mss >> 8);
+            buf[i + 3] = @truncate(mss);
+            i += 4;
+        }
+
+        if (repr.window_scale) |ws| {
+            buf[i] = @intFromEnum(OptionKind.window_scale);
+            buf[i + 1] = 3;
+            buf[i + 2] = ws;
+            i += 3;
+        }
+
+        if (repr.sack_permitted) {
+            buf[i] = @intFromEnum(OptionKind.sack_permitted);
+            buf[i + 1] = 2;
+            i += 2;
+        } else {
+            var sack_count: usize = 0;
+            for (repr.sack_ranges) |range| {
+                if (range != null) sack_count += 1;
+            }
+            if (sack_count > 0) {
+                buf[i] = @intFromEnum(OptionKind.sack);
+                buf[i + 1] = @intCast(2 + 8 * sack_count);
+                i += 2;
+                for (repr.sack_ranges) |maybe_range| {
+                    if (maybe_range) |range| {
+                        buf[i] = @truncate(range.left >> 24);
+                        buf[i + 1] = @truncate(range.left >> 16);
+                        buf[i + 2] = @truncate(range.left >> 8);
+                        buf[i + 3] = @truncate(range.left);
+                        buf[i + 4] = @truncate(range.right >> 24);
+                        buf[i + 5] = @truncate(range.right >> 16);
+                        buf[i + 6] = @truncate(range.right >> 8);
+                        buf[i + 7] = @truncate(range.right);
+                        i += 8;
+                    }
+                }
+            }
+        }
+
+        if (repr.timestamp) |ts| {
+            buf[i] = @intFromEnum(OptionKind.timestamps);
+            buf[i + 1] = 10;
+            buf[i + 2] = @truncate(ts.tsval >> 24);
+            buf[i + 3] = @truncate(ts.tsval >> 16);
+            buf[i + 4] = @truncate(ts.tsval >> 8);
+            buf[i + 5] = @truncate(ts.tsval);
+            buf[i + 6] = @truncate(ts.tsecr >> 24);
+            buf[i + 7] = @truncate(ts.tsecr >> 16);
+            buf[i + 8] = @truncate(ts.tsecr >> 8);
+            buf[i + 9] = @truncate(ts.tsecr);
+            i += 10;
+        }
+
+        if (i < header_len) {
+            buf[i] = @intFromEnum(OptionKind.end);
+            i += 1;
+        }
+        @memset(buf[i..header_len], 0);
     }
 
     return header_len;
@@ -485,4 +604,188 @@ test "Control quashPsh" {
     try testing.expectEqual(Control.none, Control.psh.quashPsh());
     try testing.expectEqual(Control.syn, Control.syn.quashPsh());
     try testing.expectEqual(Control.fin, Control.fin.quashPsh());
+}
+
+test "headerLen no options" {
+    const repr = Repr{
+        .src_port = 80,
+        .dst_port = 8080,
+        .seq_number = 0,
+        .ack_number = 0,
+        .data_offset = 5,
+        .flags = .{},
+        .window_size = 0,
+        .checksum = 0,
+        .urgent_pointer = 0,
+    };
+    try testing.expectEqual(@as(usize, 20), headerLen(repr));
+}
+
+test "headerLen MSS only" {
+    var repr = Repr{
+        .src_port = 80,
+        .dst_port = 8080,
+        .seq_number = 0,
+        .ack_number = 0,
+        .data_offset = 5,
+        .flags = .{},
+        .window_size = 0,
+        .checksum = 0,
+        .urgent_pointer = 0,
+    };
+    repr.max_seg_size = 1460;
+    // 20 + 4 = 24, already aligned
+    try testing.expectEqual(@as(usize, 24), headerLen(repr));
+}
+
+test "headerLen SYN with MSS + WindowScale + SackPermitted" {
+    var repr = Repr{
+        .src_port = 80,
+        .dst_port = 8080,
+        .seq_number = 0,
+        .ack_number = 0,
+        .data_offset = 5,
+        .flags = .{ .syn = true },
+        .window_size = 0,
+        .checksum = 0,
+        .urgent_pointer = 0,
+    };
+    repr.max_seg_size = 1460;
+    repr.window_scale = 7;
+    repr.sack_permitted = true;
+    // 20 + 4 + 3 + 2 = 29, rounds to 32
+    try testing.expectEqual(@as(usize, 32), headerLen(repr));
+}
+
+test "headerLen timestamp" {
+    var repr = Repr{
+        .src_port = 80,
+        .dst_port = 8080,
+        .seq_number = 0,
+        .ack_number = 0,
+        .data_offset = 5,
+        .flags = .{},
+        .window_size = 0,
+        .checksum = 0,
+        .urgent_pointer = 0,
+    };
+    repr.timestamp = .{ .tsval = 1, .tsecr = 0 };
+    // 20 + 10 = 30, rounds to 32
+    try testing.expectEqual(@as(usize, 32), headerLen(repr));
+}
+
+test "headerLen SACK range" {
+    var repr = Repr{
+        .src_port = 80,
+        .dst_port = 8080,
+        .seq_number = 0,
+        .ack_number = 0,
+        .data_offset = 5,
+        .flags = .{},
+        .window_size = 0,
+        .checksum = 0,
+        .urgent_pointer = 0,
+    };
+    repr.sack_ranges[0] = .{ .left = 1000, .right = 2000 };
+    // 20 + 2 + 8 = 30, rounds to 32
+    try testing.expectEqual(@as(usize, 32), headerLen(repr));
+
+    repr.sack_ranges[1] = .{ .left = 3000, .right = 4000 };
+    // 20 + 2 + 16 = 38, rounds to 40
+    try testing.expectEqual(@as(usize, 40), headerLen(repr));
+}
+
+test "timestamp option parse and emit roundtrip" {
+    // Build a SYN with timestamp: MSS(1460) + Timestamp(tsval=0x01020304, tsecr=0x05060708)
+    var repr = Repr{
+        .src_port = 49154,
+        .dst_port = 8080,
+        .seq_number = 1002,
+        .ack_number = 0,
+        .data_offset = 5,
+        .flags = .{ .syn = true },
+        .window_size = 4096,
+        .checksum = 0,
+        .urgent_pointer = 0,
+    };
+    repr.max_seg_size = 1460;
+    repr.timestamp = .{ .tsval = 0x01020304, .tsecr = 0x05060708 };
+
+    // headerLen: 20 + 4(MSS) + 10(TS) = 34, rounds to 36
+    const hdr_len = headerLen(repr);
+    try testing.expectEqual(@as(usize, 36), hdr_len);
+
+    var buf: [60]u8 = undefined;
+    const emitted_len = try emit(repr, &buf);
+    try testing.expectEqual(hdr_len, emitted_len);
+
+    // Parse back
+    const parsed = try parse(buf[0..emitted_len]);
+    try testing.expectEqual(@as(u16, 49154), parsed.src_port);
+    try testing.expectEqual(@as(u16, 8080), parsed.dst_port);
+    try testing.expectEqual(@as(u16, 1460), parsed.max_seg_size.?);
+    try testing.expectEqual(@as(u32, 0x01020304), parsed.timestamp.?.tsval);
+    try testing.expectEqual(@as(u32, 0x05060708), parsed.timestamp.?.tsecr);
+}
+
+test "SACK range parse and emit roundtrip" {
+    // ACK with one SACK block
+    var repr = Repr{
+        .src_port = 80,
+        .dst_port = 49500,
+        .seq_number = 10001,
+        .ack_number = 5000,
+        .data_offset = 5,
+        .flags = .{ .ack = true },
+        .window_size = 4000,
+        .checksum = 0,
+        .urgent_pointer = 0,
+    };
+    repr.sack_ranges[0] = .{ .left = 5500, .right = 6000 };
+
+    const hdr_len = headerLen(repr);
+    // 20 + 2 + 8 = 30, rounds to 32
+    try testing.expectEqual(@as(usize, 32), hdr_len);
+
+    var buf: [60]u8 = undefined;
+    const emitted_len = try emit(repr, &buf);
+    try testing.expectEqual(hdr_len, emitted_len);
+
+    const parsed = try parse(buf[0..emitted_len]);
+    try testing.expectEqual(@as(u32, 5500), parsed.sack_ranges[0].?.left);
+    try testing.expectEqual(@as(u32, 6000), parsed.sack_ranges[0].?.right);
+    try testing.expect(parsed.sack_ranges[1] == null);
+    try testing.expect(parsed.sack_ranges[2] == null);
+}
+
+test "SYN options MSS + WindowScale + SackPermitted roundtrip" {
+    var repr = Repr{
+        .src_port = 80,
+        .dst_port = 49500,
+        .seq_number = 10000,
+        .ack_number = 0,
+        .data_offset = 5,
+        .flags = .{ .syn = true },
+        .window_size = 64,
+        .checksum = 0,
+        .urgent_pointer = 0,
+    };
+    repr.max_seg_size = 1460;
+    repr.window_scale = 0;
+    repr.sack_permitted = true;
+
+    const hdr_len = headerLen(repr);
+    // 20 + 4 + 3 + 2 = 29, rounds to 32
+    try testing.expectEqual(@as(usize, 32), hdr_len);
+
+    var buf: [60]u8 = undefined;
+    const emitted_len = try emit(repr, &buf);
+    try testing.expectEqual(hdr_len, emitted_len);
+
+    const parsed = try parse(buf[0..emitted_len]);
+    try testing.expectEqual(@as(u16, 1460), parsed.max_seg_size.?);
+    try testing.expectEqual(@as(u8, 0), parsed.window_scale.?);
+    try testing.expect(parsed.sack_permitted);
+    try testing.expect(parsed.timestamp == null);
+    try testing.expect(parsed.sack_ranges[0] == null);
 }

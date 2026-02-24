@@ -336,7 +336,11 @@ iface.zig (15 tests implemented)
   test_icmpv4_socket                  ICMP socket delivery + auto-reply coexistence
   test_tcp_not_accepted               TCP SYN with no listener produces RST
 
-stack.zig (22 tests implemented)
+fragmentation.zig (2 tests implemented)
+  maxIpv4FragmentPayload_alignment    Fragment payload size is 8-byte aligned for all header sizes
+  fragmenter_stage_and_emit           Stage oversized payload, emit 3 fragments, verify lifecycle
+
+stack.zig (25 tests implemented)
   stack_arp_request_produces_reply    End-to-end ARP request -> serialized reply via Device
   stack_icmp_echo_produces_reply      End-to-end ICMP echo -> serialized reply with neighbor lookup
   stack_empty_rx_returns_false        Empty RX queue returns false from poll()
@@ -346,6 +350,7 @@ stack.zig (22 tests implemented)
   stack_udp_bound_socket_delivers     UDP to bound socket: data delivered, no ICMP error
   stack_icmp_socket_and_auto_reply    ICMP echo: socket receives + auto-reply emitted
   stack_tcp_egress_syn                TCP egress dispatches SYN on connect
+  stack_tcp_handshake_via_listen      TCP handshake completes via listen
   stack_udp_egress_datagram           UDP egress dispatches datagram
   stack_icmp_egress_echo              ICMP egress dispatches echo request
   stack_poll_egress_only              poll() returns true for egress-only activity
@@ -359,10 +364,11 @@ stack.zig (22 tests implemented)
   stack_dns_query                     DNS query dispatches via UDP
   stack_dns_ingress_response          DNS ingress delivers A-record response
   stack_dns_pollAt                    DNS pollAt returns retransmit deadline
+  stack_ipv4_frag_never_exceeds_mtu   No emitted frame exceeds MAX_FRAME_LEN
+  stack_ipv4_frag_alignment           Non-final fragment payloads are 8-byte aligned
 
 Deferred (require features not yet in zmoltcp):
   test_handle_igmp                    IGMP/multicast
-  test_packet_len, fragment_size      IP fragmentation
   test_raw_socket_*                   Raw sockets (5 tests)
 ```
 

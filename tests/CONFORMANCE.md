@@ -16,15 +16,16 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | storage/ring_buffer | 15 | 14 | 1 | 14 | PASS |
 | storage/assembler | 38 | 37 | 1 | 37 | PASS |
 | time | 10 | 8 | 2 | 8 | PASS |
-| socket/tcp | 175 | 184 | ~10 | 184 | PASS |
+| socket/tcp | 175 | 190 | ~4 | 190 | PASS |
 | socket/udp | 16 | 17 | 0 | 17 | PASS |
 | wire/dhcp | 9 | 9 | 0 | 9 | PASS |
 | socket/dhcp | 11 | 11 | 0 | 11 | PASS |
 | wire/dns | 7 | 7 | 0 | 7 | PASS |
 | socket/dns | 0 | 12 | 0 | 12 | PASS |
 | socket/icmp | 6 | 7 | 0 | 7 | PASS |
-| iface | ~25 | 15 | 9 | 15 | PASS |
-| stack | 0 | 23 | 0 | 23 | PASS |
+| iface | 24 | 15 | 7 | 15 | PASS |
+| fragmentation | 0 | 2 | 0 | 2 | PASS |
+| stack | 2 | 25 | 0 | 25 | PASS |
 
 ## Wire Layer Tests
 
@@ -405,6 +406,12 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "pollAt SYN-SENT returns ZERO" | PASS |
 | (original) | "pollAt LISTEN returns null" | PASS |
 | (original) | "pollAt established with keep-alive returns timer deadline" | PASS |
+| test_tsval_established_connection | "tsval established connection" | PASS |
+| test_tsval_disabled_in_remote_client | "tsval disabled in remote client" | PASS |
+| test_tsval_disabled_in_local_server | "tsval disabled in local server" | PASS |
+| test_tsval_disabled_in_remote_server | "tsval disabled in remote server" | PASS |
+| test_tsval_disabled_in_local_client | "tsval disabled in local client" | PASS |
+| test_established_rfc2018_cases | "established rfc2018 cases" | PASS |
 
 ### socket/udp.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -488,7 +495,7 @@ were never actually run despite being listed here. The test module runs with
 | iface/interface/tests/ipv4.rs:test_icmp_reply_size | "ICMP reply size" | PASS |
 | iface/interface/tests/ipv4.rs:test_any_ip_accept_arp | "any_ip accepts ARP for unknown address" | PASS |
 | iface/interface/tests/ipv4.rs:test_icmpv4_socket | "ICMP socket receives echo request and auto-reply" | PASS |
-| iface/interface/tests/mod.rs:test_tcp_not_accepted | "TCP SYN with no listener produces RST" | PASS |
+| (original) | "TCP SYN with no listener produces RST" | PASS |
 
 ## Stack Layer Tests
 
@@ -518,6 +525,14 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "stack DNS query dispatches via UDP" | PASS |
 | (original) | "stack DNS ingress delivers response" | PASS |
 | (original) | "stack DNS pollAt returns retransmit deadline" | PASS |
+| iface/interface/tests/ipv4.rs:test_packet_len | "stack IPv4 fragmentation never exceeds MTU" | PASS |
+| iface/interface/tests/ipv4.rs:test_ipv4_fragment_size | "stack IPv4 fragment payload is 8-byte aligned" | PASS |
+
+### fragmentation.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| (original) | "maxIpv4FragmentPayload alignment" | PASS |
+| (original) | "fragmenter stage and emit" | PASS |
 
 ## Not Applicable (N/A) Tests
 
@@ -543,29 +558,21 @@ language differences, API design choices, or out-of-scope features.
 |---|---|
 | test_fuzz_* | Fuzz-only test; not a deterministic conformance test |
 
-### socket/tcp.zig (~10 N/A)
+### socket/tcp.zig (~4 N/A)
 
 | smoltcp Test | Reason |
 |---|---|
 | test_syn_paused_ack | pause_synack API not in zmoltcp |
-| test_established_rfc2018_cases | SACK blocks not implemented |
 | test_set_get_congestion_control | No congestion control abstraction |
-| test_tsval_established_connection | TCP timestamps not implemented |
-| test_tsval_disabled_in_remote_client | TCP timestamps not implemented |
-| test_tsval_disabled_in_local_server | TCP timestamps not implemented |
-| test_tsval_disabled_in_remote_server | TCP timestamps not implemented |
-| test_tsval_disabled_in_local_client | TCP timestamps not implemented |
 | test_established_close_on_src_ip_change | No socket-level IP tracking |
 | test_connect_unspecified_local / test_connect_specified_local | API design: zmoltcp always takes explicit 4 params |
 
-### iface.zig (9 N/A)
+### iface.zig (7 N/A)
 
 | smoltcp Test | Reason |
 |---|---|
 | test_new_panic | Alloc-dependent behavior (zmoltcp is zero-alloc) |
 | test_handle_igmp | IGMP/multicast not implemented |
-| test_packet_len | IPv4 fragmentation not implemented |
-| test_ipv4_fragment_size | IPv4 fragmentation not implemented |
 | test_raw_socket_no_reply_udp | Raw sockets not implemented |
 | test_raw_socket_no_reply_tcp | Raw sockets not implemented |
 | test_raw_socket_with_udp_socket | Raw sockets not implemented |

@@ -14,6 +14,7 @@ const dhcp_wire = @import("wire/dhcp.zig");
 const dhcp_socket_mod = @import("socket/dhcp.zig");
 const dns_socket_mod = @import("socket/dns.zig");
 const iface_mod = @import("iface.zig");
+const frag_mod = @import("fragmentation.zig");
 const time = @import("time.zig");
 
 const Instant = time.Instant;
@@ -65,11 +66,16 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
     const has_dhcp = SocketConfig != void and @hasField(SocketConfig, "dhcp_sockets");
     const has_dns = SocketConfig != void and @hasField(SocketConfig, "dns_sockets");
 
+    const FRAG_BUFFER_SIZE = 4096;
+    const IP_MTU = MAX_FRAME_LEN - ethernet.HEADER_LEN;
+
     return struct {
         const Self = @This();
 
         iface: iface_mod.Interface,
         sockets: SocketConfig,
+        fragmenter: frag_mod.Fragmenter(FRAG_BUFFER_SIZE) = .{},
+        ipv4_id: u16 = 0,
 
         pub fn init(hw_addr: ethernet.Address, sockets: SocketConfig) Self {
             return .{
@@ -88,6 +94,18 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             }
 
             if (self.processEgress(timestamp, device)) activity = true;
+
+            // Drain pending IPv4 fragments.
+            if (self.fragmenter.finished()) {
+                self.fragmenter.reset();
+            }
+            if (!self.fragmenter.isEmpty()) {
+                var frame_buf: [MAX_FRAME_LEN]u8 = undefined;
+                if (self.fragmenter.emitNext(&frame_buf, self.iface.hardware_addr, IP_MTU)) |len| {
+                    device.transmit(frame_buf[0..len]);
+                    activity = true;
+                }
+            }
 
             return activity;
         }
@@ -344,13 +362,39 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             payload_data: []const u8,
             device: *Device,
         ) void {
+            const total_ip_len = ipv4.HEADER_LEN + payload_data.len;
+
+            if (total_ip_len > IP_MTU) {
+                // Fragmentation path: payload exceeds IP MTU.
+                const dst_mac = self.iface.neighbor_cache.lookup(dst_addr, self.iface.now) orelse
+                    ethernet.BROADCAST;
+                self.ipv4_id +%= 1;
+                if (!self.fragmenter.stage(
+                    payload_data,
+                    src_addr,
+                    dst_addr,
+                    protocol,
+                    hop_limit,
+                    self.ipv4_id,
+                    dst_mac,
+                )) return;
+
+                // Emit first fragment immediately.
+                var frame_buf: [MAX_FRAME_LEN]u8 = undefined;
+                if (self.fragmenter.emitNext(&frame_buf, self.iface.hardware_addr, IP_MTU)) |len| {
+                    device.transmit(frame_buf[0..len]);
+                }
+                return;
+            }
+
+            // Direct path: fits in one frame.
             var buf: [MAX_FRAME_LEN]u8 = undefined;
 
             const ip_repr = ipv4.Repr{
                 .version = 4,
                 .ihl = 5,
                 .dscp_ecn = 0,
-                .total_length = @intCast(ipv4.HEADER_LEN + payload_data.len),
+                .total_length = @intCast(total_ip_len),
                 .identification = 0,
                 .dont_fragment = true,
                 .more_fragments = false,
@@ -1621,6 +1665,100 @@ test "stack DNS pollAt returns retransmit deadline" {
 
     const poll_at = stack.pollAt() orelse return error.TestUnexpectedResult;
     try testing.expectEqual(Instant.fromSecs(1), poll_at);
+}
+
+// -------------------------------------------------------------------------
+// IPv4 fragmentation integration tests
+// -------------------------------------------------------------------------
+
+test "stack IPv4 fragmentation never exceeds MTU" {
+    // [smoltcp:iface/interface/tests/ipv4.rs:test_packet_len]
+    const FragDevice = LoopbackDevice(16);
+    const FragStack = Stack(FragDevice, void);
+
+    var device = FragDevice.init();
+    var stack = FragStack.init(LOCAL_HW, {});
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    // Populate neighbor cache via ARP exchange.
+    var arp_buf: [128]u8 = undefined;
+    device.enqueueRx(buildArpRequest(&arp_buf));
+    _ = stack.poll(Instant.ZERO, &device);
+    _ = device.dequeueTx();
+
+    // Test payload sizes: fits in one frame, exactly at IP MTU limit,
+    // one byte over, and well over (multiple fragments).
+    const test_sizes = [_]usize{ 100, IP_PAYLOAD_MAX, IP_PAYLOAD_MAX + 1, 3000 };
+
+    for (test_sizes) |size| {
+        var payload: [3000]u8 = undefined;
+        for (payload[0..size], 0..) |*b, i| b.* = @truncate(i);
+
+        stack.emitIpv4Frame(LOCAL_IP, REMOTE_IP, .udp, 64, payload[0..size], &device);
+
+        while (device.dequeueTx()) |frame| {
+            try testing.expect(frame.len <= MAX_FRAME_LEN);
+        }
+
+        // Drain remaining fragments via poll.
+        while (!stack.fragmenter.isEmpty()) {
+            if (stack.fragmenter.finished()) {
+                stack.fragmenter.reset();
+                break;
+            }
+            _ = stack.poll(Instant.ZERO, &device);
+            while (device.dequeueTx()) |frame| {
+                try testing.expect(frame.len <= MAX_FRAME_LEN);
+            }
+        }
+        stack.fragmenter.reset();
+    }
+}
+
+test "stack IPv4 fragment payload is 8-byte aligned" {
+    // [smoltcp:iface/interface/tests/ipv4.rs:test_ipv4_fragment_size]
+    const FragDevice = LoopbackDevice(16);
+    const FragStack = Stack(FragDevice, void);
+
+    var device = FragDevice.init();
+    var stack = FragStack.init(LOCAL_HW, {});
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    // Populate neighbor cache.
+    var arp_buf: [128]u8 = undefined;
+    device.enqueueRx(buildArpRequest(&arp_buf));
+    _ = stack.poll(Instant.ZERO, &device);
+    _ = device.dequeueTx();
+
+    // Send a payload requiring 3+ fragments.
+    var payload: [3000]u8 = undefined;
+    for (&payload, 0..) |*b, i| b.* = @truncate(i);
+
+    stack.emitIpv4Frame(LOCAL_IP, REMOTE_IP, .udp, 64, &payload, &device);
+
+    var frag_count: usize = 0;
+    var total_ip_payload: usize = 0;
+
+    while (true) {
+        while (device.dequeueTx()) |frame| {
+            const ip_data = try ethernet.payload(frame);
+            const ip_repr = try ipv4.parse(ip_data);
+            const ip_payload_len = @as(usize, ip_repr.total_length) - ipv4.HEADER_LEN;
+            total_ip_payload += ip_payload_len;
+
+            // Non-final fragments must have 8-byte-aligned payloads.
+            if (ip_repr.more_fragments) {
+                try testing.expect(ip_payload_len % frag_mod.IPV4_FRAGMENT_ALIGNMENT == 0);
+            }
+            frag_count += 1;
+        }
+
+        if (stack.fragmenter.isEmpty() or stack.fragmenter.finished()) break;
+        _ = stack.poll(Instant.ZERO, &device);
+    }
+
+    try testing.expect(frag_count >= 3);
+    try testing.expectEqual(@as(usize, 3000), total_ip_payload);
 }
 
 fn buildIpv4FrameFrom(buf: []u8, src: ipv4.Address, dst: ipv4.Address, protocol: ipv4.Protocol, payload_data: []const u8) []const u8 {

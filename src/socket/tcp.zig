@@ -55,6 +55,8 @@ pub const TcpRepr = struct {
     window_scale: ?u8 = null,
     max_seg_size: ?u16 = null,
     sack_permitted: bool = false,
+    sack_ranges: [3]?wire_tcp.SackRange = .{ null, null, null },
+    timestamp: ?wire_tcp.Timestamp = null,
     payload: []const u8 = &.{},
 
     pub fn segmentLen(self: TcpRepr) usize {
@@ -83,6 +85,8 @@ pub const TcpRepr = struct {
             .window_scale = w.window_scale,
             .max_seg_size = w.max_seg_size,
             .sack_permitted = w.sack_permitted,
+            .sack_ranges = w.sack_ranges,
+            .timestamp = w.timestamp,
             .payload = tcp_payload,
         };
     }
@@ -104,6 +108,8 @@ pub const TcpRepr = struct {
             .max_seg_size = self.max_seg_size,
             .window_scale = self.window_scale,
             .sack_permitted = self.sack_permitted,
+            .sack_ranges = self.sack_ranges,
+            .timestamp = self.timestamp,
         };
     }
 };
@@ -406,6 +412,9 @@ pub fn Socket(comptime max_asm_segs: usize) type {
         remote_mss: usize,
         remote_last_ts: ?Instant,
 
+        tsval_generator: ?*const fn () u32,
+        last_remote_tsval: u32,
+
         local_rx_last_seq: ?SeqNumber,
         local_rx_last_ack: ?SeqNumber,
         local_rx_dup_acks: u8,
@@ -446,6 +455,8 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                 .remote_has_sack = false,
                 .remote_mss = DEFAULT_MSS,
                 .remote_last_ts = null,
+                .tsval_generator = null,
+                .last_remote_tsval = 0,
                 .local_rx_last_seq = null,
                 .local_rx_last_ack = null,
                 .local_rx_dup_acks = 0,
@@ -477,6 +488,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
             self.remote_has_sack = false;
             self.remote_mss = DEFAULT_MSS;
             self.remote_last_ts = null;
+            self.last_remote_tsval = 0;
             self.local_rx_last_seq = null;
             self.local_rx_last_ack = null;
             self.local_rx_dup_acks = 0;
@@ -524,6 +536,14 @@ pub fn Socket(comptime max_asm_segs: usize) type {
         fn scaledWindow(self: Self) u16 {
             const shifted = self.rx_buffer.window() >> @intCast(self.remote_win_shift);
             return if (shifted > std.math.maxInt(u16)) std.math.maxInt(u16) else @intCast(shifted);
+        }
+
+        pub fn setTsvalGenerator(self: *Self, gen: ?*const fn () u32) void {
+            self.tsval_generator = gen;
+        }
+
+        pub fn timestampEnabled(self: Self) bool {
+            return self.tsval_generator != null;
         }
 
         // -- Connection lifecycle --
@@ -845,6 +865,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                         self.remote_has_sack = repr.sack_permitted;
                         self.remote_win_scale = repr.window_scale;
                         if (self.remote_win_scale == null) self.remote_win_shift = 0;
+                        if (repr.timestamp == null) self.tsval_generator = null;
                         self.state = .syn_received;
                         self.timer.setForIdle(timestamp, self.keep_alive);
                     },
@@ -886,6 +907,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                         self.remote_has_sack = repr.sack_permitted;
                         self.remote_win_scale = repr.window_scale;
                         if (self.remote_win_scale == null) self.remote_win_shift = 0;
+                        if (repr.timestamp == null) self.tsval_generator = null;
 
                         if (repr.ack_number != null) {
                             self.state = .established;
@@ -987,6 +1009,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
 
             // Update remote state.
             self.remote_last_ts = timestamp;
+            if (repr.timestamp) |ts| self.last_remote_tsval = ts.tsval;
 
             const scale: u8 = if (repr.control == .syn) 0 else self.remote_win_scale orelse 0;
             const new_remote_win_len = @as(usize, repr.window_len) << @intCast(scale);
@@ -1194,6 +1217,11 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                 repr.max_seg_size = BASE_MSS;
             }
 
+            // RFC 7323: generate timestamp option on outgoing segments.
+            if (self.tsval_generator) |gen| {
+                repr.timestamp = .{ .tsval = gen(), .tsecr = self.last_remote_tsval };
+            }
+
             self.timer.rewindKeepAlive(timestamp, self.keep_alive);
             self.ack_delay_timer = .idle;
 
@@ -1370,6 +1398,24 @@ pub fn Socket(comptime max_asm_segs: usize) type {
             self.remote_last_ack = reply.ack_number;
             reply.window_len = self.scaledWindow();
             self.remote_last_win = reply.window_len;
+            if (self.tsval_generator) |gen| {
+                if (repr.timestamp) |ts| {
+                    reply.timestamp = .{ .tsval = gen(), .tsecr = ts.tsval };
+                }
+            }
+            if (self.remote_has_sack) {
+                const ack_seq = reply.ack_number.?.toU32();
+                var iter = self.assembler.iterData(@as(usize, ack_seq));
+                var ri: usize = 0;
+                while (ri < 3) : (ri += 1) {
+                    if (iter.next()) |pair| {
+                        reply.sack_ranges[ri] = .{
+                            .left = @truncate(pair[0]),
+                            .right = @truncate(pair[1]),
+                        };
+                    } else break;
+                }
+            }
             return reply;
         }
 
@@ -6152,4 +6198,265 @@ test "pollAt established with keep-alive returns timer deadline" {
 
     const poll_at = s.pollAt() orelse return error.TestUnexpectedResult;
     try testing.expectEqual(Instant.fromSecs(10), poll_at);
+}
+
+// -- TCP Timestamps (RFC 7323) --
+
+fn testTsvalGenerator() u32 {
+    return 1;
+}
+
+// [smoltcp:socket/tcp.rs:test_tsval_established_connection]
+test "tsval established connection" {
+    var s = socketEstablished();
+    s.setTsvalGenerator(&testTsvalGenerator);
+    try testing.expect(s.timestampEnabled());
+
+    // First roundtrip: send data, expect timestamp on outgoing segment.
+    try testing.expectEqual(@as(usize, 6), s.sendSlice("abcdef"));
+    const seg1 = recvAt0(&s) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualSlices(u8, "abcdef", seg1.payload);
+    try testing.expectEqual(@as(u32, 1), seg1.timestamp.?.tsval);
+    try testing.expectEqual(@as(u32, 0), seg1.timestamp.?.tsecr);
+
+    // ACK from remote with its own timestamp.
+    _ = sendPacketAt0(&s, .{
+        .src_port = REMOTE_PORT,
+        .dst_port = LOCAL_PORT,
+        .seq_number = REMOTE_SEQ.add(1),
+        .ack_number = LOCAL_SEQ.add(1).add(6),
+        .window_len = 256,
+        .timestamp = .{ .tsval = 500, .tsecr = 1 },
+    });
+    try testing.expectEqual(@as(usize, 0), s.tx_buffer.len());
+
+    // Second roundtrip: tsecr should echo the remote's last tsval (500).
+    try testing.expectEqual(@as(usize, 6), s.sendSlice("foobar"));
+    const seg2 = recvAt0(&s) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualSlices(u8, "foobar", seg2.payload);
+    try testing.expectEqual(@as(u32, 1), seg2.timestamp.?.tsval);
+    try testing.expectEqual(@as(u32, 500), seg2.timestamp.?.tsecr);
+
+    // ACK without timestamp option.
+    _ = sendPacketAt0(&s, .{
+        .src_port = REMOTE_PORT,
+        .dst_port = LOCAL_PORT,
+        .seq_number = REMOTE_SEQ.add(1),
+        .ack_number = LOCAL_SEQ.add(1).add(12),
+        .window_len = 256,
+    });
+    try testing.expectEqual(@as(usize, 0), s.tx_buffer.len());
+}
+
+// [smoltcp:socket/tcp.rs:test_tsval_disabled_in_remote_client]
+test "tsval disabled in remote client" {
+    var s = socketListen();
+    s.setTsvalGenerator(&testTsvalGenerator);
+    try testing.expect(s.timestampEnabled());
+
+    // Remote SYN without timestamp: server disables timestamps.
+    _ = sendPacketAt0(&s, .{
+        .src_port = REMOTE_PORT,
+        .dst_port = LOCAL_PORT,
+        .control = .syn,
+        .seq_number = REMOTE_SEQ,
+        .ack_number = null,
+        .window_len = 256,
+    });
+    try testing.expectEqual(State.syn_received, s.state);
+    try testing.expect(!s.timestampEnabled());
+
+    // SYN-ACK should have no timestamp.
+    const synack = recvAt0(&s) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(Control.syn, synack.control);
+    try testing.expect(synack.timestamp == null);
+    try testing.expectEqual(BASE_MSS, synack.max_seg_size.?);
+
+    // Complete handshake.
+    _ = sendPacketAt0(&s, .{
+        .src_port = REMOTE_PORT,
+        .dst_port = LOCAL_PORT,
+        .seq_number = REMOTE_SEQ.add(1),
+        .ack_number = LOCAL_SEQ.add(1),
+        .window_len = 256,
+    });
+    try testing.expectEqual(State.established, s.state);
+}
+
+// [smoltcp:socket/tcp.rs:test_tsval_disabled_in_local_server]
+test "tsval disabled in local server" {
+    var s = socketListen();
+    // No tsval generator set (default).
+    try testing.expect(!s.timestampEnabled());
+
+    // Remote SYN WITH timestamp: server still has no generator, so no TS.
+    _ = sendPacketAt0(&s, .{
+        .src_port = REMOTE_PORT,
+        .dst_port = LOCAL_PORT,
+        .control = .syn,
+        .seq_number = REMOTE_SEQ,
+        .ack_number = null,
+        .window_len = 256,
+        .timestamp = .{ .tsval = 500, .tsecr = 0 },
+    });
+    try testing.expectEqual(State.syn_received, s.state);
+    try testing.expect(!s.timestampEnabled());
+
+    // SYN-ACK should have no timestamp.
+    const synack = recvAt0(&s) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(Control.syn, synack.control);
+    try testing.expect(synack.timestamp == null);
+    try testing.expectEqual(BASE_MSS, synack.max_seg_size.?);
+
+    // Complete handshake.
+    _ = sendPacketAt0(&s, .{
+        .src_port = REMOTE_PORT,
+        .dst_port = LOCAL_PORT,
+        .seq_number = REMOTE_SEQ.add(1),
+        .ack_number = LOCAL_SEQ.add(1),
+        .window_len = 256,
+    });
+    try testing.expectEqual(State.established, s.state);
+}
+
+// [smoltcp:socket/tcp.rs:test_tsval_disabled_in_remote_server]
+test "tsval disabled in remote server" {
+    var s = socketNew();
+    s.setTsvalGenerator(&testTsvalGenerator);
+    try testing.expect(s.timestampEnabled());
+    s.local_seq_no = LOCAL_SEQ;
+    try s.connect(REMOTE_ADDR, REMOTE_PORT, LOCAL_ADDR, LOCAL_PORT);
+
+    // Dispatch SYN: should include timestamp.
+    const syn = recvAt0(&s) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(Control.syn, syn.control);
+    try testing.expect(syn.sack_permitted);
+    try testing.expectEqual(@as(u32, 1), syn.timestamp.?.tsval);
+    try testing.expectEqual(@as(u32, 0), syn.timestamp.?.tsecr);
+
+    // SYN-ACK without timestamp: client disables timestamps.
+    _ = sendPacketAt0(&s, .{
+        .src_port = REMOTE_PORT,
+        .dst_port = LOCAL_PORT,
+        .control = .syn,
+        .seq_number = REMOTE_SEQ,
+        .ack_number = LOCAL_SEQ.add(1),
+        .window_len = 256,
+        .max_seg_size = BASE_MSS - 80,
+        .window_scale = 0,
+    });
+    try testing.expect(!s.timestampEnabled());
+
+    // Data segment should have no timestamp.
+    try testing.expectEqual(@as(usize, 6), s.sendSlice("abcdef"));
+    const data = recvAt0(&s) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualSlices(u8, "abcdef", data.payload);
+    try testing.expect(data.timestamp == null);
+}
+
+// [smoltcp:socket/tcp.rs:test_tsval_disabled_in_local_client]
+test "tsval disabled in local client" {
+    var s = socketNew();
+    // No tsval generator set (default).
+    try testing.expect(!s.timestampEnabled());
+    s.local_seq_no = LOCAL_SEQ;
+    try s.connect(REMOTE_ADDR, REMOTE_PORT, LOCAL_ADDR, LOCAL_PORT);
+
+    // Dispatch SYN: should have no timestamp.
+    const syn = recvAt0(&s) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(Control.syn, syn.control);
+    try testing.expect(syn.sack_permitted);
+    try testing.expect(syn.timestamp == null);
+
+    // SYN-ACK WITH timestamp: client still has no generator, so no TS.
+    _ = sendPacketAt0(&s, .{
+        .src_port = REMOTE_PORT,
+        .dst_port = LOCAL_PORT,
+        .control = .syn,
+        .seq_number = REMOTE_SEQ,
+        .ack_number = LOCAL_SEQ.add(1),
+        .window_len = 256,
+        .max_seg_size = BASE_MSS - 80,
+        .window_scale = 0,
+        .timestamp = .{ .tsval = 500, .tsecr = 0 },
+    });
+    try testing.expect(!s.timestampEnabled());
+
+    // Data segment should have no timestamp.
+    try testing.expectEqual(@as(usize, 6), s.sendSlice("abcdef"));
+    const data_seg = recvAt0(&s) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualSlices(u8, "abcdef", data_seg.payload);
+    try testing.expect(data_seg.timestamp == null);
+}
+
+// -- SACK Blocks (RFC 2018) --
+
+// [smoltcp:socket/tcp.rs:test_established_rfc2018_cases]
+test "established rfc2018 cases" {
+    // Setup: socket with 4000-byte buffers.
+    var s = socketWithBuffers(4000, 4000);
+    s.state = .syn_received;
+    s.listen_endpoint = LISTEN_END;
+    s.tuple = .{
+        .local = .{ .addr = LOCAL_ADDR, .port = LOCAL_PORT },
+        .remote = .{ .addr = REMOTE_ADDR, .port = REMOTE_PORT },
+    };
+    s.local_seq_no = LOCAL_SEQ;
+    s.remote_seq_no = REMOTE_SEQ.add(1);
+    s.remote_last_seq = LOCAL_SEQ;
+    s.remote_win_len = 256;
+
+    // Transition to ESTABLISHED.
+    s.state = .established;
+    s.local_seq_no = LOCAL_SEQ.add(1);
+    s.remote_last_seq = LOCAL_SEQ.add(1);
+    s.remote_last_ack = REMOTE_SEQ.add(1);
+    s.remote_last_win = s.scaledWindow();
+    s.remote_has_sack = true;
+
+    // Send 10 in-order segments of 500 bytes to advance ACK to REMOTE_SEQ+1+5000.
+    const segment = "abcdefghij" ** 50; // 500 bytes
+    var offset: usize = 0;
+    while (offset < 5000) : (offset += 500) {
+        _ = sendPacketAt0(&s, .{
+            .src_port = REMOTE_PORT,
+            .dst_port = LOCAL_PORT,
+            .seq_number = REMOTE_SEQ.add(1).add(offset),
+            .ack_number = LOCAL_SEQ.add(1),
+            .window_len = 256,
+            .payload = segment[0..500],
+        });
+
+        // Drain any ACK generated.
+        _ = recvAt0(&s);
+
+        // Consume from rx buffer.
+        var recv_buf: [500]u8 = undefined;
+        const n = s.recvSlice(&recv_buf) catch 0;
+        try testing.expectEqual(@as(usize, 500), n);
+    }
+
+    // RFC 2018 Case 2: First segment (at +5000) is dropped, remaining 7 arrive.
+    // Each OOO segment should trigger an ACK with SACK block.
+    const ack_base = REMOTE_SEQ.add(1).add(5000);
+    var sack_offset: usize = 500;
+    while (sack_offset < 4000) : (sack_offset += 500) {
+        const reply = sendPacketAt0(&s, .{
+            .src_port = REMOTE_PORT,
+            .dst_port = LOCAL_PORT,
+            .seq_number = REMOTE_SEQ.add(1).add(5000 + sack_offset),
+            .ack_number = LOCAL_SEQ.add(1),
+            .window_len = 256,
+            .payload = segment[0..500],
+        }) orelse return error.TestUnexpectedResult;
+
+        // ACK should still be at 5000 (gap not filled).
+        try testing.expect(reply.ack_number.?.eql(ack_base));
+
+        // SACK should show the contiguous out-of-order block.
+        const sack = reply.sack_ranges[0] orelse return error.TestUnexpectedResult;
+        try testing.expectEqual(REMOTE_SEQ.add(1).add(5500).toU32(), sack.left);
+        try testing.expectEqual(REMOTE_SEQ.add(1).add(5500 + sack_offset).toU32(), sack.right);
+        try testing.expect(reply.sack_ranges[1] == null);
+    }
 }
