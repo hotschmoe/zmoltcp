@@ -174,6 +174,11 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 ## Socket Layer Tests
 
 ### socket/tcp.zig
+
+Note: TCP tests are now included in the root test runner (`src/root.zig`) and
+execute in CI. Prior to this, the TCP imports were commented out and these tests
+were never actually run despite being listed here. The test module runs with
+`.single_threaded = true` to avoid shared-buffer races between tests.
 | smoltcp Reference | zmoltcp Test | Status |
 |---|---|---|
 | (original) | "rtt estimator first sample" | PASS |

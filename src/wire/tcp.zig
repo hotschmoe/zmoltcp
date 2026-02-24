@@ -222,8 +222,8 @@ fn parseOptions(options: []const u8, repr: *Repr) void {
                 repr.sack_permitted = true;
                 i += 2;
             },
-            _ => {
-                // Unknown option: skip using length field
+            .sack, .timestamps, _ => {
+                // Known-but-unhandled and unknown options: skip using length field
                 if (i + 1 >= options.len) return;
                 const opt_len = options[i + 1];
                 if (opt_len < 2) return;

@@ -717,7 +717,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                         } else {
                             if (win_empty) break :blk false;
                             break :blk (segment_start.greaterThanOrEqual(window_start) and segment_start.lessThan(window_end)) or
-                                (segment_end.greaterThan(window_start) and segment_end.eql(window_end) or segment_end.lessThan(window_end));
+                                (segment_end.greaterThan(window_start) and (segment_end.eql(window_end) or segment_end.lessThan(window_end)));
                         }
                     };
 
@@ -950,7 +950,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                         ack_number.lessThan(self.remote_last_seq) and
                         !is_window_update)
                     {
-                        self.local_rx_dup_acks = @min(self.local_rx_dup_acks + 1, 255);
+                        self.local_rx_dup_acks +|= 1;
                         if (self.local_rx_dup_acks == 3) {
                             self.timer.setForFastRetransmit();
                         }
@@ -1345,16 +1345,15 @@ fn socketNew() TestSocket {
 }
 
 fn socketWithBuffers(comptime tx_len: usize, comptime rx_len: usize) TestSocket {
-    var s = TestSocket.init(
-        &socketBacking(rx_len),
-        &socketBacking(tx_len),
-    );
+    const S = struct {
+        var rx_buf: [rx_len]u8 = .{0} ** rx_len;
+        var tx_buf: [tx_len]u8 = .{0} ** tx_len;
+    };
+    @memset(&S.rx_buf, 0);
+    @memset(&S.tx_buf, 0);
+    var s = TestSocket.init(&S.rx_buf, &S.tx_buf);
     s.ack_delay = null;
     return s;
-}
-
-fn socketBacking(comptime size: usize) [size]u8 {
-    return [_]u8{0} ** size;
 }
 
 fn socketListen() TestSocket {
@@ -1367,6 +1366,7 @@ fn socketListen() TestSocket {
 fn socketSynReceived() TestSocket {
     var s = socketNew();
     s.state = .syn_received;
+    s.listen_endpoint = LISTEN_END;
     s.tuple = .{
         .local = .{ .addr = LOCAL_ADDR, .port = LOCAL_PORT },
         .remote = .{ .addr = REMOTE_ADDR, .port = REMOTE_PORT },
@@ -1526,7 +1526,7 @@ test "rtt estimator backoff" {
     const rto_before = rtte.rto;
     rtte.onRetransmit();
     try testing.expectEqual(rto_before * 2, rtte.rto);
-    try testing.expectEqual(@as(?@TypeOf(rtte.timestamp), null), rtte.timestamp);
+    try testing.expect(rtte.timestamp == null);
 }
 
 test "timer idle and retransmit" {
@@ -1845,9 +1845,11 @@ test "ESTABLISHED recv data" {
         .window_len = SEND_TEMPL.window_len,
         .payload = "abcdef",
     });
-    // Should get an ACK reply since data arrived.
-    try testing.expect(reply != null);
-    try testing.expect(reply.?.ack_number.?.eql(REMOTE_SEQ.add(1).add(6)));
+    // In-order data: process() defers ACK to dispatch().
+    try testing.expectEqual(@as(?TcpRepr, null), reply);
+    const ack = recvAt0(&s);
+    try testing.expect(ack != null);
+    try testing.expect(ack.?.ack_number.?.eql(REMOTE_SEQ.add(1).add(6)));
 
     // Read the data back.
     var buf: [6]u8 = undefined;
@@ -1888,7 +1890,10 @@ test "ESTABLISHED send and receive" {
         .window_len = SEND_TEMPL.window_len,
         .payload = "ghijkl",
     });
-    try testing.expect(reply != null);
+    // In-order data: process() defers ACK to dispatch().
+    try testing.expectEqual(@as(?TcpRepr, null), reply);
+    const ack = recvAt0(&s);
+    try testing.expect(ack != null);
 
     var buf: [6]u8 = undefined;
     const n = try s.recvSlice(&buf);
@@ -2016,6 +2021,10 @@ test "CLOSING recv ACK -> TIME-WAIT" {
 // [smoltcp:socket/tcp.rs:test_time_wait_expire]
 test "TIME-WAIT expires to CLOSED" {
     var s = socketTimeWait(false);
+    // Drain the pending ACK for the remote's FIN.
+    const ack = recvAt0(&s);
+    try testing.expect(ack != null);
+    try testing.expectEqual(State.time_wait, s.state);
     // Dispatch at a time past the close timer: should reset.
     const result = s.dispatch(Instant.fromSecs(1).add(CLOSE_DELAY));
     try testing.expectEqual(@as(?TestSocket.DispatchResult, null), result);
@@ -2067,8 +2076,9 @@ test "retransmission after timeout" {
 test "keep alive sends probes" {
     var s = socketEstablished();
     s.keep_alive = Duration.fromMillis(500);
+    s.timer.setForIdle(Instant.ZERO, s.keep_alive);
 
-    // Initial: should be idle, no packet.
+    // Before keep-alive interval: no packet.
     const p1 = recvPacket(&s, Instant.fromMillis(100));
     try testing.expectEqual(@as(?TcpRepr, null), p1);
 
@@ -3126,9 +3136,11 @@ test "PSH on receive is treated as normal data" {
         .window_len = SEND_TEMPL.window_len,
         .payload = "abcdef",
     });
-    // Should get an ACK back.
-    try testing.expect(reply != null);
-    try testing.expect(reply.?.ack_number.?.eql(REMOTE_SEQ.add(1).add(6)));
+    // In-order data: process() defers ACK to dispatch().
+    try testing.expectEqual(@as(?TcpRepr, null), reply);
+    const ack = recvAt0(&s);
+    try testing.expect(ack != null);
+    try testing.expect(ack.?.ack_number.?.eql(REMOTE_SEQ.add(1).add(6)));
 
     var buf: [6]u8 = undefined;
     const n = try s.recvSlice(&buf);
@@ -4243,8 +4255,9 @@ test "established keep alive timeout" {
     var s = socketEstablished();
     s.keep_alive = Duration.fromMillis(50);
     s.timeout = Duration.fromMillis(100);
+    s.timer.setForIdle(Instant.ZERO, s.keep_alive);
 
-    // First keep-alive probe.
+    // First keep-alive probe at t >= 50ms.
     const ka1 = recvPacket(&s, Instant.fromMillis(100));
     try testing.expect(ka1 != null);
     try testing.expectEqual(@as(usize, 1), ka1.?.payload.len);
@@ -4536,13 +4549,10 @@ test "closed timeout" {
 test "sends keep alive probes" {
     var s = socketEstablished();
     s.keep_alive = Duration.fromMillis(100);
+    s.timer.setForIdle(Instant.ZERO, s.keep_alive);
 
-    // Drain forced initial keep-alive probe.
-    const ka0 = recvPacket(&s, Instant.fromMillis(0));
-    try testing.expect(ka0 != null);
-    try testing.expectEqual(@as(usize, 1), ka0.?.payload.len);
-
-    // Nothing before 100ms.
+    // No probe before interval.
+    try testing.expectEqual(@as(?TcpRepr, null), recvPacket(&s, Instant.fromMillis(0)));
     try testing.expectEqual(@as(?TcpRepr, null), recvPacket(&s, Instant.fromMillis(95)));
 
     // At 100ms, keep-alive fires.
@@ -4565,7 +4575,7 @@ test "sends keep alive probes" {
         .window_len = SEND_TEMPL.window_len,
     });
 
-    // Next keep-alive at 350ms.
+    // Next keep-alive at 350ms (250 + 100).
     try testing.expectEqual(@as(?TcpRepr, null), recvPacket(&s, Instant.fromMillis(345)));
     const ka3 = recvPacket(&s, Instant.fromMillis(350));
     try testing.expect(ka3 != null);
@@ -4847,11 +4857,15 @@ test "peek slice buffer wrap" {
     // Now enqueue 5 more, which wraps around.
     _ = s.rx_buffer.enqueueSlice("01234");
 
-    // Peek and recv should match.
+    // peek() returns only the first contiguous segment (up to the buffer wrap point).
     const peeked = try s.peek(10);
+    try testing.expectEqualSlices(u8, "6701", peeked);
+
+    // recvSlice() returns all data including the wrapped portion.
     var recv_buf: [10]u8 = undefined;
     const recv_len = try s.recvSlice(&recv_buf);
-    try testing.expectEqualSlices(u8, peeked, recv_buf[0..recv_len]);
+    try testing.expectEqual(@as(usize, 7), recv_len);
+    try testing.expectEqualSlices(u8, "6701234", recv_buf[0..recv_len]);
 }
 
 // =========================================================================

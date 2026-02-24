@@ -42,9 +42,6 @@ test {
     _ = @import("storage/assembler.zig");
     _ = @import("socket/udp.zig");
     _ = @import("socket/icmp.zig");
-    // TODO: wire/tcp.zig has a switch exhaustiveness issue (sack/timestamps);
-    // socket/tcp.zig test helpers pass *const to []u8 params. Both are
-    // pre-existing and need separate fixes before inclusion here.
-    // _ = @import("wire/tcp.zig");
-    // _ = @import("socket/tcp.zig");
+    _ = @import("wire/tcp.zig");
+    _ = @import("socket/tcp.zig");
 }
