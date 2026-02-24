@@ -143,9 +143,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     }
                     var handled = self.routeToUdpSockets(ip_repr, ip_payload);
                     if (comptime has_dns) {
-                        if (!handled and self.routeToDnsSockets(ip_repr, ip_payload)) {
-                            handled = true;
-                        }
+                        if (!handled) handled = self.routeToDnsSockets(ip_payload);
                     }
                     if (self.iface.processUdp(ip_repr, ip_payload, handled)) |response| {
                         self.emitResponse(response, device);
@@ -242,8 +240,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             return false;
         }
 
-        fn routeToDnsSockets(self: *Self, ip_repr: ipv4.Repr, raw_udp: []const u8) bool {
-            _ = ip_repr;
+        fn routeToDnsSockets(self: *Self, raw_udp: []const u8) bool {
             if (comptime !has_dns) return false;
 
             const wire_repr = udp_wire.parse(raw_udp) catch return false;
@@ -415,12 +412,8 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
         }
 
         fn emitDhcpEgress(self: *Self, sock: anytype, result: dhcp_socket_mod.DispatchResult, device: *Device) void {
-            var payload_buf: [MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv4.HEADER_LEN]u8 = undefined;
-
-            const dhcp_len = dhcp_wire.emit(result.dhcp_repr, &payload_buf) catch return;
-
-            // Build UDP header around DHCP payload.
             var udp_buf: [MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv4.HEADER_LEN]u8 = undefined;
+            const dhcp_len = dhcp_wire.bufferLen(result.dhcp_repr);
             const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + dhcp_len);
             const hdr_len = udp_wire.emit(.{
                 .src_port = sock.client_port,
@@ -429,7 +422,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                 .checksum = 0,
             }, &udp_buf) catch return;
             if (hdr_len + dhcp_len > udp_buf.len) return;
-            @memcpy(udp_buf[hdr_len..][0..dhcp_len], payload_buf[0..dhcp_len]);
+            _ = dhcp_wire.emit(result.dhcp_repr, udp_buf[hdr_len..]) catch return;
             const total = hdr_len + dhcp_len;
 
             udp_wire.fillChecksum(udp_buf[0..total], result.src_ip, result.dst_ip);
@@ -779,30 +772,7 @@ test "stack pollAt returns null with no sockets" {
 }
 
 fn buildIpv4Frame(buf: []u8, protocol: ipv4.Protocol, payload_data: []const u8) []const u8 {
-    const ip_repr = ipv4.Repr{
-        .version = 4,
-        .ihl = 5,
-        .dscp_ecn = 0,
-        .total_length = @intCast(ipv4.HEADER_LEN + payload_data.len),
-        .identification = 0,
-        .dont_fragment = false,
-        .more_fragments = false,
-        .fragment_offset = 0,
-        .ttl = 64,
-        .protocol = protocol,
-        .checksum = 0,
-        .src_addr = REMOTE_IP,
-        .dst_addr = LOCAL_IP,
-    };
-    const eth_repr = ethernet.Repr{
-        .dst_addr = LOCAL_HW,
-        .src_addr = REMOTE_HW,
-        .ethertype = .ipv4,
-    };
-    const eth_len = ethernet.emit(eth_repr, buf) catch unreachable;
-    const ip_len = ipv4.emit(ip_repr, buf[eth_len..]) catch unreachable;
-    @memcpy(buf[eth_len + ip_len ..][0..payload_data.len], payload_data);
-    return buf[0 .. eth_len + ip_len + payload_data.len];
+    return buildIpv4FrameFrom(buf, REMOTE_IP, LOCAL_IP, protocol, payload_data);
 }
 
 test "stack TCP SYN no listener produces RST" {
