@@ -271,6 +271,14 @@ fn parseOptions(options: []const u8, repr: *Repr) void {
     }
 }
 
+fn sackCount(ranges: [3]?SackRange) usize {
+    var count: usize = 0;
+    for (ranges) |range| {
+        if (range != null) count += 1;
+    }
+    return count;
+}
+
 /// Compute the header length from populated options, rounded up to 4 bytes.
 pub fn headerLen(repr: Repr) usize {
     var length: usize = HEADER_LEN;
@@ -279,11 +287,8 @@ pub fn headerLen(repr: Repr) usize {
     if (repr.sack_permitted) {
         length += 2;
     } else {
-        var sack_count: usize = 0;
-        for (repr.sack_ranges) |range| {
-            if (range != null) sack_count += 1;
-        }
-        if (sack_count > 0) length += 2 + 8 * sack_count;
+        const count = sackCount(repr.sack_ranges);
+        if (count > 0) length += 2 + 8 * count;
     }
     if (repr.timestamp != null) length += 10;
     return (length + 3) & ~@as(usize, 3);
@@ -359,13 +364,10 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
             buf[i + 1] = 2;
             i += 2;
         } else {
-            var sack_count: usize = 0;
-            for (repr.sack_ranges) |range| {
-                if (range != null) sack_count += 1;
-            }
-            if (sack_count > 0) {
+            const count = sackCount(repr.sack_ranges);
+            if (count > 0) {
                 buf[i] = @intFromEnum(OptionKind.sack);
-                buf[i + 1] = @intCast(2 + 8 * sack_count);
+                buf[i + 1] = @intCast(2 + 8 * count);
                 i += 2;
                 for (repr.sack_ranges) |maybe_range| {
                     if (maybe_range) |range| {

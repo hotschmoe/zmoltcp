@@ -95,15 +95,15 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
 
             if (self.processEgress(timestamp, device)) activity = true;
 
-            // Drain pending IPv4 fragments.
-            if (self.fragmenter.finished()) {
-                self.fragmenter.reset();
-            }
             if (!self.fragmenter.isEmpty()) {
-                var frame_buf: [MAX_FRAME_LEN]u8 = undefined;
-                if (self.fragmenter.emitNext(&frame_buf, self.iface.hardware_addr, IP_MTU)) |len| {
-                    device.transmit(frame_buf[0..len]);
-                    activity = true;
+                if (self.fragmenter.finished()) {
+                    self.fragmenter.reset();
+                } else {
+                    var frame_buf: [MAX_FRAME_LEN]u8 = undefined;
+                    if (self.fragmenter.emitNext(&frame_buf, self.iface.hardware_addr, IP_MTU)) |len| {
+                        device.transmit(frame_buf[0..len]);
+                        activity = true;
+                    }
                 }
             }
 
@@ -363,11 +363,10 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             device: *Device,
         ) void {
             const total_ip_len = ipv4.HEADER_LEN + payload_data.len;
+            const dst_mac = self.iface.neighbor_cache.lookup(dst_addr, self.iface.now) orelse
+                ethernet.BROADCAST;
 
             if (total_ip_len > IP_MTU) {
-                // Fragmentation path: payload exceeds IP MTU.
-                const dst_mac = self.iface.neighbor_cache.lookup(dst_addr, self.iface.now) orelse
-                    ethernet.BROADCAST;
                 self.ipv4_id +%= 1;
                 if (!self.fragmenter.stage(
                     payload_data,
@@ -379,7 +378,6 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     dst_mac,
                 )) return;
 
-                // Emit first fragment immediately.
                 var frame_buf: [MAX_FRAME_LEN]u8 = undefined;
                 if (self.fragmenter.emitNext(&frame_buf, self.iface.hardware_addr, IP_MTU)) |len| {
                     device.transmit(frame_buf[0..len]);
@@ -387,10 +385,15 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                 return;
             }
 
-            // Direct path: fits in one frame.
             var buf: [MAX_FRAME_LEN]u8 = undefined;
 
-            const ip_repr = ipv4.Repr{
+            const eth_len = ethernet.emit(.{
+                .dst_addr = dst_mac,
+                .src_addr = self.iface.hardware_addr,
+                .ethertype = .ipv4,
+            }, &buf) catch return;
+
+            const ip_len = ipv4.emit(.{
                 .version = 4,
                 .ihl = 5,
                 .dscp_ecn = 0,
@@ -404,19 +407,8 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                 .checksum = 0,
                 .src_addr = src_addr,
                 .dst_addr = dst_addr,
-            };
+            }, buf[eth_len..]) catch return;
 
-            const dst_mac = self.iface.neighbor_cache.lookup(dst_addr, self.iface.now) orelse
-                ethernet.BROADCAST;
-
-            const eth_repr = ethernet.Repr{
-                .dst_addr = dst_mac,
-                .src_addr = self.iface.hardware_addr,
-                .ethertype = .ipv4,
-            };
-
-            const eth_len = ethernet.emit(eth_repr, &buf) catch return;
-            const ip_len = ipv4.emit(ip_repr, buf[eth_len..]) catch return;
             const total = eth_len + ip_len + payload_data.len;
             if (total > buf.len) return;
             @memcpy(buf[eth_len + ip_len ..][0..payload_data.len], payload_data);

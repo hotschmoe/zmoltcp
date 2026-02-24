@@ -1389,33 +1389,34 @@ pub fn Socket(comptime max_asm_segs: usize) type {
         }
 
         fn ackReply(self: *Self, repr: TcpRepr) TcpRepr {
+            const ack_number = self.remote_seq_no.add(self.rx_buffer.len());
+            const window_len = self.scaledWindow();
+
+            self.remote_last_ack = ack_number;
+            self.remote_last_win = window_len;
+
             var reply = TcpRepr{
                 .src_port = repr.dst_port,
                 .dst_port = repr.src_port,
+                .seq_number = self.remote_last_seq,
+                .ack_number = ack_number,
+                .window_len = window_len,
             };
-            reply.seq_number = self.remote_last_seq;
-            reply.ack_number = self.remote_seq_no.add(self.rx_buffer.len());
-            self.remote_last_ack = reply.ack_number;
-            reply.window_len = self.scaledWindow();
-            self.remote_last_win = reply.window_len;
+
             if (self.tsval_generator) |gen| {
                 if (repr.timestamp) |ts| {
                     reply.timestamp = .{ .tsval = gen(), .tsecr = ts.tsval };
                 }
             }
+
             if (self.remote_has_sack) {
-                const ack_seq = reply.ack_number.?.toU32();
-                var iter = self.assembler.iterData(@as(usize, ack_seq));
-                var ri: usize = 0;
-                while (ri < 3) : (ri += 1) {
-                    if (iter.next()) |pair| {
-                        reply.sack_ranges[ri] = .{
-                            .left = @truncate(pair[0]),
-                            .right = @truncate(pair[1]),
-                        };
-                    } else break;
+                var iter = self.assembler.iterData(@as(usize, ack_number.toU32()));
+                for (&reply.sack_ranges) |*slot| {
+                    const pair = iter.next() orelse break;
+                    slot.* = .{ .left = @truncate(pair[0]), .right = @truncate(pair[1]) };
                 }
             }
+
             return reply;
         }
 
