@@ -167,8 +167,11 @@ wire/ipv4.zig
   - Parse IPv4 header (version, IHL, total length, TTL, protocol)
   - Validate header checksum
   - Handle options (IHL > 5)
-  - Fragment offset and flags
+  - Fragment offset and flags (DF, MF, fragment_offset)
   - Reject invalid version, bad IHL, truncated packets
+  - checkLen: validate total_length vs buffer consistency
+  - payloadSliceClamped: payload clamped to total_length (overlong buffers)
+  - CIDR contains/broadcast/networkAddr via IpCidr
 
 wire/tcp.zig
   - Parse TCP header with data offset
@@ -181,12 +184,15 @@ wire/udp.zig
   - Parse UDP datagram
   - Verify length field consistency
   - Optional checksum (0 = disabled per RFC 768)
+  - fillChecksum: write computed checksum (0xFFFF if zero per RFC 768)
+  - verifyChecksum: validate or accept disabled (0x0000)
 
 wire/icmp.zig
   - Parse echo request/reply
   - Parse destination unreachable (with embedded IP header)
   - Parse time exceeded
   - Checksum validation
+  - Minimum length validation (HEADER_LEN = 8)
 
 wire/dhcp.zig
   - Parse DHCP DISCOVER/OFFER/REQUEST/ACK
@@ -265,6 +271,12 @@ socket/tcp.zig -- TCP State Machine
     test_delayed_ack                  ACK batching
     test_keepalive                    Keepalive probes after idle
 
+  Dispatch/options:
+    test_set_hop_limit                hop_limit propagates to DispatchResult
+    test_set_hop_limit_zero           null hop_limit uses default (64)
+    test_listen_syn_win_scale_buffers windowShiftFor for various buffer sizes
+    test_syn_sent_no_window_scaling   SYN-ACK without window_scale clears shift
+
 socket/udp.zig -- UDP
     test_send_recv                    Basic datagram roundtrip
     test_buffer_full                  Drop when buffer exhausted
@@ -294,12 +306,18 @@ socket/icmp.zig -- ICMP
 
 Source: `ref/smoltcp/src/iface/interface/tests/ipv4.rs`
 
-These test the full packet processing pipeline: device receives bytes,
-interface parses them, routes to correct socket, socket produces response,
-interface serializes and sends.
+These test the packet processing pipeline at two levels:
+
+- **iface.zig**: Interface-level processing (Ethernet frame parsing, ARP
+  neighbor cache, ICMP auto-reply, address management). Returns structured
+  Response values without serialization.
+- **stack.zig**: Full end-to-end integration. Stack(Device) wraps an
+  Interface, drains RX frames from a Device, processes them, serializes
+  responses (ARP replies, IPv4/ICMP), and transmits via Device. The
+  LoopbackDevice provides an in-memory ring buffer device for testing.
 
 ```
-iface.zig (12 tests implemented)
+iface.zig (13 tests implemented)
   local_subnet_broadcasts             IpCidr broadcast detection /24, /16, /8
   get_source_address                  Source IP selection by subnet match
   get_source_address_empty            No addresses -> null
@@ -312,9 +330,16 @@ iface.zig (12 tests implemented)
   icmp_error_port_unreachable         UDP closed port: port unreachable / null for broadcast
   handle_udp_broadcast                UDP broadcast delivered to bound socket
   icmp_reply_size                     ICMP error clamped to IPV4_MIN_MTU (576)
+  any_ip_accept_arp                   any_ip mode: reply to ARP for any IP
+
+stack.zig (5 tests implemented)
+  stack_arp_request_produces_reply    End-to-end ARP request -> serialized reply via Device
+  stack_icmp_echo_produces_reply      End-to-end ICMP echo -> serialized reply with neighbor lookup
+  stack_empty_rx_returns_false        Empty RX queue returns false from poll()
+  stack_loopback_round_trip           TX -> RX loopback, re-poll processes without new response
+  stack_pollAt_returns_null           No socket timers -> null
 
 Deferred (require features not yet in zmoltcp):
-  test_any_ip_accept_arp              any_ip mode
   test_handle_igmp                    IGMP/multicast
   test_packet_len, fragment_size      IP fragmentation
   test_raw_socket_*                   Raw sockets (4 tests)

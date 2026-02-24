@@ -109,40 +109,41 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
 
 /// Validate the header checksum. Returns true if valid.
 pub fn verifyChecksum(data: []const u8) bool {
-    if (data.len < HEADER_LEN) return false;
-    const ihl: usize = @as(usize, data[0] & 0x0F) * 4;
-    if (data.len < ihl) return false;
+    const ihl = validatedHeaderLen(data) catch return false;
     return checksum.internetChecksum(data[0..ihl]) == 0;
+}
+
+/// Validate and return the header length (IHL * 4) from raw bytes.
+fn validatedHeaderLen(data: []const u8) error{ Truncated, BadHeaderLen }!usize {
+    if (data.len < HEADER_LEN) return error.Truncated;
+    const ihl: usize = @as(usize, data[0] & 0x0F) * 4;
+    if (ihl < HEADER_LEN) return error.BadHeaderLen;
+    if (data.len < ihl) return error.Truncated;
+    return ihl;
+}
+
+fn totalLength(data: []const u8) usize {
+    return @as(usize, data[2]) << 8 | @as(usize, data[3]);
 }
 
 /// Validate that the buffer is consistent: total_length must not exceed
 /// the buffer and must be at least as large as the header.
 pub fn checkLen(data: []const u8) error{ Truncated, BadHeaderLen }!void {
-    if (data.len < HEADER_LEN) return error.Truncated;
-    const ihl: usize = @as(usize, data[0] & 0x0F) * 4;
-    if (ihl < HEADER_LEN) return error.BadHeaderLen;
-    const total_len: usize = @as(usize, data[2]) << 8 | @as(usize, data[3]);
-    if (total_len < ihl) return error.Truncated;
-    if (total_len > data.len) return error.Truncated;
+    const ihl = try validatedHeaderLen(data);
+    const total_len = totalLength(data);
+    if (total_len < ihl or total_len > data.len) return error.Truncated;
 }
 
 /// Returns the payload portion of an IPv4 packet (after the header).
 pub fn payloadSlice(data: []const u8) error{ Truncated, BadHeaderLen }![]const u8 {
-    if (data.len < HEADER_LEN) return error.Truncated;
-    const ihl: usize = @as(usize, data[0] & 0x0F) * 4;
-    if (ihl < HEADER_LEN) return error.BadHeaderLen;
-    if (data.len < ihl) return error.Truncated;
+    const ihl = try validatedHeaderLen(data);
     return data[ihl..];
 }
 
 /// Returns the payload clamped to total_length (handles overlong buffers).
 pub fn payloadSliceClamped(data: []const u8) error{ Truncated, BadHeaderLen }![]const u8 {
-    if (data.len < HEADER_LEN) return error.Truncated;
-    const ihl: usize = @as(usize, data[0] & 0x0F) * 4;
-    if (ihl < HEADER_LEN) return error.BadHeaderLen;
-    if (data.len < ihl) return error.Truncated;
-    const total_len: usize = @as(usize, data[2]) << 8 | @as(usize, data[3]);
-    const end = @min(total_len, data.len);
+    const ihl = try validatedHeaderLen(data);
+    const end = @min(totalLength(data), data.len);
     if (end < ihl) return error.Truncated;
     return data[ihl..end];
 }

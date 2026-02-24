@@ -745,7 +745,6 @@ test "any_ip accepts ARP for unknown address" {
     var iface = testInterface();
     const UNKNOWN_IP: ipv4.Address = .{ 10, 0, 0, 99 };
 
-    // Without any_ip, ARP for unknown IP is ignored
     var buf: [128]u8 = undefined;
     const frame = buildArpFrame(&buf, .{
         .operation = .request,
@@ -755,23 +754,13 @@ test "any_ip accepts ARP for unknown address" {
         .target_protocol_addr = UNKNOWN_IP,
     });
 
-    const result1 = iface.processEthernet(frame);
-    try testing.expectEqual(@as(?Response, null), result1);
+    // Without any_ip, ARP for unknown IP is ignored
+    try testing.expectEqual(@as(?Response, null), iface.processEthernet(frame));
 
     // With any_ip, ARP for unknown IP gets a reply
     iface.any_ip = true;
-
-    var buf2: [128]u8 = undefined;
-    const frame2 = buildArpFrame(&buf2, .{
-        .operation = .request,
-        .source_hardware_addr = REMOTE_HW_ADDR,
-        .source_protocol_addr = REMOTE_IP,
-        .target_hardware_addr = .{ 0, 0, 0, 0, 0, 0 },
-        .target_protocol_addr = UNKNOWN_IP,
-    });
-
-    const result2 = iface.processEthernet(frame2) orelse return error.ExpectedResponse;
-    switch (result2) {
+    const result = iface.processEthernet(frame) orelse return error.ExpectedResponse;
+    switch (result) {
         .arp_reply => |reply| {
             try testing.expectEqual(arp.Operation.reply, reply.operation);
             try testing.expectEqual(LOCAL_HW_ADDR, reply.source_hardware_addr);

@@ -20,6 +20,7 @@ const Flags = wire_tcp.Flags;
 
 const DEFAULT_MSS: usize = 536;
 const BASE_MSS: u16 = 1460;
+const DEFAULT_HOP_LIMIT: u8 = 64;
 
 // -------------------------------------------------------------------------
 // Endpoint types
@@ -1138,24 +1139,25 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                 repr.max_seg_size = BASE_MSS;
             }
 
-            // Rewind keep-alive timer.
             self.timer.rewindKeepAlive(timestamp, self.keep_alive);
-
-            // Reset delayed ACK timer.
             self.ack_delay_timer = .idle;
 
-            const hl = self.hop_limit orelse 64;
+            const result = DispatchResult{
+                .repr = repr,
+                .src_addr = t.local.addr,
+                .dst_addr = t.remote.addr,
+                .hop_limit = self.hop_limit orelse DEFAULT_HOP_LIMIT,
+            };
 
             if (is_zero_window_probe) {
                 self.timer.rewindZeroWindowProbe(timestamp);
-                return .{ .repr = repr, .src_addr = t.local.addr, .dst_addr = t.remote.addr, .hop_limit = hl };
+                return result;
             }
 
             if (is_keep_alive) {
-                return .{ .repr = repr, .src_addr = t.local.addr, .dst_addr = t.remote.addr, .hop_limit = hl };
+                return result;
             }
 
-            // Update state.
             self.remote_last_seq = repr.seq_number.add(repr.segmentLen());
             self.remote_last_ack = repr.ack_number;
             self.remote_last_win = repr.window_len;
@@ -1173,7 +1175,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                 self.tuple = null;
             }
 
-            return .{ .repr = repr, .src_addr = t.local.addr, .dst_addr = t.remote.addr, .hop_limit = hl };
+            return result;
         }
 
         // -- Internal helpers --
@@ -5754,8 +5756,7 @@ test "set hop limit propagates to dispatch" {
 // [smoltcp:socket/tcp.rs:test_set_hop_limit_zero]
 test "set hop limit zero rejected" {
     var s = socketSynReceived();
-    // hop_limit = 0 is meaningless (TTL=0 packets are dropped immediately).
-    // Setting it to null disables the override and uses the default (64).
+    // null disables the override and uses DEFAULT_HOP_LIMIT (64)
     s.hop_limit = null;
     const result = s.dispatch(Instant.ZERO) orelse return error.ExpectedDispatch;
     try testing.expectEqual(@as(u8, 64), result.hop_limit);

@@ -1,8 +1,4 @@
-// Top-level poll loop connecting Device I/O, Interface, and Sockets.
-//
-// The stack is the integration layer: it receives raw frames from a Device,
-// dispatches them through the Interface (ARP, ICMP) and to sockets, then
-// serializes and transmits responses and socket egress.
+// Top-level poll loop: Device I/O -> Interface (ARP, ICMP) -> Sockets.
 //
 // Reference: smoltcp src/iface/interface.rs (poll, socket_ingress, socket_egress)
 
@@ -10,8 +6,6 @@ const ethernet = @import("wire/ethernet.zig");
 const arp = @import("wire/arp.zig");
 const ipv4 = @import("wire/ipv4.zig");
 const icmp = @import("wire/icmp.zig");
-const udp_wire = @import("wire/udp.zig");
-const tcp_wire = @import("wire/tcp.zig");
 const iface_mod = @import("iface.zig");
 const time = @import("time.zig");
 
@@ -27,7 +21,6 @@ pub const MAX_FRAME_LEN = 1514; // Ethernet MTU 1500 + 14-byte header
 ///   fn transmit(self: *Device, frame: []const u8) void
 pub fn Stack(comptime Device: type) type {
     comptime {
-        // Validate Device interface at comptime
         if (!@hasDecl(Device, "receive")) @compileError("Device must have receive()");
         if (!@hasDecl(Device, "transmit")) @compileError("Device must have transmit()");
     }
@@ -47,7 +40,6 @@ pub fn Stack(comptime Device: type) type {
             self.iface.now = timestamp;
             var processed = false;
 
-            // Drain the RX queue
             while (device.receive()) |rx_frame| {
                 self.processIngress(rx_frame, device);
                 processed = true;
@@ -60,8 +52,6 @@ pub fn Stack(comptime Device: type) type {
         /// Returns null if there is no pending timer (poll only on new RX).
         pub fn pollAt(self: *const Self) ?Instant {
             _ = self;
-            // Interface-level has no timers (ARP expiry is checked on lookup).
-            // Socket-level poll_at will be added when socket dispatch is integrated.
             return null;
         }
 
@@ -97,29 +87,23 @@ pub fn Stack(comptime Device: type) type {
         }
 
         fn serializeIpv4Response(self: *const Self, resp: iface_mod.Ipv4Response, buf: []u8) ?[]const u8 {
-            // First, serialize the IP payload to compute its length
             var payload_buf: [iface_mod.IPV4_MIN_MTU]u8 = undefined;
             const payload_len: usize = switch (resp.payload) {
                 .icmp_echo => |echo| icmp.emitEcho(echo.echo, echo.data, &payload_buf) catch return null,
                 .icmp_dest_unreachable => |du| blk: {
-                    // ICMP dest unreachable: header(8) + invoking IP header + data
-                    var invoking_buf: [ipv4.MAX_HEADER_LEN]u8 = undefined;
-                    const inv_len = ipv4.emit(du.invoking_repr, &invoking_buf) catch return null;
+                    var inner_buf: [iface_mod.IPV4_MIN_MTU]u8 = undefined;
+                    const inv_len = ipv4.emit(du.invoking_repr, &inner_buf) catch return null;
                     const data_len = @min(du.data.len, iface_mod.IPV4_MIN_MTU - icmp.HEADER_LEN - inv_len);
-                    var combined: [iface_mod.IPV4_MIN_MTU]u8 = undefined;
-                    @memcpy(combined[0..inv_len], invoking_buf[0..inv_len]);
-                    @memcpy(combined[inv_len..][0..data_len], du.data[0..data_len]);
-                    const other = icmp.OtherRepr{
+                    @memcpy(inner_buf[inv_len..][0..data_len], du.data[0..data_len]);
+                    break :blk icmp.emitOther(.{
                         .icmp_type = .dest_unreachable,
                         .code = du.code,
                         .checksum = 0,
                         .data = 0,
-                    };
-                    break :blk icmp.emitOther(other, combined[0 .. inv_len + data_len], &payload_buf) catch return null;
+                    }, inner_buf[0 .. inv_len + data_len], &payload_buf) catch return null;
                 },
             };
 
-            // Now wrap in Ethernet + IPv4
             const ip_repr = ipv4.Repr{
                 .version = 4,
                 .ihl = 5,
@@ -136,7 +120,6 @@ pub fn Stack(comptime Device: type) type {
                 .dst_addr = resp.ip.dst_addr,
             };
 
-            // Look up destination MAC from neighbor cache
             const dst_mac = self.iface.neighbor_cache.lookup(resp.ip.dst_addr, self.iface.now) orelse
                 ethernet.BROADCAST;
 
@@ -313,7 +296,6 @@ test "stack ARP request produces reply" {
     const processed = stack.poll(Instant.ZERO, &device);
     try testing.expect(processed);
 
-    // Verify TX queue has an ARP reply
     const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
 
     const eth = try ethernet.parse(tx_frame);
@@ -334,24 +316,23 @@ test "stack ICMP echo request produces reply" {
     var device = TestDevice.init();
     var stack = testStack();
 
-    // First, do an ARP exchange so the neighbor cache is populated
+    // Populate neighbor cache via ARP exchange
     var arp_buf: [128]u8 = undefined;
     device.enqueueRx(buildArpRequest(&arp_buf));
     _ = stack.poll(Instant.ZERO, &device);
-    _ = device.dequeueTx(); // drain ARP reply
+    _ = device.dequeueTx();
 
-    // Now send ICMP echo request
     var req_buf: [256]u8 = undefined;
     device.enqueueRx(buildIcmpEchoRequest(&req_buf));
 
     const processed = stack.poll(Instant.ZERO, &device);
     try testing.expect(processed);
 
-    // Verify TX queue has an ICMP echo reply
     const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
 
     const eth = try ethernet.parse(tx_frame);
     try testing.expectEqual(ethernet.EtherType.ipv4, eth.ethertype);
+    try testing.expectEqual(REMOTE_HW, eth.dst_addr);
 
     const ip_data = try ethernet.payload(tx_frame);
     const ip_repr = try ipv4.parse(ip_data);
@@ -369,12 +350,7 @@ test "stack ICMP echo request produces reply" {
         },
         .other => return error.ExpectedEchoReply,
     }
-
-    // Verify echo reply has valid checksum
     try testing.expect(icmp.verifyChecksum(icmp_data));
-
-    // Verify the destination MAC was resolved from neighbor cache
-    try testing.expectEqual(REMOTE_HW, eth.dst_addr);
 }
 
 test "stack empty RX returns false" {
@@ -389,21 +365,15 @@ test "stack loopback device round-trip" {
     var device = TestDevice.init();
     var stack = testStack();
 
-    // Send ARP, poll, loopback the reply, poll again
     var arp_buf: [128]u8 = undefined;
     device.enqueueRx(buildArpRequest(&arp_buf));
     _ = stack.poll(Instant.ZERO, &device);
 
-    // Loopback TX -> RX
     device.loopback();
 
-    // Poll again -- the ARP reply we sent is now received back.
-    // Since it's addressed to REMOTE_HW (not us), processEthernet
-    // won't generate a response. But it should still be processed.
+    // ARP reply addressed to REMOTE_HW is processed but generates no response
     const processed = stack.poll(Instant.ZERO, &device);
     try testing.expect(processed);
-
-    // No new TX frames
     try testing.expectEqual(@as(?[]const u8, null), device.dequeueTx());
 }
 
