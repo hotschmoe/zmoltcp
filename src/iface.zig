@@ -70,10 +70,8 @@ pub const IpCidr = struct {
 };
 
 pub const NeighborCache = struct {
-    const UNSPECIFIED: ipv4.Address = .{ 0, 0, 0, 0 };
-
     const Entry = struct {
-        protocol_addr: ipv4.Address = UNSPECIFIED,
+        protocol_addr: ipv4.Address = ipv4.UNSPECIFIED,
         hardware_addr: ethernet.Address = .{ 0, 0, 0, 0, 0, 0 },
         expires_at: time.Instant = time.Instant.ZERO,
     };
@@ -81,7 +79,7 @@ pub const NeighborCache = struct {
     entries: [NEIGHBOR_CACHE_SIZE]Entry = [_]Entry{.{}} ** NEIGHBOR_CACHE_SIZE,
 
     fn isOccupied(entry: Entry) bool {
-        return !std.mem.eql(u8, &entry.protocol_addr, &UNSPECIFIED);
+        return !std.mem.eql(u8, &entry.protocol_addr, &ipv4.UNSPECIFIED);
     }
 
     pub fn fill(self: *NeighborCache, ip: ipv4.Address, mac: ethernet.Address, now: time.Instant) void {
@@ -350,18 +348,11 @@ pub const Interface = struct {
         _ = self;
         if (socket_handled) return null;
 
-        const wire_repr = tcp_wire.parse(tcp_data) catch return null;
-        const control = tcp_wire.Control.fromFlags(wire_repr.flags);
+        const sock_repr = tcp_socket.TcpRepr.fromWireBytes(tcp_data) orelse return null;
+        if (sock_repr.control == .rst) return null;
+        if (std.mem.eql(u8, &ip_repr.src_addr, &ipv4.UNSPECIFIED)) return null;
+        if (std.mem.eql(u8, &ip_repr.dst_addr, &ipv4.UNSPECIFIED)) return null;
 
-        if (control == .rst) return null;
-
-        const UNSPECIFIED: ipv4.Address = .{ 0, 0, 0, 0 };
-        if (std.mem.eql(u8, &ip_repr.src_addr, &UNSPECIFIED)) return null;
-        if (std.mem.eql(u8, &ip_repr.dst_addr, &UNSPECIFIED)) return null;
-
-        const header_len: usize = @as(usize, wire_repr.data_offset) * 4;
-        const tcp_payload = if (tcp_data.len > header_len) tcp_data[header_len..] else &[_]u8{};
-        const sock_repr = tcp_socket.TcpRepr.fromWireRepr(wire_repr, tcp_payload);
         const rst = tcp_socket.rstReply(sock_repr);
 
         return .{ .ipv4 = .{
@@ -927,8 +918,7 @@ test "TCP SYN with no listener produces RST" {
     try testing.expectEqual(@as(?Response, null), iface_inst.processTcp(rst_ip, &rst_buf, false));
 
     // Unspecified source -> no response
-    const UNSPECIFIED: ipv4.Address = .{ 0, 0, 0, 0 };
-    const unspec_ip = testIpv4Repr(.tcp, UNSPECIFIED, LOCAL_IP, tcp_buf.len);
+    const unspec_ip = testIpv4Repr(.tcp, ipv4.UNSPECIFIED, LOCAL_IP, tcp_buf.len);
     try testing.expectEqual(@as(?Response, null), iface_inst.processTcp(unspec_ip, &tcp_buf, false));
 
     // Socket handled -> no response

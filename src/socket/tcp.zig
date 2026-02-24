@@ -65,6 +65,13 @@ pub const TcpRepr = struct {
         return self.control == .none and self.payload.len == 0;
     }
 
+    pub fn fromWireBytes(data: []const u8) ?TcpRepr {
+        const w = wire_tcp.parse(data) catch return null;
+        const header_len: usize = @as(usize, w.data_offset) * 4;
+        const payload = if (data.len > header_len) data[header_len..] else &[_]u8{};
+        return fromWireRepr(w, payload);
+    }
+
     pub fn fromWireRepr(w: wire_tcp.Repr, tcp_payload: []const u8) TcpRepr {
         return .{
             .src_port = w.src_port,

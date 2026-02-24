@@ -10,10 +10,8 @@ const std = @import("std");
 const ipv4 = @import("../wire/ipv4.zig");
 const ring_buffer_mod = @import("../storage/ring_buffer.zig");
 
-const UNSPECIFIED_ADDR: ipv4.Address = .{ 0, 0, 0, 0 };
-
 fn isUnspecified(addr: ipv4.Address) bool {
-    return std.mem.eql(u8, &addr, &UNSPECIFIED_ADDR);
+    return std.mem.eql(u8, &addr, &ipv4.UNSPECIFIED);
 }
 
 // -------------------------------------------------------------------------
@@ -44,7 +42,7 @@ pub const UdpRepr = struct {
 // -------------------------------------------------------------------------
 
 pub const Metadata = struct {
-    endpoint: Endpoint = .{ .addr = UNSPECIFIED_ADDR, .port = 0 },
+    endpoint: Endpoint = .{ .addr = ipv4.UNSPECIFIED, .port = 0 },
     local_addr: ?ipv4.Address = null,
 };
 
@@ -216,7 +214,7 @@ pub fn Socket(comptime config: Config) type {
         pub fn dispatch(self: *Self) ?DispatchResult {
             const pkt = self.tx.dequeueOne() catch return null;
             const src_addr = pkt.meta.local_addr orelse
-                (self.local_endpoint.addr orelse UNSPECIFIED_ADDR);
+                (self.local_endpoint.addr orelse ipv4.UNSPECIFIED);
             return .{
                 .repr = .{
                     .src_port = self.local_endpoint.port,
@@ -291,7 +289,7 @@ test "send before bind and with bad addresses" {
     try s.bind(.{ .port = LOCAL_PORT });
 
     try testing.expectError(error.Unaddressable, s.sendSlice(PAYLOAD, .{
-        .endpoint = .{ .addr = UNSPECIFIED_ADDR, .port = REMOTE_PORT },
+        .endpoint = .{ .addr = ipv4.UNSPECIFIED, .port = REMOTE_PORT },
     }));
 
     try testing.expectError(error.Unaddressable, s.sendSlice(PAYLOAD, .{

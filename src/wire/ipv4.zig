@@ -15,6 +15,7 @@ pub const Protocol = enum(u8) {
 };
 
 pub const Address = [4]u8;
+pub const UNSPECIFIED: Address = .{ 0, 0, 0, 0 };
 
 /// High-level representation of an IPv4 header.
 pub const Repr = struct {

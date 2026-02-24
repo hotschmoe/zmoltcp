@@ -12,10 +12,8 @@ const ipv4 = @import("../wire/ipv4.zig");
 const icmp = @import("../wire/icmp.zig");
 const ring_buffer_mod = @import("../storage/ring_buffer.zig");
 
-const UNSPECIFIED_ADDR: ipv4.Address = .{ 0, 0, 0, 0 };
-
 fn isUnspecified(addr: ipv4.Address) bool {
-    return std.mem.eql(u8, &addr, &UNSPECIFIED_ADDR);
+    return std.mem.eql(u8, &addr, &ipv4.UNSPECIFIED);
 }
 
 // Extract the transport-layer source port from an ICMP error payload.
@@ -70,7 +68,7 @@ pub fn Socket(comptime config: Config) type {
         pub const Packet = struct {
             payload: [config.payload_size]u8 = undefined,
             payload_len: usize = 0,
-            addr: ipv4.Address = UNSPECIFIED_ADDR,
+            addr: ipv4.Address = ipv4.UNSPECIFIED,
         };
 
         const RingBuffer = ring_buffer_mod.RingBuffer(Packet);

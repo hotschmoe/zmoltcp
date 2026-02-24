@@ -34,18 +34,9 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
         if (!@hasDecl(Device, "transmit")) @compileError("Device must have transmit()");
     }
 
-    const has_tcp = comptime blk: {
-        if (SocketConfig == void) break :blk false;
-        break :blk @hasField(SocketConfig, "tcp_sockets");
-    };
-    const has_udp = comptime blk: {
-        if (SocketConfig == void) break :blk false;
-        break :blk @hasField(SocketConfig, "udp_sockets");
-    };
-    const has_icmp = comptime blk: {
-        if (SocketConfig == void) break :blk false;
-        break :blk @hasField(SocketConfig, "icmp_sockets");
-    };
+    const has_tcp = SocketConfig != void and @hasField(SocketConfig, "tcp_sockets");
+    const has_udp = SocketConfig != void and @hasField(SocketConfig, "udp_sockets");
+    const has_icmp = SocketConfig != void and @hasField(SocketConfig, "icmp_sockets");
 
     return struct {
         const Self = @This();
@@ -140,10 +131,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
         fn routeToTcpSockets(self: *Self, timestamp: Instant, ip_repr: ipv4.Repr, tcp_data: []const u8) TcpRouteResult {
             if (comptime !has_tcp) return .{};
 
-            const wire_repr = tcp_wire.parse(tcp_data) catch return .{};
-            const header_len: usize = @as(usize, wire_repr.data_offset) * 4;
-            const tcp_payload = if (tcp_data.len > header_len) tcp_data[header_len..] else &[_]u8{};
-            const sock_repr = tcp_socket.TcpRepr.fromWireRepr(wire_repr, tcp_payload);
+            const sock_repr = tcp_socket.TcpRepr.fromWireBytes(tcp_data) orelse return .{};
 
             for (self.sockets.tcp_sockets) |sock| {
                 if (sock.accepts(ip_repr.src_addr, ip_repr.dst_addr, sock_repr)) {
@@ -407,39 +395,14 @@ fn buildArpRequest(buf: []u8) []const u8 {
 fn buildIcmpEchoRequest(buf: []u8) []const u8 {
     const echo_data = [_]u8{ 0xDE, 0xAD };
     var icmp_buf: [icmp.HEADER_LEN + 2]u8 = undefined;
-    const icmp_len = icmp.emitEcho(.{
+    _ = icmp.emitEcho(.{
         .icmp_type = .echo_request,
         .code = 0,
         .checksum = 0,
         .identifier = 0x1234,
         .sequence = 1,
     }, &echo_data, &icmp_buf) catch unreachable;
-
-    const ip_repr = ipv4.Repr{
-        .version = 4,
-        .ihl = 5,
-        .dscp_ecn = 0,
-        .total_length = @intCast(ipv4.HEADER_LEN + icmp_len),
-        .identification = 0,
-        .dont_fragment = false,
-        .more_fragments = false,
-        .fragment_offset = 0,
-        .ttl = 64,
-        .protocol = .icmp,
-        .checksum = 0,
-        .src_addr = REMOTE_IP,
-        .dst_addr = LOCAL_IP,
-    };
-
-    const eth_repr = ethernet.Repr{
-        .dst_addr = LOCAL_HW,
-        .src_addr = REMOTE_HW,
-        .ethertype = .ipv4,
-    };
-    const eth_len = ethernet.emit(eth_repr, buf) catch unreachable;
-    const ip_len = ipv4.emit(ip_repr, buf[eth_len..]) catch unreachable;
-    @memcpy(buf[eth_len + ip_len ..][0..icmp_len], icmp_buf[0..icmp_len]);
-    return buf[0 .. eth_len + ip_len + icmp_len];
+    return buildIpv4Frame(buf, .icmp, &icmp_buf);
 }
 
 test "stack ARP request produces reply" {
