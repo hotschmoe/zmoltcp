@@ -37,14 +37,16 @@ pub const Config = struct {
         return self.server.eql(other.server) and
             std.mem.eql(u8, &self.address, &other.address) and
             self.prefix_len == other.prefix_len and
-            blk: {
-            if (self.router == null and other.router == null) break :blk true;
-            if (self.router == null or other.router == null) break :blk false;
-            break :blk std.mem.eql(u8, &self.router.?, &other.router.?);
-        } and
+            optionalAddrEql(self.router, other.router) and
             self.dns_servers.eql(&other.dns_servers);
     }
 };
+
+fn optionalAddrEql(a: ?[4]u8, b: ?[4]u8) bool {
+    const aa = a orelse return b == null;
+    const bb = b orelse return false;
+    return std.mem.eql(u8, &aa, &bb);
+}
 
 pub const Event = union(enum) {
     configured: Config,
@@ -166,7 +168,6 @@ pub const Socket = struct {
         self.state = .{ .discovering = .{ .retry_at = Instant.fromMillis(0) } };
     }
 
-    /// Process an incoming DHCP reply. The caller provides the pre-parsed DHCP repr.
     pub fn process(self: *Socket, now: Instant, src_ip: [4]u8, dhcp_repr: wire.Repr) void {
         if (!std.mem.eql(u8, &dhcp_repr.client_hardware_address, &self.hardware_address)) return;
         if (dhcp_repr.transaction_id != self.transaction_id) return;
@@ -211,15 +212,13 @@ pub const Socket = struct {
                 switch (dhcp_repr.message_type) {
                     .ack => {
                         if (parseAck(now, dhcp_repr, self.max_lease_duration, state.config.server)) |result| {
-                            const config_changed = !state.config.eql(&result.config);
+                            const changed = !state.config.eql(&result.config);
                             state.renew_at = result.renew_at;
                             state.rebind_at = result.rebind_at;
                             state.rebinding = false;
                             state.expires_at = result.expires_at;
-                            if (config_changed) {
+                            if (changed) {
                                 state.config = result.config;
-                            }
-                            if (config_changed) {
                                 self.configChanged();
                             }
                         }
@@ -233,7 +232,6 @@ pub const Socket = struct {
         }
     }
 
-    /// Generate an outgoing DHCP packet if one is due. Returns null if nothing to send.
     pub fn dispatch(self: *Socket, now: Instant) ?DispatchResult {
         var dhcp_repr = wire.Repr{
             .message_type = .discover,
@@ -285,7 +283,6 @@ pub const Socket = struct {
                 dhcp_repr.requested_ip = state.requested_ip;
                 dhcp_repr.server_identifier = state.server.identifier;
 
-                // Exponential backoff: double every 2 retries
                 const shift: u5 = @intCast(state.retry / 2);
                 state.retry_at = now.add(self.retry_config.initial_request_timeout.shl(shift));
                 state.retry += 1;
@@ -293,7 +290,7 @@ pub const Socket = struct {
                 return .{ .dhcp_repr = dhcp_repr, .src_ip = src_ip, .dst_ip = dst_ip };
             },
             .renewing => |*state| {
-                if (state.expires_at.lessThan(now) or state.expires_at.eql(now)) {
+                if (now.greaterThanOrEqual(state.expires_at)) {
                     self.reset();
                     return null;
                 }
@@ -301,7 +298,7 @@ pub const Socket = struct {
                 if (now.lessThan(state.renew_at)) return null;
                 if (state.rebinding and now.lessThan(state.rebind_at)) return null;
 
-                state.rebinding = state.rebinding or (now.greaterThanOrEqual(state.rebind_at));
+                state.rebinding = state.rebinding or now.greaterThanOrEqual(state.rebind_at);
 
                 src_ip = state.config.address;
                 if (!state.rebinding) {
@@ -314,9 +311,7 @@ pub const Socket = struct {
                 const next_txid = testTransactionId();
                 dhcp_repr.transaction_id = next_txid;
 
-                // Compute next retry interval
                 if (state.rebinding) {
-                    // Half remaining lease time, clamped
                     const remaining = Duration.fromMicros(state.expires_at.totalMicros() - now.totalMicros());
                     const half = remaining.divFloor(2);
                     state.rebind_at = now.add(
@@ -325,7 +320,6 @@ pub const Socket = struct {
                             .min(self.retry_config.max_renew_timeout),
                     );
                 } else {
-                    // Half remaining time to T2, clamped
                     const remaining_to_t2 = Duration.fromMicros(state.rebind_at.totalMicros() - now.totalMicros());
                     const half = remaining_to_t2.divFloor(2);
                     state.renew_at = now.add(
@@ -343,7 +337,6 @@ pub const Socket = struct {
         }
     }
 
-    /// Returns the earliest instant at which the socket needs to be polled.
     pub fn pollAt(self: *const Socket) Instant {
         return switch (self.state) {
             .discovering => |s| s.retry_at,
@@ -406,7 +399,6 @@ fn parseAck(
         lease_duration = lease_duration.min(max);
     }
 
-    // Filter DNS servers: keep only unicast
     var dns_servers = wire.DnsServers{};
     if (dhcp_repr.dns_servers) |servers| {
         for (0..servers.len) |i| {
@@ -425,53 +417,48 @@ fn parseAck(
     };
 
     // RFC 2131 T1/T2 computation
-    const renew_dur_opt = if (dhcp_repr.renew_duration) |d| Duration.fromSecs(@as(i64, d)) else null;
-    const rebind_dur_opt = if (dhcp_repr.rebind_duration) |d| Duration.fromSecs(@as(i64, d)) else null;
-
-    var renew_duration: Duration = undefined;
-    var rebind_duration: Duration = undefined;
-
-    if (renew_dur_opt) |rd| {
-        if (rebind_dur_opt) |rbd| {
-            if (rd.lessThan(rbd) and rbd.lessThan(lease_duration)) {
-                renew_duration = rd;
-                rebind_duration = rbd;
-            } else {
-                renew_duration = lease_duration.divFloor(2);
-                rebind_duration = Duration.fromMicros(@divTrunc(lease_duration.totalMicros() * 7, 8));
-            }
-        } else {
-            if (rd.lessThan(lease_duration)) {
-                renew_duration = rd;
-                // T2 = T1 + 0.75 * (lease - T1)
-                const gap = Duration.fromMicros(lease_duration.totalMicros() - rd.totalMicros());
-                rebind_duration = rd.add(Duration.fromMicros(@divTrunc(gap.totalMicros() * 3, 4)));
-            } else {
-                renew_duration = lease_duration.divFloor(2);
-                rebind_duration = Duration.fromMicros(@divTrunc(lease_duration.totalMicros() * 7, 8));
-            }
-        }
-    } else {
-        if (rebind_dur_opt) |rbd| {
-            if (rbd.lessThan(lease_duration)) {
-                renew_duration = lease_duration.divFloor(2).min(rbd);
-                rebind_duration = rbd;
-            } else {
-                renew_duration = lease_duration.divFloor(2);
-                rebind_duration = Duration.fromMicros(@divTrunc(lease_duration.totalMicros() * 7, 8));
-            }
-        } else {
-            renew_duration = lease_duration.divFloor(2);
-            rebind_duration = Duration.fromMicros(@divTrunc(lease_duration.totalMicros() * 7, 8));
-        }
-    }
+    const t1_t2 = computeT1T2(lease_duration, dhcp_repr.renew_duration, dhcp_repr.rebind_duration);
 
     return .{
         .config = config,
-        .renew_at = now.add(renew_duration),
-        .rebind_at = now.add(rebind_duration),
+        .renew_at = now.add(t1_t2.t1),
+        .rebind_at = now.add(t1_t2.t2),
         .expires_at = now.add(lease_duration),
     };
+}
+
+const T1T2 = struct { t1: Duration, t2: Duration };
+
+fn computeT1T2(lease: Duration, renew_secs: ?u32, rebind_secs: ?u32) T1T2 {
+    const default_t1 = lease.divFloor(2);
+    const default_t2 = Duration.fromMicros(@divTrunc(lease.totalMicros() * 7, 8));
+
+    const rd = if (renew_secs) |d| Duration.fromSecs(@as(i64, d)) else null;
+    const rbd = if (rebind_secs) |d| Duration.fromSecs(@as(i64, d)) else null;
+
+    if (rd) |t1| {
+        if (rbd) |t2| {
+            // Both provided: use if T1 < T2 < lease, else defaults
+            if (t1.lessThan(t2) and t2.lessThan(lease))
+                return .{ .t1 = t1, .t2 = t2 };
+            return .{ .t1 = default_t1, .t2 = default_t2 };
+        }
+        // Only T1: derive T2 = T1 + 0.75 * (lease - T1)
+        if (t1.lessThan(lease)) {
+            const gap = Duration.fromMicros(lease.totalMicros() - t1.totalMicros());
+            return .{ .t1 = t1, .t2 = t1.add(Duration.fromMicros(@divTrunc(gap.totalMicros() * 3, 4))) };
+        }
+        return .{ .t1 = default_t1, .t2 = default_t2 };
+    }
+
+    if (rbd) |t2| {
+        // Only T2: clamp T1 to min(default, T2)
+        if (t2.lessThan(lease))
+            return .{ .t1 = default_t1.min(t2), .t2 = t2 };
+        return .{ .t1 = default_t1, .t2 = default_t2 };
+    }
+
+    return .{ .t1 = default_t1, .t2 = default_t2 };
 }
 
 fn subnetMaskToPrefixLen(mask: [4]u8) ?u6 {
@@ -594,7 +581,6 @@ fn dhcpRenew() wire.Repr {
     repr.client_identifier = MY_MAC;
     repr.client_ip = MY_IP;
     repr.max_size = 1432;
-    repr.requested_ip = null;
     repr.parameter_request_list = &[_]u8{ 1, 3, 6 };
     return repr;
 }
@@ -643,25 +629,12 @@ fn sendFrom(s: *Socket, timestamp: Instant, src_ip: [4]u8, repr: wire.Repr) void
     s.process(timestamp, src_ip, repr);
 }
 
-const RecvResult = struct {
-    dhcp_repr: wire.Repr,
-    src_ip: [4]u8,
-    dst_ip: [4]u8,
-};
-
-fn recv(s: *Socket, timestamp: Instant) ?RecvResult {
-    // Loop like smoltcp's recv helper: keep dispatching while poll_at <= timestamp.
+fn recv(s: *Socket, timestamp: Instant) ?DispatchResult {
     // dispatch may reset state without emitting (e.g. request retries exceeded),
     // so we re-enter to let the new state emit.
     var iterations: u8 = 0;
-    while (s.pollAt().lessThan(timestamp) or s.pollAt().eql(timestamp)) {
-        if (s.dispatch(timestamp)) |result| {
-            return .{
-                .dhcp_repr = result.dhcp_repr,
-                .src_ip = result.src_ip,
-                .dst_ip = result.dst_ip,
-            };
-        }
+    while (timestamp.greaterThanOrEqual(s.pollAt())) {
+        if (s.dispatch(timestamp)) |result| return result;
         iterations += 1;
         if (iterations >= 4) break;
     }
@@ -806,7 +779,6 @@ test "discover retransmit" {
     try expectRecvNone(&s, Instant.fromMillis(11_000));
     try expectRecvDiscover(&s, Instant.fromMillis(20_000));
 
-    // check after retransmits it still works
     send(&s, Instant.fromMillis(20_000), dhcpOffer());
     try expectRecvRequest(&s, Instant.fromMillis(20_000));
 }
@@ -825,7 +797,6 @@ test "request retransmit" {
     try expectRecvNone(&s, Instant.fromMillis(15_000));
     try expectRecvRequest(&s, Instant.fromMillis(20_000));
 
-    // check after retransmits it still works
     send(&s, Instant.fromMillis(20_000), dhcpAck());
 
     switch (s.state) {
@@ -853,7 +824,6 @@ test "request timeout" {
     // Retry schedule: 0, 5, 10, 20, 30 -> next at 50, then timeout check at 70
     try expectRecvDiscover(&s, Instant.fromMillis(70_000));
 
-    // check it still works
     send(&s, Instant.fromMillis(60_000), dhcpOffer());
     try expectRecvRequest(&s, Instant.fromMillis(60_000));
 }
@@ -926,7 +896,6 @@ test "renew rebind retransmit" {
     try expectRecvNone(&s, Instant.fromMillis(997_000));
     try expectRecvRebind(&s, Instant.fromMillis(997_500));
 
-    // check it still works
     send(&s, Instant.fromMillis(999_000), dhcpAck());
     switch (s.state) {
         .renewing => |r| {
@@ -957,13 +926,8 @@ test "renew rebind timeout" {
 // [smoltcp:socket/dhcpv4.rs:test_min_max_renew_timeout]
 test "min max renew timeout" {
     var s = createSocketBound();
-    s.setRetryConfig(.{
-        .max_renew_timeout = Duration.fromSecs(120),
-        .min_renew_timeout = Duration.fromSecs(45),
-        .discover_timeout = s.getRetryConfig().discover_timeout,
-        .initial_request_timeout = s.getRetryConfig().initial_request_timeout,
-        .request_retries = s.getRetryConfig().request_retries,
-    });
+    s.retry_config.max_renew_timeout = Duration.fromSecs(120);
+    s.retry_config.min_renew_timeout = Duration.fromSecs(45);
 
     try expectRecvNone(&s, Instant.fromMillis(0));
     // First renew at T1

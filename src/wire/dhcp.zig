@@ -9,6 +9,15 @@ pub const MAX_DNS_SERVER_COUNT = 3;
 const MAGIC_NUMBER: u32 = 0x63825363;
 const MIN_HEADER_LEN = 240;
 
+fn readU16Be(data: []const u8, off: usize) u16 {
+    return @as(u16, data[off]) << 8 | @as(u16, data[off + 1]);
+}
+
+fn readU32Be(data: []const u8, off: usize) u32 {
+    return @as(u32, data[off]) << 24 | @as(u32, data[off + 1]) << 16 |
+        @as(u32, data[off + 2]) << 8 | @as(u32, data[off + 3]);
+}
+
 pub const OpCode = enum(u8) {
     request = 1,
     reply = 2,
@@ -108,20 +117,14 @@ pub const ParseError = error{
 pub fn parse(data: []const u8) ParseError!Repr {
     if (data.len < MIN_HEADER_LEN) return error.Truncated;
 
-    // Validate hardware type (Ethernet = 1) and hardware address length (6)
     if (data[1] != 1 or data[2] != 6) return error.InvalidHardware;
 
-    // Validate magic cookie
-    const magic = @as(u32, data[236]) << 24 | @as(u32, data[237]) << 16 |
-        @as(u32, data[238]) << 8 | @as(u32, data[239]);
-    if (magic != MAGIC_NUMBER) return error.InvalidMagic;
+    if (readU32Be(data, 236) != MAGIC_NUMBER) return error.InvalidMagic;
 
     const op: OpCode = @enumFromInt(data[0]);
-    const transaction_id = @as(u32, data[4]) << 24 | @as(u32, data[5]) << 16 |
-        @as(u32, data[6]) << 8 | @as(u32, data[7]);
-    const secs = @as(u16, data[8]) << 8 | @as(u16, data[9]);
-    const flags = @as(u16, data[10]) << 8 | @as(u16, data[11]);
-    const broadcast = (flags & 0x8000) != 0;
+    const transaction_id = readU32Be(data, 4);
+    const secs = readU16Be(data, 8);
+    const broadcast = (readU16Be(data, 10) & 0x8000) != 0;
 
     var message_type: ?MessageType = null;
     var requested_ip: ?[4]u8 = null;
@@ -136,7 +139,6 @@ pub fn parse(data: []const u8) ParseError!Repr {
     var renew_duration: ?u32 = null;
     var rebind_duration: ?u32 = null;
 
-    // Iterate TLV options starting at offset 240
     var pos: usize = MIN_HEADER_LEN;
     while (pos < data.len) {
         const kind = data[pos];
@@ -167,7 +169,6 @@ pub fn parse(data: []const u8) ParseError!Repr {
             },
             OPT_CLIENT_ID => {
                 if (opt_data.len == 7) {
-                    // First byte is hardware type (1 = Ethernet)
                     if (opt_data[0] != 1) return error.InvalidHardware;
                     client_identifier = opt_data[1..7].*;
                 }
@@ -188,27 +189,16 @@ pub fn parse(data: []const u8) ParseError!Repr {
                 }
             },
             OPT_MAX_DHCP_MESSAGE_SIZE => {
-                if (opt_data.len == 2) {
-                    max_size = @as(u16, opt_data[0]) << 8 | @as(u16, opt_data[1]);
-                }
+                if (opt_data.len == 2) max_size = readU16Be(opt_data, 0);
             },
             OPT_RENEWAL_TIME_VALUE => {
-                if (opt_data.len == 4) {
-                    renew_duration = @as(u32, opt_data[0]) << 24 | @as(u32, opt_data[1]) << 16 |
-                        @as(u32, opt_data[2]) << 8 | @as(u32, opt_data[3]);
-                }
+                if (opt_data.len == 4) renew_duration = readU32Be(opt_data, 0);
             },
             OPT_REBINDING_TIME_VALUE => {
-                if (opt_data.len == 4) {
-                    rebind_duration = @as(u32, opt_data[0]) << 24 | @as(u32, opt_data[1]) << 16 |
-                        @as(u32, opt_data[2]) << 8 | @as(u32, opt_data[3]);
-                }
+                if (opt_data.len == 4) rebind_duration = readU32Be(opt_data, 0);
             },
             OPT_IP_LEASE_TIME => {
-                if (opt_data.len == 4) {
-                    lease_duration = @as(u32, opt_data[0]) << 24 | @as(u32, opt_data[1]) << 16 |
-                        @as(u32, opt_data[2]) << 8 | @as(u32, opt_data[3]);
-                }
+                if (opt_data.len == 4) lease_duration = readU32Be(opt_data, 0);
             },
             OPT_PARAMETER_REQUEST_LIST => {
                 parameter_request_list = opt_data;
@@ -251,10 +241,9 @@ pub fn parse(data: []const u8) ParseError!Repr {
     };
 }
 
-/// Compute exact buffer size needed for emit.
 pub fn bufferLen(repr: Repr) usize {
-    // Fixed header (240) + message type option (3) + end byte (1)
-    var len: usize = MIN_HEADER_LEN + 3 + 1;
+    var len: usize = MIN_HEADER_LEN + 3 + 1; // header + message type option + END
+
     if (repr.requested_ip != null) len += 6;
     if (repr.client_identifier != null) len += 9; // 2 + 1(htype) + 6(addr)
     if (repr.server_identifier != null) len += 6;
@@ -275,10 +264,8 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
     const required = bufferLen(repr);
     if (buf.len < required) return error.BufferTooSmall;
 
-    // Zero the sname and file regions
     @memset(buf[34..236], 0);
 
-    // Fixed header
     buf[0] = @intFromEnum(repr.message_type.opCode());
     buf[1] = 1; // htype = Ethernet
     buf[2] = 6; // hlen = 6
@@ -298,67 +285,45 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
     @memcpy(buf[24..28], &repr.relay_agent_ip);
     @memcpy(buf[28..34], &repr.client_hardware_address);
 
-    // Magic cookie
     buf[236] = 0x63;
     buf[237] = 0x82;
     buf[238] = 0x53;
     buf[239] = 0x63;
 
-    // Options
     var pos: usize = MIN_HEADER_LEN;
 
-    // Message type (always first)
     pos = emitOption(buf, pos, OPT_DHCP_MESSAGE_TYPE, &[_]u8{@intFromEnum(repr.message_type)});
 
-    // Client identifier
     if (repr.client_identifier) |addr| {
         var data: [7]u8 = undefined;
         data[0] = 1; // hardware type = Ethernet
         @memcpy(data[1..7], &addr);
         pos = emitOption(buf, pos, OPT_CLIENT_ID, &data);
     }
-
-    // Server identifier
     if (repr.server_identifier) |addr| {
         pos = emitOption(buf, pos, OPT_SERVER_IDENTIFIER, &addr);
     }
-
-    // Router
     if (repr.router) |addr| {
         pos = emitOption(buf, pos, OPT_ROUTER, &addr);
     }
-
-    // Subnet mask
     if (repr.subnet_mask) |addr| {
         pos = emitOption(buf, pos, OPT_SUBNET_MASK, &addr);
     }
-
-    // Requested IP
     if (repr.requested_ip) |addr| {
         pos = emitOption(buf, pos, OPT_REQUESTED_IP, &addr);
     }
-
-    // Max DHCP message size
     if (repr.max_size) |size| {
-        const data = [_]u8{ @truncate(size >> 8), @truncate(size) };
-        pos = emitOption(buf, pos, OPT_MAX_DHCP_MESSAGE_SIZE, &data);
+        pos = emitOption(buf, pos, OPT_MAX_DHCP_MESSAGE_SIZE, &[_]u8{ @truncate(size >> 8), @truncate(size) });
     }
-
-    // Lease duration
     if (repr.lease_duration) |dur| {
-        const data = [_]u8{
+        pos = emitOption(buf, pos, OPT_IP_LEASE_TIME, &[_]u8{
             @truncate(dur >> 24), @truncate(dur >> 16),
             @truncate(dur >> 8),  @truncate(dur),
-        };
-        pos = emitOption(buf, pos, OPT_IP_LEASE_TIME, &data);
+        });
     }
-
-    // Parameter request list
     if (repr.parameter_request_list) |list| {
         pos = emitOption(buf, pos, OPT_PARAMETER_REQUEST_LIST, list);
     }
-
-    // DNS servers
     if (repr.dns_servers) |servers| {
         var data: [MAX_DNS_SERVER_COUNT * 4]u8 = undefined;
         for (0..servers.len) |i| {
@@ -367,7 +332,6 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
         pos = emitOption(buf, pos, OPT_DOMAIN_NAME_SERVER, data[0 .. @as(usize, servers.len) * 4]);
     }
 
-    // END
     buf[pos] = OPT_END;
     pos += 1;
 
@@ -518,36 +482,22 @@ fn offerRepr() Repr {
 
 // [smoltcp:wire/dhcpv4.rs:test_deconstruct_discover]
 test "deconstruct discover raw fields" {
-    // Validate fixed header fields directly from bytes
     try testing.expectEqual(@as(u8, 0x01), DISCOVER_BYTES[0]); // op = Request
     try testing.expectEqual(@as(u8, 0x01), DISCOVER_BYTES[1]); // htype = Ethernet
     try testing.expectEqual(@as(u8, 0x06), DISCOVER_BYTES[2]); // hlen = 6
     try testing.expectEqual(@as(u8, 0x00), DISCOVER_BYTES[3]); // hops = 0
 
-    // xid = 0x00003d1d
-    const xid = @as(u32, DISCOVER_BYTES[4]) << 24 | @as(u32, DISCOVER_BYTES[5]) << 16 |
-        @as(u32, DISCOVER_BYTES[6]) << 8 | @as(u32, DISCOVER_BYTES[7]);
-    try testing.expectEqual(@as(u32, 0x3d1d), xid);
+    try testing.expectEqual(@as(u32, 0x3d1d), readU32Be(&DISCOVER_BYTES, 4));
+    try testing.expectEqual(@as(u16, 0), readU16Be(&DISCOVER_BYTES, 8));
 
-    // secs = 0
-    const secs_val = @as(u16, DISCOVER_BYTES[8]) << 8 | @as(u16, DISCOVER_BYTES[9]);
-    try testing.expectEqual(@as(u16, 0), secs_val);
-
-    // All IP fields zero
-    try testing.expectEqualSlices(u8, &IP_NULL, DISCOVER_BYTES[12..16]); // ciaddr
-    try testing.expectEqualSlices(u8, &IP_NULL, DISCOVER_BYTES[16..20]); // yiaddr
-    try testing.expectEqualSlices(u8, &IP_NULL, DISCOVER_BYTES[20..24]); // siaddr
-    try testing.expectEqualSlices(u8, &IP_NULL, DISCOVER_BYTES[24..28]); // giaddr
-
-    // chaddr
+    try testing.expectEqualSlices(u8, &IP_NULL, DISCOVER_BYTES[12..16]);
+    try testing.expectEqualSlices(u8, &IP_NULL, DISCOVER_BYTES[16..20]);
+    try testing.expectEqualSlices(u8, &IP_NULL, DISCOVER_BYTES[20..24]);
+    try testing.expectEqualSlices(u8, &IP_NULL, DISCOVER_BYTES[24..28]);
     try testing.expectEqualSlices(u8, &CLIENT_MAC, DISCOVER_BYTES[28..34]);
 
-    // magic cookie
-    const magic = @as(u32, DISCOVER_BYTES[236]) << 24 | @as(u32, DISCOVER_BYTES[237]) << 16 |
-        @as(u32, DISCOVER_BYTES[238]) << 8 | @as(u32, DISCOVER_BYTES[239]);
-    try testing.expectEqual(@as(u32, 0x63825363), magic);
+    try testing.expectEqual(@as(u32, 0x63825363), readU32Be(&DISCOVER_BYTES, 236));
 
-    // Parse to verify options are iterable
     const repr = try parse(&DISCOVER_BYTES);
     try testing.expectEqual(MessageType.discover, repr.message_type);
 }
@@ -579,9 +529,7 @@ test "emit discover" {
     var buf: [bufferLen(repr)]u8 = undefined;
     @memset(&buf, 0xa5);
     const written = try emit(repr, &buf);
-    // Compare up to written length with the reference bytes
     try testing.expectEqualSlices(u8, DISCOVER_BYTES[0..written], buf[0..written]);
-    // Remaining bytes in reference should be zero (padding)
     for (DISCOVER_BYTES[written..]) |b| {
         try testing.expectEqual(@as(u8, 0), b);
     }
@@ -607,8 +555,7 @@ test "emit offer with dns servers roundtrip" {
     const written = try emit(repr, &buf);
 
     const parsed = try parse(buf[0..written]);
-    try testing.expect(parsed.dns_servers != null);
-    const got = parsed.dns_servers.?;
+    const got = parsed.dns_servers orelse return error.TestExpectedEqual;
     try testing.expectEqual(@as(u8, 3), got.len);
     try testing.expectEqualSlices(u8, &[_]u8{ 163, 1, 74, 6 }, &got.addrs[0]);
     try testing.expectEqualSlices(u8, &[_]u8{ 163, 1, 74, 7 }, &got.addrs[1]);
@@ -630,8 +577,7 @@ test "emit dhcp option TLV" {
 // [smoltcp:wire/dhcpv4.rs:test_parse_ack_dns_servers]
 test "parse ack with dns servers capped at 3" {
     const repr = try parse(&ACK_DNS_SERVER_BYTES);
-    try testing.expect(repr.dns_servers != null);
-    const servers = repr.dns_servers.?;
+    const servers = repr.dns_servers orelse return error.TestExpectedEqual;
     try testing.expectEqual(@as(u8, 3), servers.len);
     try testing.expectEqualSlices(u8, &[_]u8{ 163, 1, 74, 6 }, &servers.addrs[0]);
     try testing.expectEqualSlices(u8, &[_]u8{ 163, 1, 74, 7 }, &servers.addrs[1]);
