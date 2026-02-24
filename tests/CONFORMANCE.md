@@ -20,7 +20,8 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | socket/udp | 16 | 16 | 16 | PASS |
 | wire/dhcp | 9 | 9 | 9 | PASS |
 | socket/dhcp | 11 | 11 | 11 | PASS |
-| socket/dns | ~10 | 0 | -- | TODO |
+| wire/dns | 7 | 7 | 7 | PASS |
+| socket/dns | 0 | 12 | 12 | PASS |
 | socket/icmp | 6 | 6 | 6 | PASS |
 | iface | ~25 | 0 | -- | TODO |
 
@@ -109,6 +110,17 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/dhcpv4.rs:test_parse_ack_dns_servers | "parse ack with dns servers capped at 3" | PASS |
 | wire/dhcpv4.rs:test_parse_ack_lease_duration | "parse ack with lease duration" | PASS |
 | wire/dhcpv4.rs:test_construct_discover | "construct discover from bytes" | PASS |
+
+### wire/dns.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| wire/dns.rs:test_parse_name | "parse name with pointer compression" | PASS |
+| wire/dns.rs:test_parse_request | "parse request" | PASS |
+| wire/dns.rs:test_parse_response | "parse response single A" | PASS |
+| wire/dns.rs:test_parse_response_multiple_a | "parse response multiple A" | PASS |
+| wire/dns.rs:test_parse_response_cname | "parse response CNAME" | PASS |
+| wire/dns.rs:test_parse_response_nxdomain | "parse response NXDomain" | PASS |
+| wire/dns.rs:test_emit | "emit query" | PASS |
 
 ## Storage Layer Tests
 
@@ -411,3 +423,19 @@ were never actually run despite being listed here. The test module runs with
 | socket/dhcpv4.rs:test_renew_rebind_timeout | "renew rebind timeout" | PASS |
 | socket/dhcpv4.rs:test_min_max_renew_timeout | "min max renew timeout" | PASS |
 | socket/dhcpv4.rs:test_renew_nak | "renew nak" | PASS |
+
+### socket/dns.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| (original) | "start query encodes name" | PASS |
+| (original) | "start query rejects empty name" | PASS |
+| (original) | "start query rejects too-long label" | PASS |
+| (original) | "start query no free slot" | PASS |
+| (original) | "dispatch emits query packet" | PASS |
+| (original) | "dispatch retransmit with backoff" | PASS |
+| (original) | "dispatch timeout tries next server" | PASS |
+| (original) | "dispatch all servers exhausted" | PASS |
+| (original) | "process A response" | PASS |
+| (original) | "process NXDomain" | PASS |
+| (original) | "process CNAME then A" | PASS |
+| (original) | "cancel query frees slot" | PASS |
