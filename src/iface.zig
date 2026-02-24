@@ -79,7 +79,7 @@ pub const NeighborCache = struct {
     entries: [NEIGHBOR_CACHE_SIZE]Entry = [_]Entry{.{}} ** NEIGHBOR_CACHE_SIZE,
 
     fn isOccupied(entry: Entry) bool {
-        return !std.mem.eql(u8, &entry.protocol_addr, &ipv4.UNSPECIFIED);
+        return !ipv4.isUnspecified(entry.protocol_addr);
     }
 
     pub fn fill(self: *NeighborCache, ip: ipv4.Address, mac: ethernet.Address, now: time.Instant) void {
@@ -201,8 +201,7 @@ pub const Interface = struct {
     }
 
     pub fn isBroadcast(self: *const Interface, addr: ipv4.Address) bool {
-        const GLOBAL_BROADCAST: ipv4.Address = .{ 255, 255, 255, 255 };
-        if (std.mem.eql(u8, &addr, &GLOBAL_BROADCAST)) return true;
+        if (ipv4.isBroadcast(addr)) return true;
         for (self.ipAddrs()) |cidr| {
             if (cidr.broadcast()) |bcast| {
                 if (std.mem.eql(u8, &addr, &bcast)) return true;
@@ -350,8 +349,8 @@ pub const Interface = struct {
 
         const sock_repr = tcp_socket.TcpRepr.fromWireBytes(tcp_data) orelse return null;
         if (sock_repr.control == .rst) return null;
-        if (std.mem.eql(u8, &ip_repr.src_addr, &ipv4.UNSPECIFIED)) return null;
-        if (std.mem.eql(u8, &ip_repr.dst_addr, &ipv4.UNSPECIFIED)) return null;
+        if (ipv4.isUnspecified(ip_repr.src_addr)) return null;
+        if (ipv4.isUnspecified(ip_repr.dst_addr)) return null;
 
         const rst = tcp_socket.rstReply(sock_repr);
 

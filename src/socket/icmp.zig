@@ -242,7 +242,7 @@ test "send rejects unaddressable destination" {
     var tx: [1]TestSocket.Packet = undefined;
     var s = TestSocket.init(&rx, &tx);
 
-    try testing.expectError(error.Unaddressable, s.sendSlice("abcdef", .{ 0, 0, 0, 0 }));
+    try testing.expectError(error.Unaddressable, s.sendSlice("abcdef", ipv4.UNSPECIFIED));
     try s.sendSlice("abcdef", REMOTE_ADDR);
 }
 
