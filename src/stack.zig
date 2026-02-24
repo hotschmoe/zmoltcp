@@ -423,7 +423,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
         }
 
         fn emitDhcpEgress(self: *Self, sock: anytype, result: dhcp_socket_mod.DispatchResult, device: *Device) void {
-            var udp_buf: [IP_PAYLOAD_MAX]u8 = undefined;
+            var payload_buf: [IP_PAYLOAD_MAX]u8 = undefined;
             const dhcp_len = dhcp_wire.bufferLen(result.dhcp_repr);
             const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + dhcp_len);
             const hdr_len = udp_wire.emit(.{
@@ -431,31 +431,31 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                 .dst_port = sock.server_port,
                 .length = udp_total,
                 .checksum = 0,
-            }, &udp_buf) catch return;
-            if (hdr_len + dhcp_len > udp_buf.len) return;
-            _ = dhcp_wire.emit(result.dhcp_repr, udp_buf[hdr_len..]) catch return;
+            }, &payload_buf) catch return;
+            if (hdr_len + dhcp_len > payload_buf.len) return;
+            _ = dhcp_wire.emit(result.dhcp_repr, payload_buf[hdr_len..]) catch return;
             const total = hdr_len + dhcp_len;
 
-            udp_wire.fillChecksum(udp_buf[0..total], result.src_ip, result.dst_ip);
-            self.emitIpv4Frame(result.src_ip, result.dst_ip, .udp, iface_mod.DEFAULT_HOP_LIMIT, udp_buf[0..total], device);
+            udp_wire.fillChecksum(payload_buf[0..total], result.src_ip, result.dst_ip);
+            self.emitIpv4Frame(result.src_ip, result.dst_ip, .udp, iface_mod.DEFAULT_HOP_LIMIT, payload_buf[0..total], device);
         }
 
         fn emitDnsEgress(self: *Self, result: dns_socket_mod.DispatchResult, device: *Device) void {
-            var udp_buf: [IP_PAYLOAD_MAX]u8 = undefined;
+            var payload_buf: [IP_PAYLOAD_MAX]u8 = undefined;
             const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + result.payload.len);
             const hdr_len = udp_wire.emit(.{
                 .src_port = result.src_port,
                 .dst_port = dns_socket_mod.DNS_PORT,
                 .length = udp_total,
                 .checksum = 0,
-            }, &udp_buf) catch return;
-            if (hdr_len + result.payload.len > udp_buf.len) return;
-            @memcpy(udp_buf[hdr_len..][0..result.payload.len], result.payload);
+            }, &payload_buf) catch return;
+            if (hdr_len + result.payload.len > payload_buf.len) return;
+            @memcpy(payload_buf[hdr_len..][0..result.payload.len], result.payload);
             const total = hdr_len + result.payload.len;
 
             const src_addr = self.iface.getSourceAddress(result.dst_ip) orelse return;
-            udp_wire.fillChecksum(udp_buf[0..total], src_addr, result.dst_ip);
-            self.emitIpv4Frame(src_addr, result.dst_ip, .udp, iface_mod.DEFAULT_HOP_LIMIT, udp_buf[0..total], device);
+            udp_wire.fillChecksum(payload_buf[0..total], src_addr, result.dst_ip);
+            self.emitIpv4Frame(src_addr, result.dst_ip, .udp, iface_mod.DEFAULT_HOP_LIMIT, payload_buf[0..total], device);
         }
 
         fn emitTcpReply(self: *Self, orig_ip: ipv4.Repr, tcp_repr: tcp_socket.TcpRepr, device: *Device) void {
