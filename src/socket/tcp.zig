@@ -717,7 +717,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                         } else {
                             if (win_empty) break :blk false;
                             break :blk (segment_start.greaterThanOrEqual(window_start) and segment_start.lessThan(window_end)) or
-                                (segment_end.greaterThan(window_start) and (segment_end.eql(window_end) or segment_end.lessThan(window_end)));
+                                (segment_end.greaterThan(window_start) and segment_end.lessThanOrEqual(window_end));
                         }
                     };
 

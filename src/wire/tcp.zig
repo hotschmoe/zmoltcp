@@ -59,6 +59,10 @@ pub const SeqNumber = struct {
         return self.cmp(other) != .lt;
     }
 
+    pub fn lessThanOrEqual(self: SeqNumber, other: SeqNumber) bool {
+        return self.cmp(other) != .gt;
+    }
+
     pub fn eql(self: SeqNumber, other: SeqNumber) bool {
         return self.value == other.value;
     }
