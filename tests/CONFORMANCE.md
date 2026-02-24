@@ -16,15 +16,15 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | storage/ring_buffer | 15 | 14 | 1 | 14 | PASS |
 | storage/assembler | 38 | 37 | 1 | 37 | PASS |
 | time | 10 | 8 | 2 | 8 | PASS |
-| socket/tcp | 186 | 180 | ~10 | 180 | PASS |
-| socket/udp | 16 | 16 | 0 | 16 | PASS |
+| socket/tcp | 186 | 183 | ~10 | 183 | PASS |
+| socket/udp | 16 | 17 | 0 | 17 | PASS |
 | wire/dhcp | 9 | 9 | 0 | 9 | PASS |
 | socket/dhcp | 11 | 11 | 0 | 11 | PASS |
 | wire/dns | 7 | 7 | 0 | 7 | PASS |
 | socket/dns | 0 | 12 | 0 | 12 | PASS |
-| socket/icmp | 6 | 6 | 0 | 6 | PASS |
+| socket/icmp | 6 | 7 | 0 | 7 | PASS |
 | iface | ~25 | 15 | 9 | 15 | PASS |
-| stack | 0 | 8 | 0 | 8 | PASS |
+| stack | 0 | 16 | 0 | 16 | PASS |
 
 ## Wire Layer Tests
 
@@ -400,6 +400,9 @@ were never actually run despite being listed here. The test module runs with
 | test_syn_sent_win_scale_buffers | "SYN-SENT window scale for various rx buffer sizes" | PASS |
 | test_established_sliding_window_recv | "established sliding window recv with scaling" | PASS |
 | test_recv_out_of_recv_win | "recv data beyond advertised receive window" | PASS |
+| (original) | "pollAt SYN-SENT returns ZERO" | PASS |
+| (original) | "pollAt LISTEN returns null" | PASS |
+| (original) | "pollAt established with keep-alive returns timer deadline" | PASS |
 
 ### socket/udp.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -420,6 +423,7 @@ were never actually run despite being listed here. The test module runs with
 | socket/udp.rs:test_send_large_packet | "payload exceeding capacity returns BufferFull" | PASS |
 | socket/udp.rs:test_process_empty_payload | "zero-length datagram is valid" | PASS |
 | socket/udp.rs:test_closing | "close resets socket" | PASS |
+| (original) | "pollAt returns ZERO when tx queued, null when empty" | PASS |
 
 ### socket/icmp.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -430,6 +434,7 @@ were never actually run despite being listed here. The test module runs with
 | socket/icmp.rs:test_recv_process | "process inbound and recv" | PASS |
 | socket/icmp.rs:test_accept_bad_id | "rejects packet with wrong identifier" | PASS |
 | socket/icmp.rs:test_accepts_udp | "accepts ICMP error for bound UDP port" | PASS |
+| (original) | "pollAt returns ZERO when tx queued, null when empty" | PASS |
 
 ### socket/dhcp.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -496,6 +501,14 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "stack TCP SYN no listener produces RST" | PASS |
 | (original) | "stack UDP to bound socket delivers data" | PASS |
 | (original) | "stack ICMP echo with bound socket delivers and auto-replies" | PASS |
+| (original) | "stack TCP egress dispatches SYN on connect" | PASS |
+| (original) | "stack UDP egress dispatches datagram" | PASS |
+| (original) | "stack ICMP egress dispatches echo request" | PASS |
+| (original) | "stack poll returns true for egress-only activity" | PASS |
+| (original) | "stack pollAt returns ZERO for pending TCP SYN-SENT" | PASS |
+| (original) | "stack pollAt returns null for idle sockets" | PASS |
+| (original) | "stack egress uses cached neighbor MAC" | PASS |
+| (original) | "stack pollAt returns retransmit deadline after SYN dispatch" | PASS |
 
 ## Not Applicable (N/A) Tests
 

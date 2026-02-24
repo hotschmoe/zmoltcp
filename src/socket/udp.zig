@@ -9,6 +9,9 @@
 const std = @import("std");
 const ipv4 = @import("../wire/ipv4.zig");
 const ring_buffer_mod = @import("../storage/ring_buffer.zig");
+const time = @import("../time.zig");
+
+const Instant = time.Instant;
 
 // -------------------------------------------------------------------------
 // Endpoint types
@@ -183,6 +186,13 @@ pub fn Socket(comptime config: Config) type {
                 .data_len = result.payload.len,
                 .meta = result.meta,
             };
+        }
+
+        // -- Poll scheduling --
+
+        pub fn pollAt(self: Self) ?Instant {
+            if (!self.tx.isEmpty()) return Instant.ZERO;
+            return null;
         }
 
         // -- Protocol integration --
@@ -496,4 +506,20 @@ test "close resets socket" {
     try testing.expect(s.isOpen());
     s.close();
     try testing.expect(!s.isOpen());
+}
+
+// (original)
+test "pollAt returns ZERO when tx queued, null when empty" {
+    var rx: [0]TestSocket.Packet = undefined;
+    var tx: [1]TestSocket.Packet = undefined;
+    var s = TestSocket.init(&rx, &tx);
+    try s.bind(LOCAL_END);
+
+    try testing.expectEqual(@as(?Instant, null), s.pollAt());
+
+    try s.sendSlice(PAYLOAD, .{ .endpoint = REMOTE_END });
+    try testing.expectEqual(Instant.ZERO, s.pollAt().?);
+
+    _ = s.dispatch();
+    try testing.expectEqual(@as(?Instant, null), s.pollAt());
 }

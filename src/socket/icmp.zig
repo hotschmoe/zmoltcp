@@ -11,6 +11,9 @@ const std = @import("std");
 const ipv4 = @import("../wire/ipv4.zig");
 const icmp = @import("../wire/icmp.zig");
 const ring_buffer_mod = @import("../storage/ring_buffer.zig");
+const time = @import("../time.zig");
+
+const Instant = time.Instant;
 
 // Extract the transport-layer source port from an ICMP error payload.
 // The payload contains: [embedded IPv4 header][transport header fragment].
@@ -154,6 +157,13 @@ pub fn Socket(comptime config: Config) type {
                 .data_len = pkt.payload_len,
                 .src_addr = pkt.addr,
             };
+        }
+
+        // -- Poll scheduling --
+
+        pub fn pollAt(self: Self) ?Instant {
+            if (!self.tx.isEmpty()) return Instant.ZERO;
+            return null;
         }
 
         // -- Protocol integration --
@@ -392,4 +402,21 @@ test "accepts ICMP error for bound UDP port" {
     try testing.expectEqualSlices(u8, expected_buf[0..expected_len], recv_buf[0..result.data_len]);
     try testing.expectEqualSlices(u8, &REMOTE_ADDR, &result.src_addr);
     try testing.expect(!s.canRecv());
+}
+
+// (original)
+test "pollAt returns ZERO when tx queued, null when empty" {
+    var rx: [0]TestSocket.Packet = undefined;
+    var tx: [1]TestSocket.Packet = undefined;
+    var s = TestSocket.init(&rx, &tx);
+
+    try testing.expectEqual(@as(?Instant, null), s.pollAt());
+
+    var echo_buf: [24]u8 = undefined;
+    const echo_bytes = buildEchoPacket(&echo_buf);
+    try s.sendSlice(echo_bytes, REMOTE_ADDR);
+    try testing.expectEqual(Instant.ZERO, s.pollAt().?);
+
+    _ = s.dispatch();
+    try testing.expectEqual(@as(?Instant, null), s.pollAt());
 }

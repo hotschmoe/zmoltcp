@@ -1233,6 +1233,49 @@ pub fn Socket(comptime max_asm_segs: usize) type {
             return result;
         }
 
+        // -- Poll scheduling --
+
+        pub fn pollAt(self: Self) ?Instant {
+            if (self.tuple == null) return null;
+
+            // Immediate dispatch needed for these conditions.
+            if (self.seqToTransmit() or self.windowToUpdate() or
+                self.state == .closed or self.remote_last_ts == null)
+            {
+                return Instant.ZERO;
+            }
+
+            var result: ?Instant = null;
+
+            // ACK delay timer.
+            switch (self.ack_delay_timer) {
+                .idle => {},
+                .waiting => |deadline| result = minInstant(result, deadline),
+                .immediate => return Instant.ZERO,
+            }
+
+            // Connection timeout.
+            if (self.remote_last_ts) |rts| {
+                if (self.timeout) |tout| {
+                    result = minInstant(result, rts.add(tout));
+                }
+            }
+
+            // Timer (retransmit, keep-alive, close, zero-window-probe).
+            if (self.timer.pollAt()) |t| {
+                result = minInstant(result, t);
+            }
+
+            return result;
+        }
+
+        fn minInstant(a: ?Instant, b: Instant) Instant {
+            if (a) |av| {
+                return if (b.lessThan(av)) b else av;
+            }
+            return b;
+        }
+
         // -- Internal helpers --
 
         fn timedOut(self: Self, timestamp: Instant) bool {
@@ -6020,4 +6063,30 @@ test "recv data beyond advertised receive window" {
     const ack2 = recvAt0(&s) orelse return error.TestUnexpectedResult;
     try testing.expect(ack2.ack_number.?.eql(REMOTE_SEQ.add(1).add(64)));
     try testing.expectEqual(@as(u16, 1), ack2.window_len);
+}
+
+// -- pollAt tests --
+
+// (original)
+test "pollAt SYN-SENT returns ZERO" {
+    var s = socketSynSent();
+    try testing.expectEqual(Instant.ZERO, s.pollAt().?);
+}
+
+// (original)
+test "pollAt LISTEN returns null" {
+    var s = socketListen();
+    try testing.expectEqual(@as(?Instant, null), s.pollAt());
+}
+
+// (original)
+test "pollAt established with keep-alive returns timer deadline" {
+    var s = socketEstablished();
+    s.keep_alive = Duration.fromSecs(10);
+    s.timer.setForIdle(Instant.ZERO, s.keep_alive);
+    // Drain the initial dispatch (SYN-ACK window update, etc.)
+    while (s.dispatch(Instant.ZERO) != null) {}
+
+    const poll_at = s.pollAt() orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(Instant.fromSecs(10), poll_at);
 }

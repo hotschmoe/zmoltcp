@@ -53,19 +53,44 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
 
         pub fn poll(self: *Self, timestamp: Instant, device: *Device) bool {
             self.iface.now = timestamp;
-            var processed = false;
+            var activity = false;
 
             while (device.receive()) |rx_frame| {
                 self.processIngress(timestamp, rx_frame, device);
-                processed = true;
+                activity = true;
             }
 
-            return processed;
+            if (self.processEgress(timestamp, device)) activity = true;
+
+            return activity;
         }
 
         pub fn pollAt(self: *const Self) ?Instant {
-            _ = self;
-            return null;
+            var result: ?Instant = null;
+
+            if (comptime has_tcp) {
+                for (self.sockets.tcp_sockets) |sock| {
+                    if (sock.pollAt()) |t| {
+                        result = if (result) |r| (if (t.lessThan(r)) t else r) else t;
+                    }
+                }
+            }
+            if (comptime has_udp) {
+                for (self.sockets.udp_sockets) |sock| {
+                    if (sock.pollAt()) |t| {
+                        result = if (result) |r| (if (t.lessThan(r)) t else r) else t;
+                    }
+                }
+            }
+            if (comptime has_icmp) {
+                for (self.sockets.icmp_sockets) |sock| {
+                    if (sock.pollAt()) |t| {
+                        result = if (result) |r| (if (t.lessThan(r)) t else r) else t;
+                    }
+                }
+            }
+
+            return result;
         }
 
         fn processIngress(self: *Self, timestamp: Instant, frame: []const u8, device: *Device) void {
@@ -176,6 +201,145 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     sock.process(ip_repr.src_addr, icmp_repr, icmp_payload);
                 }
             }
+        }
+
+        // -- Egress --
+
+        fn processEgress(self: *Self, timestamp: Instant, device: *Device) bool {
+            var dispatched = false;
+
+            if (comptime has_tcp) {
+                for (self.sockets.tcp_sockets) |sock| {
+                    while (sock.dispatch(timestamp)) |result| {
+                        self.emitTcpEgress(
+                            result.src_addr,
+                            result.dst_addr,
+                            result.repr,
+                            result.hop_limit,
+                            device,
+                        );
+                        dispatched = true;
+                    }
+                }
+            }
+
+            if (comptime has_udp) {
+                for (self.sockets.udp_sockets) |sock| {
+                    while (sock.dispatch()) |result| {
+                        self.emitUdpEgress(result, device);
+                        dispatched = true;
+                    }
+                }
+            }
+
+            if (comptime has_icmp) {
+                for (self.sockets.icmp_sockets) |sock| {
+                    while (sock.dispatch()) |result| {
+                        self.emitIcmpEgress(result, device);
+                        dispatched = true;
+                    }
+                }
+            }
+
+            return dispatched;
+        }
+
+        fn emitIpv4Frame(
+            self: *Self,
+            src_addr: ipv4.Address,
+            dst_addr: ipv4.Address,
+            protocol: ipv4.Protocol,
+            hop_limit: u8,
+            payload_data: []const u8,
+            device: *Device,
+        ) void {
+            var buf: [MAX_FRAME_LEN]u8 = undefined;
+
+            const ip_repr = ipv4.Repr{
+                .version = 4,
+                .ihl = 5,
+                .dscp_ecn = 0,
+                .total_length = @intCast(ipv4.HEADER_LEN + payload_data.len),
+                .identification = 0,
+                .dont_fragment = true,
+                .more_fragments = false,
+                .fragment_offset = 0,
+                .ttl = hop_limit,
+                .protocol = protocol,
+                .checksum = 0,
+                .src_addr = src_addr,
+                .dst_addr = dst_addr,
+            };
+
+            const dst_mac = self.iface.neighbor_cache.lookup(dst_addr, self.iface.now) orelse
+                ethernet.BROADCAST;
+
+            const eth_repr = ethernet.Repr{
+                .dst_addr = dst_mac,
+                .src_addr = self.iface.hardware_addr,
+                .ethertype = .ipv4,
+            };
+
+            const eth_len = ethernet.emit(eth_repr, &buf) catch return;
+            const ip_len = ipv4.emit(ip_repr, buf[eth_len..]) catch return;
+            const total = eth_len + ip_len + payload_data.len;
+            if (total > buf.len) return;
+            @memcpy(buf[eth_len + ip_len ..][0..payload_data.len], payload_data);
+            device.transmit(buf[0..total]);
+        }
+
+        fn emitTcpEgress(
+            self: *Self,
+            src_addr: ipv4.Address,
+            dst_addr: ipv4.Address,
+            repr: tcp_socket.TcpRepr,
+            hop_limit: u8,
+            device: *Device,
+        ) void {
+            var payload_buf: [iface_mod.IPV4_MIN_MTU]u8 = undefined;
+            const wire_repr = repr.toWireRepr();
+            const tcp_len = tcp_wire.emit(wire_repr, &payload_buf) catch return;
+            const total_tcp = tcp_len + repr.payload.len;
+            if (total_tcp > payload_buf.len) return;
+            @memcpy(payload_buf[tcp_len..][0..repr.payload.len], repr.payload);
+            const cksum = tcp_wire.computeChecksum(
+                src_addr,
+                dst_addr,
+                payload_buf[0..total_tcp],
+            );
+            payload_buf[16] = @truncate(cksum >> 8);
+            payload_buf[17] = @truncate(cksum & 0xFF);
+            self.emitIpv4Frame(src_addr, dst_addr, .tcp, hop_limit, payload_buf[0..total_tcp], device);
+        }
+
+        fn emitUdpEgress(self: *Self, result: anytype, device: *Device) void {
+            var payload_buf: [iface_mod.IPV4_MIN_MTU]u8 = undefined;
+            const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + result.payload.len);
+            const hdr_len = udp_wire.emit(.{
+                .src_port = result.repr.src_port,
+                .dst_port = result.repr.dst_port,
+                .length = udp_total,
+                .checksum = 0,
+            }, &payload_buf) catch return;
+            if (hdr_len + result.payload.len > payload_buf.len) return;
+            @memcpy(payload_buf[hdr_len..][0..result.payload.len], result.payload);
+            const total = hdr_len + result.payload.len;
+
+            const src_addr = if (!ipv4.isUnspecified(result.src_addr))
+                result.src_addr
+            else
+                (self.iface.getSourceAddress(result.dst_addr) orelse return);
+
+            udp_wire.fillChecksum(payload_buf[0..total], src_addr, result.dst_addr);
+            const hop_limit = result.hop_limit orelse iface_mod.DEFAULT_HOP_LIMIT;
+            self.emitIpv4Frame(src_addr, result.dst_addr, .udp, hop_limit, payload_buf[0..total], device);
+        }
+
+        fn emitIcmpEgress(self: *Self, result: anytype, device: *Device) void {
+            const src_addr = self.iface.getSourceAddress(result.dst_addr) orelse
+                (self.iface.ipv4Addr() orelse return);
+            const hop_limit = result.hop_limit orelse iface_mod.DEFAULT_HOP_LIMIT;
+            self.emitIpv4Frame(src_addr, result.dst_addr, .icmp, hop_limit, result.payload, device);
         }
 
         fn emitTcpReply(self: *Self, orig_ip: ipv4.Repr, tcp_repr: tcp_socket.TcpRepr, device: *Device) void {
@@ -628,7 +792,6 @@ test "stack UDP to bound socket delivers data" {
 }
 
 test "stack ICMP echo with bound socket delivers and auto-replies" {
-    const icmp_socket_mod = @import("socket/icmp.zig");
     const IcmpSock = icmp_socket_mod.Socket(.{ .payload_size = 128 });
     const Sockets = struct { icmp_sockets: []*IcmpSock };
     const IcmpStack = Stack(TestDevice, Sockets);
@@ -687,4 +850,272 @@ test "stack ICMP echo with bound socket delivers and auto-replies" {
     const recv = try sock.recvSlice(&recv_buf);
     try testing.expectEqual(REMOTE_IP, recv.src_addr);
     try testing.expectEqual(icmp.HEADER_LEN + echo_data.len, recv.data_len);
+}
+
+// -------------------------------------------------------------------------
+// Egress tests
+// -------------------------------------------------------------------------
+
+const icmp_socket_mod = @import("socket/icmp.zig");
+
+test "stack TCP egress dispatches SYN on connect" {
+    const TcpSock = tcp_socket.Socket(4);
+    const Sockets = struct { tcp_sockets: []*TcpSock };
+    const TcpStack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    const S = struct {
+        var rx_buf: [64]u8 = .{0} ** 64;
+        var tx_buf: [64]u8 = .{0} ** 64;
+    };
+    @memset(&S.rx_buf, 0);
+    @memset(&S.tx_buf, 0);
+    var sock = TcpSock.init(&S.rx_buf, &S.tx_buf);
+    sock.ack_delay = null;
+    try sock.connect(REMOTE_IP, 4242, LOCAL_IP, 4243);
+
+    var sock_arr = [_]*TcpSock{&sock};
+    var stack = TcpStack.init(LOCAL_HW, .{ .tcp_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    const activity = stack.poll(Instant.ZERO, &device);
+    try testing.expect(activity);
+
+    const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
+    const eth = try ethernet.parse(tx_frame);
+    try testing.expectEqual(ethernet.EtherType.ipv4, eth.ethertype);
+
+    const ip_data = try ethernet.payload(tx_frame);
+    const ip_repr = try ipv4.parse(ip_data);
+    try testing.expectEqual(ipv4.Protocol.tcp, ip_repr.protocol);
+    try testing.expectEqual(LOCAL_IP, ip_repr.src_addr);
+    try testing.expectEqual(REMOTE_IP, ip_repr.dst_addr);
+
+    const tcp_data = try ipv4.payloadSlice(ip_data);
+    const tcp_repr = try tcp_wire.parse(tcp_data);
+    try testing.expect(tcp_repr.flags.syn);
+    try testing.expectEqual(@as(u16, 4243), tcp_repr.src_port);
+    try testing.expectEqual(@as(u16, 4242), tcp_repr.dst_port);
+
+    // Verify TCP checksum
+    try testing.expectEqual(@as(u16, 0), tcp_wire.computeChecksum(
+        ip_repr.src_addr,
+        ip_repr.dst_addr,
+        tcp_data,
+    ));
+}
+
+test "stack UDP egress dispatches datagram" {
+    const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 64 });
+    const Sockets = struct { udp_sockets: []*UdpSock };
+    const UdpStack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    var rx_buf: [1]UdpSock.Packet = undefined;
+    var tx_buf: [1]UdpSock.Packet = undefined;
+    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    try sock.bind(.{ .port = 12345 });
+    try sock.sendSlice("Hello", .{
+        .endpoint = .{ .addr = REMOTE_IP, .port = 54321 },
+    });
+
+    var sock_arr = [_]*UdpSock{&sock};
+    var stack = UdpStack.init(LOCAL_HW, .{ .udp_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    const activity = stack.poll(Instant.ZERO, &device);
+    try testing.expect(activity);
+
+    const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
+    const ip_data = try ethernet.payload(tx_frame);
+    const ip_repr = try ipv4.parse(ip_data);
+    try testing.expectEqual(ipv4.Protocol.udp, ip_repr.protocol);
+    try testing.expectEqual(LOCAL_IP, ip_repr.src_addr);
+    try testing.expectEqual(REMOTE_IP, ip_repr.dst_addr);
+
+    const udp_data = try ipv4.payloadSlice(ip_data);
+    const udp_repr = try udp_wire.parse(udp_data);
+    try testing.expectEqual(@as(u16, 12345), udp_repr.src_port);
+    try testing.expectEqual(@as(u16, 54321), udp_repr.dst_port);
+    try testing.expectEqual(@as(u16, udp_wire.HEADER_LEN + 5), udp_repr.length);
+
+    const payload = try udp_wire.payloadSlice(udp_data);
+    try testing.expectEqualSlices(u8, "Hello", payload);
+
+    // Verify UDP checksum
+    try testing.expect(udp_wire.verifyChecksum(udp_data, ip_repr.src_addr, ip_repr.dst_addr));
+}
+
+test "stack ICMP egress dispatches echo request" {
+    const IcmpSock = icmp_socket_mod.Socket(.{ .payload_size = 128 });
+    const Sockets = struct { icmp_sockets: []*IcmpSock };
+    const IcmpStack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    var rx_buf: [1]IcmpSock.Packet = undefined;
+    var tx_buf: [1]IcmpSock.Packet = undefined;
+    var sock = IcmpSock.init(&rx_buf, &tx_buf);
+
+    // Build an ICMP echo request to send
+    const echo_data = [_]u8{ 0xCA, 0xFE };
+    var icmp_buf: [icmp.HEADER_LEN + 2]u8 = undefined;
+    _ = icmp.emitEcho(.{
+        .icmp_type = .echo_request,
+        .code = 0,
+        .checksum = 0,
+        .identifier = 0xABCD,
+        .sequence = 7,
+    }, &echo_data, &icmp_buf) catch unreachable;
+
+    try sock.sendSlice(&icmp_buf, REMOTE_IP);
+
+    var sock_arr = [_]*IcmpSock{&sock};
+    var stack = IcmpStack.init(LOCAL_HW, .{ .icmp_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    const activity = stack.poll(Instant.ZERO, &device);
+    try testing.expect(activity);
+
+    const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
+    const ip_data = try ethernet.payload(tx_frame);
+    const ip_repr = try ipv4.parse(ip_data);
+    try testing.expectEqual(ipv4.Protocol.icmp, ip_repr.protocol);
+    try testing.expectEqual(LOCAL_IP, ip_repr.src_addr);
+    try testing.expectEqual(REMOTE_IP, ip_repr.dst_addr);
+
+    const icmp_data = try ipv4.payloadSlice(ip_data);
+    try testing.expectEqualSlices(u8, &icmp_buf, icmp_data);
+}
+
+test "stack poll returns true for egress-only activity" {
+    const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 64 });
+    const Sockets = struct { udp_sockets: []*UdpSock };
+    const UdpStack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    var rx_buf: [1]UdpSock.Packet = undefined;
+    var tx_buf: [1]UdpSock.Packet = undefined;
+    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    try sock.bind(.{ .port = 100 });
+    try sock.sendSlice("X", .{
+        .endpoint = .{ .addr = REMOTE_IP, .port = 200 },
+    });
+
+    var sock_arr = [_]*UdpSock{&sock};
+    var stack = UdpStack.init(LOCAL_HW, .{ .udp_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    // No RX frames, but socket has data to send.
+    const activity = stack.poll(Instant.ZERO, &device);
+    try testing.expect(activity);
+    try testing.expect(device.dequeueTx() != null);
+}
+
+test "stack pollAt returns ZERO for pending TCP SYN-SENT" {
+    const TcpSock = tcp_socket.Socket(4);
+    const Sockets = struct { tcp_sockets: []*TcpSock };
+    const TcpStack = Stack(TestDevice, Sockets);
+
+    const S = struct {
+        var rx_buf: [64]u8 = .{0} ** 64;
+        var tx_buf: [64]u8 = .{0} ** 64;
+    };
+    @memset(&S.rx_buf, 0);
+    @memset(&S.tx_buf, 0);
+    var sock = TcpSock.init(&S.rx_buf, &S.tx_buf);
+    sock.ack_delay = null;
+    try sock.connect(REMOTE_IP, 80, LOCAL_IP, 5000);
+
+    var sock_arr = [_]*TcpSock{&sock};
+    var stack = TcpStack.init(LOCAL_HW, .{ .tcp_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    try testing.expectEqual(Instant.ZERO, stack.pollAt().?);
+}
+
+test "stack pollAt returns null for idle sockets" {
+    const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 64 });
+    const Sockets = struct { udp_sockets: []*UdpSock };
+    const UdpStack = Stack(TestDevice, Sockets);
+
+    var rx_buf: [1]UdpSock.Packet = undefined;
+    var tx_buf: [1]UdpSock.Packet = undefined;
+    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    try sock.bind(.{ .port = 100 });
+
+    var sock_arr = [_]*UdpSock{&sock};
+    var stack = UdpStack.init(LOCAL_HW, .{ .udp_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    // Socket bound but no pending TX -- pollAt should be null.
+    try testing.expectEqual(@as(?Instant, null), stack.pollAt());
+}
+
+test "stack egress uses cached neighbor MAC" {
+    const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 64 });
+    const Sockets = struct { udp_sockets: []*UdpSock };
+    const UdpStack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    var rx_buf: [1]UdpSock.Packet = undefined;
+    var tx_buf: [1]UdpSock.Packet = undefined;
+    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    try sock.bind(.{ .port = 100 });
+
+    var sock_arr = [_]*UdpSock{&sock};
+    var stack = UdpStack.init(LOCAL_HW, .{ .udp_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    // Populate neighbor cache via ARP exchange
+    var arp_buf: [128]u8 = undefined;
+    device.enqueueRx(buildArpRequest(&arp_buf));
+    _ = stack.poll(Instant.ZERO, &device);
+    _ = device.dequeueTx(); // ARP reply
+
+    // Now send a UDP packet; it should use the cached MAC for REMOTE_IP
+    try sock.sendSlice("hi", .{
+        .endpoint = .{ .addr = REMOTE_IP, .port = 200 },
+    });
+    _ = stack.poll(Instant.ZERO, &device);
+
+    const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
+    const eth = try ethernet.parse(tx_frame);
+    try testing.expectEqual(REMOTE_HW, eth.dst_addr);
+}
+
+test "stack pollAt returns retransmit deadline after SYN dispatch" {
+    const TcpSock = tcp_socket.Socket(4);
+    const Sockets = struct { tcp_sockets: []*TcpSock };
+    const TcpStack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    const S = struct {
+        var rx_buf: [64]u8 = .{0} ** 64;
+        var tx_buf: [64]u8 = .{0} ** 64;
+    };
+    @memset(&S.rx_buf, 0);
+    @memset(&S.tx_buf, 0);
+    var sock = TcpSock.init(&S.rx_buf, &S.tx_buf);
+    sock.ack_delay = null;
+    try sock.connect(REMOTE_IP, 80, LOCAL_IP, 5000);
+
+    var sock_arr = [_]*TcpSock{&sock};
+    var stack = TcpStack.init(LOCAL_HW, .{ .tcp_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    // Before poll: SYN-SENT needs to transmit, so pollAt = ZERO
+    try testing.expectEqual(Instant.ZERO, stack.pollAt().?);
+
+    // After poll: SYN dispatched, retransmit timer armed (RTO = 1000ms)
+    _ = stack.poll(Instant.ZERO, &device);
+    _ = device.dequeueTx();
+
+    const poll_at = stack.pollAt() orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(Instant.fromMillis(1000), poll_at);
 }
