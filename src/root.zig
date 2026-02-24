@@ -30,6 +30,8 @@ pub const socket = struct {
     pub const dns = @import("socket/dns.zig");
 };
 
+pub const iface = @import("iface.zig");
+
 test {
     // refAllDecls ensures all declarations compile but does NOT discover
     // tests inside modules imported within struct namespaces. Explicit
@@ -52,4 +54,5 @@ test {
     _ = @import("socket/tcp.zig");
     _ = @import("wire/dns.zig");
     _ = @import("socket/dns.zig");
+    _ = @import("iface.zig");
 }

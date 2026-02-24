@@ -23,7 +23,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/dns | 7 | 7 | 7 | PASS |
 | socket/dns | 0 | 12 | 12 | PASS |
 | socket/icmp | 6 | 6 | 6 | PASS |
-| iface | ~25 | 0 | -- | TODO |
+| iface | ~25 | 12 | 12 | PASS |
 
 ## Wire Layer Tests
 
@@ -439,3 +439,21 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "process NXDomain" | PASS |
 | (original) | "process CNAME then A" | PASS |
 | (original) | "cancel query frees slot" | PASS |
+
+## Interface Layer Tests
+
+### iface.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| iface/interface/tests/ipv4.rs:test_local_subnet_broadcasts | "local subnet broadcasts" | PASS |
+| iface/interface/tests/ipv4.rs:get_source_address | "get source address" | PASS |
+| iface/interface/tests/ipv4.rs:get_source_address_empty_interface | "get source address empty interface" | PASS |
+| iface/interface/tests/ipv4.rs:test_handle_valid_arp_request | "handle valid ARP request" | PASS |
+| iface/interface/tests/ipv4.rs:test_handle_other_arp_request | "handle other ARP request" | PASS |
+| iface/interface/tests/ipv4.rs:test_arp_flush_after_update_ip | "ARP flush after update IP" | PASS |
+| iface/interface/tests/ipv4.rs:test_handle_ipv4_broadcast | "handle IPv4 broadcast" | PASS |
+| iface/interface/tests/ipv4.rs:test_no_icmp_no_unicast | "no ICMP for unknown protocol to broadcast" | PASS |
+| iface/interface/tests/ipv4.rs:test_icmp_error_no_payload | "ICMP error no payload" | PASS |
+| iface/interface/tests/ipv4.rs:test_icmp_error_port_unreachable | "ICMP error port unreachable" | PASS |
+| iface/interface/tests/mod.rs:test_handle_udp_broadcast | "handle UDP broadcast" | PASS |
+| iface/interface/tests/ipv4.rs:test_icmp_reply_size | "ICMP reply size" | PASS |
