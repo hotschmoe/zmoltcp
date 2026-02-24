@@ -44,6 +44,7 @@ pub const IpCidr = struct {
     }
 
     fn hostMask(self: IpCidr) u32 {
+        if (self.prefix_len == 0) return 0xFFFFFFFF;
         if (self.prefix_len >= 32) return 0;
         return (@as(u32, 1) << @intCast(32 - @as(u6, self.prefix_len))) -% 1;
     }
@@ -165,6 +166,7 @@ pub const Interface = struct {
     ip_addr_count: usize = 0,
     neighbor_cache: NeighborCache = .{},
     now: time.Instant = time.Instant.ZERO,
+    any_ip: bool = false,
 
     pub fn init(hw_addr: ethernet.Address) Interface {
         return .{ .hardware_addr = hw_addr };
@@ -233,7 +235,7 @@ pub const Interface = struct {
 
     pub fn processArp(self: *Interface, data: []const u8) ?Response {
         const repr = arp.parse(data) catch return null;
-        if (!self.hasIpAddr(repr.target_protocol_addr)) return null;
+        if (!self.any_ip and !self.hasIpAddr(repr.target_protocol_addr)) return null;
 
         self.neighbor_cache.fill(repr.source_protocol_addr, repr.source_hardware_addr, self.now);
 
@@ -733,6 +735,49 @@ test "ICMP reply size" {
                 },
                 else => return error.UnexpectedPayload,
             }
+        },
+        else => return error.UnexpectedResponseType,
+    }
+}
+
+// [smoltcp:iface/interface/tests/ipv4.rs:test_any_ip_accept_arp]
+test "any_ip accepts ARP for unknown address" {
+    var iface = testInterface();
+    const UNKNOWN_IP: ipv4.Address = .{ 10, 0, 0, 99 };
+
+    // Without any_ip, ARP for unknown IP is ignored
+    var buf: [128]u8 = undefined;
+    const frame = buildArpFrame(&buf, .{
+        .operation = .request,
+        .source_hardware_addr = REMOTE_HW_ADDR,
+        .source_protocol_addr = REMOTE_IP,
+        .target_hardware_addr = .{ 0, 0, 0, 0, 0, 0 },
+        .target_protocol_addr = UNKNOWN_IP,
+    });
+
+    const result1 = iface.processEthernet(frame);
+    try testing.expectEqual(@as(?Response, null), result1);
+
+    // With any_ip, ARP for unknown IP gets a reply
+    iface.any_ip = true;
+
+    var buf2: [128]u8 = undefined;
+    const frame2 = buildArpFrame(&buf2, .{
+        .operation = .request,
+        .source_hardware_addr = REMOTE_HW_ADDR,
+        .source_protocol_addr = REMOTE_IP,
+        .target_hardware_addr = .{ 0, 0, 0, 0, 0, 0 },
+        .target_protocol_addr = UNKNOWN_IP,
+    });
+
+    const result2 = iface.processEthernet(frame2) orelse return error.ExpectedResponse;
+    switch (result2) {
+        .arp_reply => |reply| {
+            try testing.expectEqual(arp.Operation.reply, reply.operation);
+            try testing.expectEqual(LOCAL_HW_ADDR, reply.source_hardware_addr);
+            try testing.expectEqual(UNKNOWN_IP, reply.source_protocol_addr);
+            try testing.expectEqual(REMOTE_HW_ADDR, reply.target_hardware_addr);
+            try testing.expectEqual(REMOTE_IP, reply.target_protocol_addr);
         },
         else => return error.UnexpectedResponseType,
     }

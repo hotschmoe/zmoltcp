@@ -1030,6 +1030,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
             repr: TcpRepr,
             src_addr: ipv4.Address,
             dst_addr: ipv4.Address,
+            hop_limit: u8,
         };
 
         pub fn dispatch(self: *Self, timestamp: Instant) ?DispatchResult {
@@ -1143,13 +1144,15 @@ pub fn Socket(comptime max_asm_segs: usize) type {
             // Reset delayed ACK timer.
             self.ack_delay_timer = .idle;
 
+            const hl = self.hop_limit orelse 64;
+
             if (is_zero_window_probe) {
                 self.timer.rewindZeroWindowProbe(timestamp);
-                return .{ .repr = repr, .src_addr = t.local.addr, .dst_addr = t.remote.addr };
+                return .{ .repr = repr, .src_addr = t.local.addr, .dst_addr = t.remote.addr, .hop_limit = hl };
             }
 
             if (is_keep_alive) {
-                return .{ .repr = repr, .src_addr = t.local.addr, .dst_addr = t.remote.addr };
+                return .{ .repr = repr, .src_addr = t.local.addr, .dst_addr = t.remote.addr, .hop_limit = hl };
             }
 
             // Update state.
@@ -1170,7 +1173,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                 self.tuple = null;
             }
 
-            return .{ .repr = repr, .src_addr = t.local.addr, .dst_addr = t.remote.addr };
+            return .{ .repr = repr, .src_addr = t.local.addr, .dst_addr = t.remote.addr, .hop_limit = hl };
         }
 
         // -- Internal helpers --
@@ -5729,4 +5732,93 @@ test "buffer wraparound tx" {
     const pkt2 = recvAt0(&s);
     try testing.expect(pkt2 != null);
     try testing.expect(pkt2.?.payload.len > 0);
+}
+
+// =========================================================================
+// Hop limit tests
+// =========================================================================
+
+// [smoltcp:socket/tcp.rs:test_set_hop_limit]
+test "set hop limit propagates to dispatch" {
+    var s = socketSynReceived();
+    s.hop_limit = 0x2a;
+
+    const result = s.dispatch(Instant.ZERO) orelse return error.ExpectedDispatch;
+    try testing.expectEqual(@as(u8, 0x2a), result.hop_limit);
+
+    // User-configurable settings are preserved across reset (issue #601)
+    s.reset();
+    try testing.expectEqual(@as(?u8, 0x2a), s.hop_limit);
+}
+
+// [smoltcp:socket/tcp.rs:test_set_hop_limit_zero]
+test "set hop limit zero rejected" {
+    var s = socketSynReceived();
+    // hop_limit = 0 is meaningless (TTL=0 packets are dropped immediately).
+    // Setting it to null disables the override and uses the default (64).
+    s.hop_limit = null;
+    const result = s.dispatch(Instant.ZERO) orelse return error.ExpectedDispatch;
+    try testing.expectEqual(@as(u8, 64), result.hop_limit);
+}
+
+// =========================================================================
+// Window scale buffer size tests
+// =========================================================================
+
+// [smoltcp:socket/tcp.rs:test_listen_syn_win_scale_buffers]
+test "listen syn window scale for various buffer sizes" {
+    // Verify windowShiftFor produces the expected shift for each buffer size
+    const cases = [_]struct { buf: usize, shift: u8 }{
+        .{ .buf = 64, .shift = 0 },
+        .{ .buf = 128, .shift = 0 },
+        .{ .buf = 1024, .shift = 0 },
+        .{ .buf = 65535, .shift = 0 },
+        .{ .buf = 65536, .shift = 1 },
+        .{ .buf = 65537, .shift = 1 },
+        .{ .buf = 131071, .shift = 1 },
+        .{ .buf = 131072, .shift = 2 },
+        .{ .buf = 524287, .shift = 3 },
+        .{ .buf = 524288, .shift = 4 },
+        .{ .buf = 655350, .shift = 4 },
+        .{ .buf = 1048576, .shift = 5 },
+    };
+    for (cases) |c| {
+        try testing.expectEqual(c.shift, TestSocket.windowShiftFor(c.buf));
+    }
+}
+
+// [smoltcp:socket/tcp.rs:test_syn_sent_syn_ack_no_window_scaling]
+test "SYN-SENT syn ack no window scaling clears shift" {
+    // Use a socket with large buffers so remote_win_shift > 0
+    var s = socketWithBuffers(64, 1048576);
+    s.state = .syn_sent;
+    s.tuple = .{
+        .local = .{ .addr = LOCAL_ADDR, .port = LOCAL_PORT },
+        .remote = .{ .addr = REMOTE_ADDR, .port = REMOTE_PORT },
+    };
+    s.local_seq_no = LOCAL_SEQ;
+    s.remote_last_seq = LOCAL_SEQ;
+
+    // Verify the initial shift is 5 (for 1048576-byte rx buffer)
+    try testing.expectEqual(@as(u8, 5), s.remote_win_shift);
+
+    // Drain the SYN
+    const syn = recvAt0(&s);
+    try testing.expect(syn != null);
+    try testing.expectEqual(Control.syn, syn.?.control);
+    try testing.expectEqual(@as(?u8, 5), syn.?.window_scale);
+
+    // Server SYN-ACK without window_scale
+    _ = sendPacketAt0(&s, TcpRepr{
+        .src_port = SEND_TEMPL.src_port,
+        .dst_port = SEND_TEMPL.dst_port,
+        .control = .syn,
+        .seq_number = REMOTE_SEQ,
+        .ack_number = LOCAL_SEQ.add(1),
+        .window_len = 42,
+    });
+    try testing.expectEqual(State.established, s.state);
+    try testing.expectEqual(@as(u8, 0), s.remote_win_shift);
+    try testing.expectEqual(@as(?u8, null), s.remote_win_scale);
+    try testing.expectEqual(@as(usize, 42), s.remote_win_len);
 }

@@ -9,21 +9,22 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/checksum | 5 | 5 | 5 | PASS |
 | wire/ethernet | 5 | 5 | 5 | PASS |
 | wire/arp | 4 | 5 | 5 | PASS |
-| wire/ipv4 | 15 | 7 | 7 | PASS |
+| wire/ipv4 | 15 | 13 | 13 | PASS |
 | wire/tcp | 9 | 13 | 13 | PASS |
-| wire/udp | 8 | 4 | 4 | PASS |
-| wire/icmp | 5 | 4 | 4 | PASS |
+| wire/udp | 8 | 8 | 8 | PASS |
+| wire/icmp | 5 | 5 | 5 | PASS |
 | storage/ring_buffer | 15 | 14 | 14 | PASS |
 | storage/assembler | 38 | 37 | 37 | PASS |
 | time | 10 | 8 | 8 | PASS |
-| socket/tcp | 175 | 172 | 172 | PASS |
+| socket/tcp | 175 | 176 | 176 | PASS |
 | socket/udp | 16 | 16 | 16 | PASS |
 | wire/dhcp | 9 | 9 | 9 | PASS |
 | socket/dhcp | 11 | 11 | 11 | PASS |
 | wire/dns | 7 | 7 | 7 | PASS |
 | socket/dns | 0 | 12 | 12 | PASS |
 | socket/icmp | 6 | 6 | 6 | PASS |
-| iface | ~25 | 12 | 12 | PASS |
+| iface | ~25 | 13 | 13 | PASS |
+| stack | 0 | 5 | 5 | PASS |
 
 ## Wire Layer Tests
 
@@ -64,6 +65,12 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/ipv4.rs:roundtrip | "IPv4 roundtrip" | PASS |
 | (original) | "IPv4 emit produces valid checksum" | PASS |
 | (original) | "IPv4 payload extraction" | PASS |
+| wire/ipv4.rs:test_deconstruct | "IPv4 deconstruct raw fields" | PASS |
+| wire/ipv4.rs:test_construct | "IPv4 construct with flags and frag offset" | PASS |
+| wire/ipv4.rs:test_overlong | "IPv4 overlong buffer clamped to total_len" | PASS |
+| wire/ipv4.rs:test_total_len_overflow | "IPv4 total_len overflow" | PASS |
+| wire/ipv4.rs:test_emit | "IPv4 emit repr to exact bytes" | PASS |
+| wire/ipv4.rs:test_cidr | "IPv4 CIDR contains" | PASS |
 
 ### wire/tcp.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -89,6 +96,10 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | (original) | "parse UDP truncated" | PASS |
 | wire/udp.rs:roundtrip | "UDP roundtrip" | PASS |
 | (original) | "UDP payload extraction" | PASS |
+| wire/udp.rs:test_deconstruct | "UDP deconstruct raw fields" | PASS |
+| wire/udp.rs:test_construct | "UDP construct with checksum" | PASS |
+| wire/udp.rs:test_zero_checksum | "UDP zero checksum becomes 0xFFFF" | PASS |
+| wire/udp.rs:test_no_checksum | "UDP disabled checksum passes verify" | PASS |
 
 ### wire/icmp.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -97,6 +108,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | (original) | "parse ICMP dest unreachable" | PASS |
 | (original) | "ICMP echo emit with valid checksum" | PASS |
 | (original) | "ICMP echo roundtrip" | PASS |
+| wire/icmpv4.rs:test_check_len | "ICMP check length" | PASS |
 
 ### wire/dhcp.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -378,6 +390,10 @@ were never actually run despite being listed here. The test module runs with
 | test_recv_error | "recv error when not established" | PASS |
 | test_syn_sent_syn_received_ack | "SYN-SENT simultaneous open SYN then ACK -> ESTABLISHED" | PASS |
 | test_fin_with_data_queued | "FIN with data queued" | PASS |
+| test_set_hop_limit | "set hop limit propagates to dispatch" | PASS |
+| test_set_hop_limit_zero | "set hop limit zero rejected" | PASS |
+| test_listen_syn_win_scale_buffers | "listen syn window scale for various buffer sizes" | PASS |
+| test_syn_sent_syn_ack_no_window_scaling | "SYN-SENT syn ack no window scaling clears shift" | PASS |
 
 ### socket/udp.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -457,3 +473,15 @@ were never actually run despite being listed here. The test module runs with
 | iface/interface/tests/ipv4.rs:test_icmp_error_port_unreachable | "ICMP error port unreachable" | PASS |
 | iface/interface/tests/mod.rs:test_handle_udp_broadcast | "handle UDP broadcast" | PASS |
 | iface/interface/tests/ipv4.rs:test_icmp_reply_size | "ICMP reply size" | PASS |
+| iface/interface/tests/ipv4.rs:test_any_ip_accept_arp | "any_ip accepts ARP for unknown address" | PASS |
+
+## Stack Layer Tests
+
+### stack.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| (original) | "stack ARP request produces reply" | PASS |
+| (original) | "stack ICMP echo request produces reply" | PASS |
+| (original) | "stack empty RX returns false" | PASS |
+| (original) | "stack loopback device round-trip" | PASS |
+| (original) | "stack pollAt returns null with no sockets" | PASS |

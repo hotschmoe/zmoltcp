@@ -50,6 +50,25 @@ pub fn computeChecksum(src_ip: [4]u8, dst_ip: [4]u8, udp_data: []const u8) u16 {
     return checksum.finish(sum);
 }
 
+/// Write the computed UDP checksum into an already-serialized buffer.
+/// RFC 768: if the computed checksum is zero, it is transmitted as 0xFFFF.
+pub fn fillChecksum(buf: []u8, src_ip: [4]u8, dst_ip: [4]u8) void {
+    buf[6] = 0;
+    buf[7] = 0;
+    var cksum = computeChecksum(src_ip, dst_ip, buf);
+    if (cksum == 0) cksum = 0xFFFF;
+    buf[6] = @truncate(cksum >> 8);
+    buf[7] = @truncate(cksum & 0xFF);
+}
+
+/// Verify UDP checksum. Returns true if valid or if checksum is disabled (0x0000).
+pub fn verifyChecksum(data: []const u8, src_ip: [4]u8, dst_ip: [4]u8) bool {
+    if (data.len < HEADER_LEN) return false;
+    const stored: u16 = @as(u16, data[6]) << 8 | @as(u16, data[7]);
+    if (stored == 0) return true; // checksum disabled per RFC 768
+    return computeChecksum(src_ip, dst_ip, data) == 0;
+}
+
 /// Returns the payload portion of a UDP datagram.
 pub fn payloadSlice(data: []const u8) error{Truncated}![]const u8 {
     if (data.len < HEADER_LEN) return error.Truncated;
@@ -104,4 +123,65 @@ test "UDP payload extraction" {
     const p = try payloadSlice(&data);
     try testing.expectEqual(@as(usize, 4), p.len);
     try testing.expectEqual(@as(u8, 0xCA), p[0]);
+}
+
+const SRC_ADDR: [4]u8 = .{ 192, 168, 1, 1 };
+const DST_ADDR: [4]u8 = .{ 192, 168, 1, 2 };
+
+const PACKET_BYTES = [_]u8{
+    0xbf, 0x00, 0x00, 0x35, 0x00, 0x0c, 0x12, 0x4d, 0xaa, 0x00, 0x00, 0xff,
+};
+
+const PAYLOAD_BYTES = [_]u8{ 0xaa, 0x00, 0x00, 0xff };
+
+// [smoltcp:wire/udp.rs:test_deconstruct]
+test "UDP deconstruct raw fields" {
+    const repr = try parse(&PACKET_BYTES);
+    try testing.expectEqual(@as(u16, 48896), repr.src_port);
+    try testing.expectEqual(@as(u16, 53), repr.dst_port);
+    try testing.expectEqual(@as(u16, 12), repr.length);
+    try testing.expectEqual(@as(u16, 0x124d), repr.checksum);
+    const p = try payloadSlice(&PACKET_BYTES);
+    try testing.expectEqualSlices(u8, &PAYLOAD_BYTES, p);
+    try testing.expect(verifyChecksum(&PACKET_BYTES, SRC_ADDR, DST_ADDR));
+}
+
+// [smoltcp:wire/udp.rs:test_construct]
+test "UDP construct with checksum" {
+    var buf: [12]u8 = [_]u8{0xa5} ** 12;
+    _ = try emit(.{
+        .src_port = 48896,
+        .dst_port = 53,
+        .length = 12,
+        .checksum = 0xFFFF,
+    }, &buf);
+    @memcpy(buf[HEADER_LEN..], &PAYLOAD_BYTES);
+    fillChecksum(&buf, SRC_ADDR, DST_ADDR);
+    try testing.expectEqualSlices(u8, &PACKET_BYTES, &buf);
+}
+
+// [smoltcp:wire/udp.rs:test_zero_checksum]
+test "UDP zero checksum becomes 0xFFFF" {
+    var buf: [8]u8 = [_]u8{0} ** 8;
+    _ = try emit(.{
+        .src_port = 1,
+        .dst_port = 31881,
+        .length = 8,
+        .checksum = 0,
+    }, &buf);
+    fillChecksum(&buf, SRC_ADDR, DST_ADDR);
+    const cksum: u16 = @as(u16, buf[6]) << 8 | @as(u16, buf[7]);
+    try testing.expectEqual(@as(u16, 0xFFFF), cksum);
+}
+
+// [smoltcp:wire/udp.rs:test_no_checksum]
+test "UDP disabled checksum passes verify" {
+    var buf: [8]u8 = undefined;
+    _ = try emit(.{
+        .src_port = 1,
+        .dst_port = 31881,
+        .length = 8,
+        .checksum = 0,
+    }, &buf);
+    try testing.expect(verifyChecksum(&buf, SRC_ADDR, DST_ADDR));
 }

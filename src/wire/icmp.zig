@@ -187,6 +187,13 @@ test "ICMP echo emit with valid checksum" {
     try testing.expect(verifyChecksum(buf[0..len]));
 }
 
+// [smoltcp:wire/icmpv4.rs:test_check_len]
+test "ICMP check length" {
+    try testing.expectError(error.Truncated, parse(&[_]u8{}));
+    try testing.expectError(error.Truncated, parse(&[_]u8{ 0x0b, 0x00, 0x00, 0x00 }));
+    _ = try parse(&[_]u8{ 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
+}
+
 test "ICMP echo roundtrip" {
     const echo = EchoRepr{
         .icmp_type = .echo_request,

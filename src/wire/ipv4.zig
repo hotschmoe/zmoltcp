@@ -115,6 +115,17 @@ pub fn verifyChecksum(data: []const u8) bool {
     return checksum.internetChecksum(data[0..ihl]) == 0;
 }
 
+/// Validate that the buffer is consistent: total_length must not exceed
+/// the buffer and must be at least as large as the header.
+pub fn checkLen(data: []const u8) error{ Truncated, BadHeaderLen }!void {
+    if (data.len < HEADER_LEN) return error.Truncated;
+    const ihl: usize = @as(usize, data[0] & 0x0F) * 4;
+    if (ihl < HEADER_LEN) return error.BadHeaderLen;
+    const total_len: usize = @as(usize, data[2]) << 8 | @as(usize, data[3]);
+    if (total_len < ihl) return error.Truncated;
+    if (total_len > data.len) return error.Truncated;
+}
+
 /// Returns the payload portion of an IPv4 packet (after the header).
 pub fn payloadSlice(data: []const u8) error{ Truncated, BadHeaderLen }![]const u8 {
     if (data.len < HEADER_LEN) return error.Truncated;
@@ -122,6 +133,18 @@ pub fn payloadSlice(data: []const u8) error{ Truncated, BadHeaderLen }![]const u
     if (ihl < HEADER_LEN) return error.BadHeaderLen;
     if (data.len < ihl) return error.Truncated;
     return data[ihl..];
+}
+
+/// Returns the payload clamped to total_length (handles overlong buffers).
+pub fn payloadSliceClamped(data: []const u8) error{ Truncated, BadHeaderLen }![]const u8 {
+    if (data.len < HEADER_LEN) return error.Truncated;
+    const ihl: usize = @as(usize, data[0] & 0x0F) * 4;
+    if (ihl < HEADER_LEN) return error.BadHeaderLen;
+    if (data.len < ihl) return error.Truncated;
+    const total_len: usize = @as(usize, data[2]) << 8 | @as(usize, data[3]);
+    const end = @min(total_len, data.len);
+    if (end < ihl) return error.Truncated;
+    return data[ihl..end];
 }
 
 // -------------------------------------------------------------------------
@@ -196,4 +219,129 @@ test "IPv4 payload extraction" {
     const p = try payloadSlice(&pkt);
     try testing.expectEqual(@as(usize, 4), p.len);
     try testing.expectEqual(@as(u8, 0xDE), p[0]);
+}
+
+// smoltcp uses this byte vector for deconstruct/construct tests -- it has
+// DF=1, MF=1, and a non-zero fragment offset
+const SMOLTCP_PACKET_BYTES = [_]u8{
+    0x45, 0x00, 0x00, 0x1e, 0x01, 0x02, 0x62, 0x03,
+    0x1a, 0x01, 0xd5, 0x6e, 0x11, 0x12, 0x13, 0x14,
+    0x21, 0x22, 0x23, 0x24, 0xaa, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0xff,
+};
+const SMOLTCP_PAYLOAD_BYTES = [_]u8{ 0xaa, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff };
+
+// [smoltcp:wire/ipv4.rs:test_deconstruct]
+test "IPv4 deconstruct raw fields" {
+    const repr = try parse(&SMOLTCP_PACKET_BYTES);
+    try testing.expectEqual(@as(u4, 4), repr.version);
+    try testing.expectEqual(@as(u4, 5), repr.ihl);
+    try testing.expectEqual(@as(u8, 0), repr.dscp_ecn);
+    try testing.expectEqual(@as(u16, 30), repr.total_length);
+    try testing.expectEqual(@as(u16, 0x0102), repr.identification);
+    try testing.expect(repr.dont_fragment);
+    try testing.expect(repr.more_fragments);
+    try testing.expectEqual(@as(u13, 0x0203), repr.fragment_offset);
+    try testing.expectEqual(@as(u8, 0x1a), repr.ttl);
+    try testing.expectEqual(Protocol.icmp, repr.protocol);
+    try testing.expectEqual(@as(u16, 0xd56e), repr.checksum);
+    try testing.expectEqual(Address{ 0x11, 0x12, 0x13, 0x14 }, repr.src_addr);
+    try testing.expectEqual(Address{ 0x21, 0x22, 0x23, 0x24 }, repr.dst_addr);
+    try testing.expect(verifyChecksum(&SMOLTCP_PACKET_BYTES));
+    const p = try payloadSliceClamped(&SMOLTCP_PACKET_BYTES);
+    try testing.expectEqualSlices(u8, &SMOLTCP_PAYLOAD_BYTES, p);
+}
+
+// [smoltcp:wire/ipv4.rs:test_construct]
+test "IPv4 construct with flags and frag offset" {
+    var buf: [30]u8 = [_]u8{0xa5} ** 30;
+    _ = try emit(.{
+        .version = 4,
+        .ihl = 5,
+        .dscp_ecn = 0,
+        .total_length = 30,
+        .identification = 0x0102,
+        .dont_fragment = true,
+        .more_fragments = true,
+        .fragment_offset = 0x0203,
+        .ttl = 0x1a,
+        .protocol = .icmp,
+        .checksum = 0,
+        .src_addr = .{ 0x11, 0x12, 0x13, 0x14 },
+        .dst_addr = .{ 0x21, 0x22, 0x23, 0x24 },
+    }, &buf);
+    @memcpy(buf[HEADER_LEN..], &SMOLTCP_PAYLOAD_BYTES);
+    try testing.expectEqualSlices(u8, &SMOLTCP_PACKET_BYTES, &buf);
+}
+
+// [smoltcp:wire/ipv4.rs:test_overlong]
+test "IPv4 overlong buffer clamped to total_len" {
+    var overlong: [31]u8 = undefined;
+    @memcpy(overlong[0..30], &SMOLTCP_PACKET_BYTES);
+    overlong[30] = 0x00;
+    const p = try payloadSliceClamped(&overlong);
+    try testing.expectEqual(SMOLTCP_PAYLOAD_BYTES.len, p.len);
+}
+
+// [smoltcp:wire/ipv4.rs:test_total_len_overflow]
+test "IPv4 total_len overflow" {
+    var bad: [30]u8 = SMOLTCP_PACKET_BYTES;
+    // Set total_len to 128, which is > 30
+    bad[2] = 0;
+    bad[3] = 128;
+    try testing.expectError(error.Truncated, checkLen(&bad));
+}
+
+// [smoltcp:wire/ipv4.rs:test_emit]
+test "IPv4 emit repr to exact bytes" {
+    const REPR_PACKET_BYTES = [_]u8{
+        0x45, 0x00, 0x00, 0x18, 0x00, 0x00, 0x40, 0x00,
+        0x40, 0x01, 0xd2, 0x79, 0x11, 0x12, 0x13, 0x14,
+        0x21, 0x22, 0x23, 0x24, 0xaa, 0x00, 0x00, 0xff,
+    };
+    const REPR_PAYLOAD = [_]u8{ 0xaa, 0x00, 0x00, 0xff };
+    var buf: [24]u8 = [_]u8{0xa5} ** 24;
+    _ = try emit(.{
+        .version = 4,
+        .ihl = 5,
+        .dscp_ecn = 0,
+        .total_length = 24,
+        .identification = 0,
+        .dont_fragment = true,
+        .more_fragments = false,
+        .fragment_offset = 0,
+        .ttl = 64,
+        .protocol = .icmp,
+        .checksum = 0,
+        .src_addr = .{ 0x11, 0x12, 0x13, 0x14 },
+        .dst_addr = .{ 0x21, 0x22, 0x23, 0x24 },
+    }, &buf);
+    @memcpy(buf[HEADER_LEN..], &REPR_PAYLOAD);
+    try testing.expectEqualSlices(u8, &REPR_PACKET_BYTES, &buf);
+}
+
+// [smoltcp:wire/ipv4.rs:test_cidr]
+test "IPv4 CIDR contains" {
+    const iface = @import("../iface.zig");
+    const cidr = iface.IpCidr{ .address = .{ 192, 168, 1, 10 }, .prefix_len = 24 };
+
+    // Inside /24
+    try testing.expect(cidr.contains(.{ 192, 168, 1, 0 }));
+    try testing.expect(cidr.contains(.{ 192, 168, 1, 1 }));
+    try testing.expect(cidr.contains(.{ 192, 168, 1, 2 }));
+    try testing.expect(cidr.contains(.{ 192, 168, 1, 10 }));
+    try testing.expect(cidr.contains(.{ 192, 168, 1, 127 }));
+    try testing.expect(cidr.contains(.{ 192, 168, 1, 255 }));
+
+    // Outside /24
+    try testing.expect(!cidr.contains(.{ 192, 168, 0, 0 }));
+    try testing.expect(!cidr.contains(.{ 127, 0, 0, 1 }));
+    try testing.expect(!cidr.contains(.{ 192, 168, 2, 0 }));
+    try testing.expect(!cidr.contains(.{ 192, 168, 0, 255 }));
+    try testing.expect(!cidr.contains(.{ 0, 0, 0, 0 }));
+    try testing.expect(!cidr.contains(.{ 255, 255, 255, 255 }));
+
+    // /0 contains everything
+    const cidr0 = iface.IpCidr{ .address = .{ 192, 168, 1, 10 }, .prefix_len = 0 };
+    try testing.expect(cidr0.contains(.{ 127, 0, 0, 1 }));
 }

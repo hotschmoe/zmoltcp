@@ -31,6 +31,7 @@ pub const socket = struct {
 };
 
 pub const iface = @import("iface.zig");
+pub const stack = @import("stack.zig");
 
 test {
     // refAllDecls ensures all declarations compile but does NOT discover
@@ -55,4 +56,5 @@ test {
     _ = @import("wire/dns.zig");
     _ = @import("socket/dns.zig");
     _ = @import("iface.zig");
+    _ = @import("stack.zig");
 }
