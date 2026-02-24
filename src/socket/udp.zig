@@ -10,10 +10,6 @@ const std = @import("std");
 const ipv4 = @import("../wire/ipv4.zig");
 const ring_buffer_mod = @import("../storage/ring_buffer.zig");
 
-fn isUnspecified(addr: ipv4.Address) bool {
-    return std.mem.eql(u8, &addr, &ipv4.UNSPECIFIED);
-}
-
 // -------------------------------------------------------------------------
 // Endpoint types
 // -------------------------------------------------------------------------
@@ -144,7 +140,7 @@ pub fn Socket(comptime config: Config) type {
 
         pub fn sendSlice(self: *Self, data: []const u8, meta: Metadata) SendError!void {
             if (self.local_endpoint.port == 0) return error.Unaddressable;
-            if (isUnspecified(meta.endpoint.addr)) return error.Unaddressable;
+            if (ipv4.isUnspecified(meta.endpoint.addr)) return error.Unaddressable;
             if (meta.endpoint.port == 0) return error.Unaddressable;
             if (data.len > config.payload_size) return error.BufferFull;
 

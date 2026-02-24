@@ -16,6 +16,27 @@ pub const Protocol = enum(u8) {
 
 pub const Address = [4]u8;
 pub const UNSPECIFIED: Address = .{ 0, 0, 0, 0 };
+pub const BROADCAST: Address = .{ 255, 255, 255, 255 };
+
+pub fn isUnspecified(addr: Address) bool {
+    return addr[0] == 0 and addr[1] == 0 and addr[2] == 0 and addr[3] == 0;
+}
+
+pub fn isBroadcast(addr: Address) bool {
+    return addr[0] == 255 and addr[1] == 255 and addr[2] == 255 and addr[3] == 255;
+}
+
+pub fn isMulticast(addr: Address) bool {
+    return addr[0] >= 224 and addr[0] <= 239;
+}
+
+pub fn isLinkLocal(addr: Address) bool {
+    return addr[0] == 169 and addr[1] == 254;
+}
+
+pub fn isLoopback(addr: Address) bool {
+    return addr[0] == 127;
+}
 
 /// High-level representation of an IPv4 header.
 pub const Repr = struct {
@@ -346,4 +367,22 @@ test "IPv4 CIDR contains" {
     // /0 contains everything
     const cidr0 = iface.IpCidr{ .address = .{ 192, 168, 1, 10 }, .prefix_len = 0 };
     try testing.expect(cidr0.contains(.{ 127, 0, 0, 1 }));
+}
+
+// [smoltcp:wire/ipv4.rs:test_unspecified]
+test "IPv4 address classification: unspecified" {
+    try testing.expect(isUnspecified(UNSPECIFIED));
+    try testing.expect(!isBroadcast(UNSPECIFIED));
+    try testing.expect(!isMulticast(UNSPECIFIED));
+    try testing.expect(!isLinkLocal(UNSPECIFIED));
+    try testing.expect(!isLoopback(UNSPECIFIED));
+}
+
+// [smoltcp:wire/ipv4.rs:test_broadcast]
+test "IPv4 address classification: broadcast" {
+    try testing.expect(!isUnspecified(BROADCAST));
+    try testing.expect(isBroadcast(BROADCAST));
+    try testing.expect(!isMulticast(BROADCAST));
+    try testing.expect(!isLinkLocal(BROADCAST));
+    try testing.expect(!isLoopback(BROADCAST));
 }

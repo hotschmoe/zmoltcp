@@ -12,10 +12,6 @@ const ipv4 = @import("../wire/ipv4.zig");
 const icmp = @import("../wire/icmp.zig");
 const ring_buffer_mod = @import("../storage/ring_buffer.zig");
 
-fn isUnspecified(addr: ipv4.Address) bool {
-    return std.mem.eql(u8, &addr, &ipv4.UNSPECIFIED);
-}
-
 // Extract the transport-layer source port from an ICMP error payload.
 // The payload contains: [embedded IPv4 header][transport header fragment].
 // Returns null if the payload is too short to contain a valid port.
@@ -139,7 +135,7 @@ pub fn Socket(comptime config: Config) type {
         // -- Send --
 
         pub fn sendSlice(self: *Self, data: []const u8, dst_addr: ipv4.Address) SendError!void {
-            if (isUnspecified(dst_addr)) return error.Unaddressable;
+            if (ipv4.isUnspecified(dst_addr)) return error.Unaddressable;
             if (data.len > config.payload_size) return error.BufferFull;
 
             const pkt = self.tx.enqueueOne() catch return error.BufferFull;

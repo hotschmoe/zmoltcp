@@ -4,27 +4,27 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 
 ## Summary
 
-| Module | smoltcp Tests | zmoltcp Tests | Passing | Status |
-|--------|--------------|---------------|---------|--------|
-| wire/checksum | 5 | 5 | 5 | PASS |
-| wire/ethernet | 5 | 5 | 5 | PASS |
-| wire/arp | 4 | 5 | 5 | PASS |
-| wire/ipv4 | 15 | 13 | 13 | PASS |
-| wire/tcp | 9 | 13 | 13 | PASS |
-| wire/udp | 8 | 8 | 8 | PASS |
-| wire/icmp | 5 | 5 | 5 | PASS |
-| storage/ring_buffer | 15 | 14 | 14 | PASS |
-| storage/assembler | 38 | 37 | 37 | PASS |
-| time | 10 | 8 | 8 | PASS |
-| socket/tcp | 175 | 176 | 176 | PASS |
-| socket/udp | 16 | 16 | 16 | PASS |
-| wire/dhcp | 9 | 9 | 9 | PASS |
-| socket/dhcp | 11 | 11 | 11 | PASS |
-| wire/dns | 7 | 7 | 7 | PASS |
-| socket/dns | 0 | 12 | 12 | PASS |
-| socket/icmp | 6 | 6 | 6 | PASS |
-| iface | ~25 | 15 | 15 | PASS |
-| stack | 0 | 8 | 8 | PASS |
+| Module | smoltcp Tests | zmoltcp Tests | N/A | Passing | Status |
+|--------|--------------|---------------|-----|---------|--------|
+| wire/checksum | 5 | 5 | 0 | 5 | PASS |
+| wire/ethernet | 5 | 5 | 0 | 5 | PASS |
+| wire/arp | 4 | 5 | 0 | 5 | PASS |
+| wire/ipv4 | 15 | 15 | 0 | 15 | PASS |
+| wire/tcp | 9 | 13 | 0 | 13 | PASS |
+| wire/udp | 8 | 8 | 0 | 8 | PASS |
+| wire/icmp | 5 | 5 | 0 | 5 | PASS |
+| storage/ring_buffer | 15 | 14 | 1 | 14 | PASS |
+| storage/assembler | 38 | 37 | 1 | 37 | PASS |
+| time | 10 | 8 | 2 | 8 | PASS |
+| socket/tcp | 186 | 180 | ~10 | 180 | PASS |
+| socket/udp | 16 | 16 | 0 | 16 | PASS |
+| wire/dhcp | 9 | 9 | 0 | 9 | PASS |
+| socket/dhcp | 11 | 11 | 0 | 11 | PASS |
+| wire/dns | 7 | 7 | 0 | 7 | PASS |
+| socket/dns | 0 | 12 | 0 | 12 | PASS |
+| socket/icmp | 6 | 6 | 0 | 6 | PASS |
+| iface | ~25 | 15 | 9 | 15 | PASS |
+| stack | 0 | 8 | 0 | 8 | PASS |
 
 ## Wire Layer Tests
 
@@ -71,6 +71,8 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/ipv4.rs:test_total_len_overflow | "IPv4 total_len overflow" | PASS |
 | wire/ipv4.rs:test_emit | "IPv4 emit repr to exact bytes" | PASS |
 | wire/ipv4.rs:test_cidr | "IPv4 CIDR contains" | PASS |
+| wire/ipv4.rs:test_unspecified | "IPv4 address classification: unspecified" | PASS |
+| wire/ipv4.rs:test_broadcast | "IPv4 address classification: broadcast" | PASS |
 
 ### wire/tcp.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -371,7 +373,7 @@ were never actually run despite being listed here. The test module runs with
 | test_zero_window_probe | "zero window probe enters on window update" | PASS |
 | test_zero_window_probe | "zero window probe exits on window open" | PASS |
 | test_zero_window_probe | "zero window probe sends 1 byte and exits on ack" | PASS |
-| test_zero_window_probe_backoff | "zero window probe backs off" | PASS |
+| test_zero_window_probe_backoff_no_reply | "zero window probe backs off" | PASS |
 | test_zero_window_probe_backoff_nack_reply | "zero window probe backoff with nack reply" | PASS |
 | test_zero_window_probe_shift | "zero window probe shift" | PASS |
 | test_zero_window_ack | "zero window ack rejects data" | PASS |
@@ -394,6 +396,10 @@ were never actually run despite being listed here. The test module runs with
 | test_set_hop_limit_zero | "set hop limit zero rejected" | PASS |
 | test_listen_syn_win_scale_buffers | "listen syn window scale for various buffer sizes" | PASS |
 | test_syn_sent_syn_ack_no_window_scaling | "SYN-SENT syn ack no window scaling clears shift" | PASS |
+| test_connect | "connect full active open roundtrip" | PASS |
+| test_syn_sent_win_scale_buffers | "SYN-SENT window scale for various rx buffer sizes" | PASS |
+| test_established_sliding_window_recv | "established sliding window recv with scaling" | PASS |
+| test_recv_out_of_recv_win | "recv data beyond advertised receive window" | PASS |
 
 ### socket/udp.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -490,3 +496,56 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "stack TCP SYN no listener produces RST" | PASS |
 | (original) | "stack UDP to bound socket delivers data" | PASS |
 | (original) | "stack ICMP echo with bound socket delivers and auto-replies" | PASS |
+
+## Not Applicable (N/A) Tests
+
+Tests from smoltcp that are intentionally not implemented in zmoltcp due to
+language differences, API design choices, or out-of-scope features.
+
+### time.zig (2 N/A)
+
+| smoltcp Test | Reason |
+|---|---|
+| test_instant_display | Zig has no Display trait; getters cover the same data |
+| test_duration_assign_ops | Zig has no operator overloading; explicit methods tested instead |
+
+### storage/ring_buffer.zig (1 N/A)
+
+| smoltcp Test | Reason |
+|---|---|
+| test_buffer_enqueue_dequeue_one_with | Merged into "enqueue and dequeue one" (Zig test covers both) |
+
+### storage/assembler.zig (1 N/A)
+
+| smoltcp Test | Reason |
+|---|---|
+| test_fuzz_* | Fuzz-only test; not a deterministic conformance test |
+
+### socket/tcp.zig (~10 N/A)
+
+| smoltcp Test | Reason |
+|---|---|
+| test_syn_paused_ack | pause_synack API not in zmoltcp |
+| test_established_rfc2018_cases | SACK blocks not implemented |
+| test_set_get_congestion_control | No congestion control abstraction |
+| test_tsval_established_connection | TCP timestamps not implemented |
+| test_tsval_disabled_in_remote_client | TCP timestamps not implemented |
+| test_tsval_disabled_in_local_server | TCP timestamps not implemented |
+| test_tsval_disabled_in_remote_server | TCP timestamps not implemented |
+| test_tsval_disabled_in_local_client | TCP timestamps not implemented |
+| test_established_close_on_src_ip_change | No socket-level IP tracking |
+| test_connect_unspecified_local / test_connect_specified_local | API design: zmoltcp always takes explicit 4 params |
+
+### iface.zig (9 N/A)
+
+| smoltcp Test | Reason |
+|---|---|
+| test_new_panic | Alloc-dependent behavior (zmoltcp is zero-alloc) |
+| test_handle_igmp | IGMP/multicast not implemented |
+| test_packet_len | IPv4 fragmentation not implemented |
+| test_ipv4_fragment_size | IPv4 fragmentation not implemented |
+| test_raw_socket_no_accept | Raw sockets not implemented |
+| test_raw_socket_with_udp | Raw sockets not implemented |
+| test_raw_socket_recv | Raw sockets not implemented |
+| test_raw_socket_send | Raw sockets not implemented |
+| test_raw_socket_no_double | Raw sockets not implemented |

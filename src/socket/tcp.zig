@@ -3313,18 +3313,24 @@ test "zero window probe backs off" {
     try testing.expectEqual(@as(?TcpRepr, null), p1);
 
     // First probe at t=1000.
-    const probe1 = recvPacket(&s, Instant.fromMillis(1000));
-    try testing.expect(probe1 != null);
-    try testing.expectEqual(@as(usize, 1), probe1.?.payload.len);
+    const probe1 = recvPacket(&s, Instant.fromMillis(1000)) orelse
+        return error.TestUnexpectedResult;
+    try testing.expect(probe1.seq_number.eql(LOCAL_SEQ.add(1)));
+    try testing.expect(probe1.ack_number.?.eql(REMOTE_SEQ.add(1)));
+    try testing.expectEqual(@as(usize, 1), probe1.payload.len);
+    try testing.expectEqual(@as(u8, 'a'), probe1.payload[0]);
 
     // Nothing before second ZWP (backed off to 2x = 2000ms).
     const p2 = recvPacket(&s, Instant.fromMillis(2999));
     try testing.expectEqual(@as(?TcpRepr, null), p2);
 
     // Second probe at t=3000.
-    const probe2 = recvPacket(&s, Instant.fromMillis(3000));
-    try testing.expect(probe2 != null);
-    try testing.expectEqual(@as(usize, 1), probe2.?.payload.len);
+    const probe2 = recvPacket(&s, Instant.fromMillis(3000)) orelse
+        return error.TestUnexpectedResult;
+    try testing.expect(probe2.seq_number.eql(LOCAL_SEQ.add(1)));
+    try testing.expect(probe2.ack_number.?.eql(REMOTE_SEQ.add(1)));
+    try testing.expectEqual(@as(usize, 1), probe2.payload.len);
+    try testing.expectEqual(@as(u8, 'a'), probe2.payload[0]);
 }
 
 // =========================================================================
@@ -5864,4 +5870,154 @@ test "SYN-SENT syn ack no window scaling clears shift" {
     try testing.expectEqual(@as(u8, 0), s.remote_win_shift);
     try testing.expectEqual(@as(?u8, null), s.remote_win_scale);
     try testing.expectEqual(@as(usize, 42), s.remote_win_len);
+}
+
+// =========================================================================
+// Additional conformance tests
+// =========================================================================
+
+// [smoltcp:socket/tcp.rs:test_connect]
+test "connect full active open roundtrip" {
+    var s = socketNew();
+    s.local_seq_no = LOCAL_SEQ;
+
+    try s.connect(REMOTE_ADDR, REMOTE_PORT, LOCAL_ADDR, LOCAL_PORT);
+    try testing.expectEqual(State.syn_sent, s.state);
+
+    // Dispatch SYN and verify option fields.
+    const syn = recvAt0(&s) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(Control.syn, syn.control);
+    try testing.expect(syn.seq_number.eql(LOCAL_SEQ));
+    try testing.expectEqual(@as(?SeqNumber, null), syn.ack_number);
+    try testing.expectEqual(@as(?u16, BASE_MSS), syn.max_seg_size);
+    try testing.expectEqual(@as(?u8, 0), syn.window_scale);
+    try testing.expect(syn.sack_permitted);
+
+    // Process SYN-ACK from remote.
+    _ = sendPacketAt0(&s, TcpRepr{
+        .src_port = SEND_TEMPL.src_port,
+        .dst_port = SEND_TEMPL.dst_port,
+        .control = .syn,
+        .seq_number = REMOTE_SEQ,
+        .ack_number = LOCAL_SEQ.add(1),
+        .max_seg_size = BASE_MSS - 80,
+        .window_scale = 0,
+        .window_len = SEND_TEMPL.window_len,
+    });
+
+    try testing.expectEqual(State.established, s.state);
+}
+
+// [smoltcp:socket/tcp.rs:test_syn_sent_win_scale_buffers]
+test "SYN-SENT window scale for various rx buffer sizes" {
+    // Test representative buffer sizes and expected window_scale values.
+    // Each case: create a socket with the given rx buffer, connect, dispatch SYN,
+    // verify the window_scale and window_len in the emitted SYN.
+    const Case = struct { buf: usize, shift: u8, win: u16 };
+    const cases = [_]Case{
+        .{ .buf = 64, .shift = 0, .win = 64 },
+        .{ .buf = 65535, .shift = 0, .win = 65535 },
+        .{ .buf = 65536, .shift = 1, .win = 65535 },
+        .{ .buf = 131072, .shift = 2, .win = 65535 },
+        .{ .buf = 1048576, .shift = 5, .win = 65535 },
+    };
+    inline for (cases) |c| {
+        var s = socketWithBuffers(64, c.buf);
+        s.local_seq_no = LOCAL_SEQ;
+
+        try testing.expectEqual(c.shift, s.remote_win_shift);
+
+        try s.connect(REMOTE_ADDR, REMOTE_PORT, LOCAL_ADDR, LOCAL_PORT);
+
+        const syn = recvAt0(&s) orelse return error.TestUnexpectedResult;
+        try testing.expectEqual(Control.syn, syn.control);
+        try testing.expectEqual(@as(?u8, c.shift), syn.window_scale);
+        try testing.expectEqual(c.win, syn.window_len);
+    }
+}
+
+// [smoltcp:socket/tcp.rs:test_established_sliding_window_recv]
+test "established sliding window recv with scaling" {
+    var s = socketWithBuffers(64, 262143);
+    s.state = .syn_received;
+    s.listen_endpoint = LISTEN_END;
+    s.tuple = .{
+        .local = .{ .addr = LOCAL_ADDR, .port = LOCAL_PORT },
+        .remote = .{ .addr = REMOTE_ADDR, .port = REMOTE_PORT },
+    };
+    s.local_seq_no = LOCAL_SEQ;
+    s.remote_seq_no = REMOTE_SEQ.add(1);
+    s.remote_last_seq = LOCAL_SEQ;
+    s.remote_win_len = 256;
+
+    // Transition to established.
+    s.state = .established;
+    s.local_seq_no = LOCAL_SEQ.add(1);
+    s.remote_last_seq = LOCAL_SEQ.add(1);
+    s.remote_last_ack = REMOTE_SEQ.add(1);
+    s.remote_win_scale = 0;
+    s.remote_last_win = 65535;
+    s.remote_win_shift = 2;
+
+    // Send 1400 bytes of data.
+    const segment = "abcdefghijklmn" ** 100;
+    comptime std.debug.assert(segment.len == 1400);
+
+    _ = sendPacketAt0(&s, TcpRepr{
+        .src_port = SEND_TEMPL.src_port,
+        .dst_port = SEND_TEMPL.dst_port,
+        .seq_number = REMOTE_SEQ.add(1),
+        .ack_number = LOCAL_SEQ.add(1),
+        .window_len = SEND_TEMPL.window_len,
+        .payload = segment,
+    });
+
+    // ACK should have window_len right-shifted by 2.
+    // Free space = 262143 - 1400 = 260743. Shifted right 2 = 65185.
+    const ack = recvAt0(&s) orelse return error.TestUnexpectedResult;
+    try testing.expect(ack.seq_number.eql(LOCAL_SEQ.add(1)));
+    try testing.expect(ack.ack_number.?.eql(REMOTE_SEQ.add(1).add(1400)));
+    try testing.expectEqual(@as(u16, 65185), ack.window_len);
+}
+
+// [smoltcp:socket/tcp.rs:test_recv_out_of_recv_win]
+test "recv data beyond advertised receive window" {
+    var s = socketEstablished();
+
+    // Fill 33 bytes into the 64-byte rx buffer.
+    _ = sendPacketAt0(&s, TcpRepr{
+        .src_port = SEND_TEMPL.src_port,
+        .dst_port = SEND_TEMPL.dst_port,
+        .seq_number = REMOTE_SEQ.add(1),
+        .ack_number = LOCAL_SEQ.add(1),
+        .window_len = SEND_TEMPL.window_len,
+        .payload = &([_]u8{0} ** 33),
+    });
+
+    // Dispatch ACK: acknowledges 33 bytes, advertises window=31.
+    const ack1 = recvAt0(&s) orelse return error.TestUnexpectedResult;
+    try testing.expect(ack1.ack_number.?.eql(REMOTE_SEQ.add(1).add(33)));
+    try testing.expectEqual(@as(u16, 31), ack1.window_len);
+
+    // Read 1 byte from rx buffer. Frees space to 32, but the remote
+    // only knows about the 31-byte window we last advertised.
+    var tmp: [1]u8 = undefined;
+    _ = try s.recvSlice(&tmp);
+    try testing.expectEqual(@as(?TcpRepr, null), recvAt0(&s));
+
+    // Remote sends 32 bytes at the right edge. Only 31 fit in the
+    // previously advertised window; the 32nd byte is silently dropped.
+    _ = sendPacketAt0(&s, TcpRepr{
+        .src_port = SEND_TEMPL.src_port,
+        .dst_port = SEND_TEMPL.dst_port,
+        .seq_number = REMOTE_SEQ.add(1).add(33),
+        .ack_number = LOCAL_SEQ.add(1),
+        .window_len = SEND_TEMPL.window_len,
+        .payload = &([_]u8{0} ** 32),
+    });
+
+    // Dispatch ACK: only 31 bytes accepted, window shrinks to 1.
+    const ack2 = recvAt0(&s) orelse return error.TestUnexpectedResult;
+    try testing.expect(ack2.ack_number.?.eql(REMOTE_SEQ.add(1).add(64)));
+    try testing.expectEqual(@as(u16, 1), ack2.window_len);
 }
