@@ -166,8 +166,9 @@ src/
 - **Repr/parse/emit**: Every protocol has a `Repr` struct (high-level),
   `parse()` (bytes -> Repr), and `emit()` (Repr -> bytes)
 - **Zero allocation**: All buffers are caller-provided `[]u8` slices
-- **Poll model**: No callbacks, no timers. `poll(timestamp)` returns next
-  event time. Caller owns the event loop.
+- **Poll model**: No callbacks, no timers. `poll(timestamp, device)` drives
+  I/O (returns bool). `pollAt()` returns next event time. Caller owns the
+  event loop.
 - **Tests inline with code**: Each module has its own test block at the bottom
 
 ### Reference Material

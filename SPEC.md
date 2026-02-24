@@ -275,7 +275,7 @@ socket/tcp.zig -- TCP State Machine
     test_set_hop_limit                hop_limit propagates to DispatchResult
     test_set_hop_limit_zero           null hop_limit uses default (64)
     test_listen_syn_win_scale_buffers windowShiftFor for various buffer sizes
-    test_syn_sent_no_window_scaling   SYN-ACK without window_scale clears shift
+    test_syn_sent_syn_ack_no_window_scaling  SYN-ACK without window_scale clears shift
 
 socket/udp.zig -- UDP
     test_send_recv                    Basic datagram roundtrip
