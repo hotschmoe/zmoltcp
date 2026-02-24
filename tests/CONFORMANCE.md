@@ -23,8 +23,8 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/dns | 7 | 7 | 7 | PASS |
 | socket/dns | 0 | 12 | 12 | PASS |
 | socket/icmp | 6 | 6 | 6 | PASS |
-| iface | ~25 | 13 | 13 | PASS |
-| stack | 0 | 5 | 5 | PASS |
+| iface | ~25 | 15 | 15 | PASS |
+| stack | 0 | 8 | 8 | PASS |
 
 ## Wire Layer Tests
 
@@ -474,6 +474,8 @@ were never actually run despite being listed here. The test module runs with
 | iface/interface/tests/mod.rs:test_handle_udp_broadcast | "handle UDP broadcast" | PASS |
 | iface/interface/tests/ipv4.rs:test_icmp_reply_size | "ICMP reply size" | PASS |
 | iface/interface/tests/ipv4.rs:test_any_ip_accept_arp | "any_ip accepts ARP for unknown address" | PASS |
+| iface/interface/tests/ipv4.rs:test_icmpv4_socket | "ICMP socket receives echo request and auto-reply" | PASS |
+| iface/interface/tests/mod.rs:test_tcp_not_accepted | "TCP SYN with no listener produces RST" | PASS |
 
 ## Stack Layer Tests
 
@@ -485,3 +487,6 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "stack empty RX returns false" | PASS |
 | (original) | "stack loopback device round-trip" | PASS |
 | (original) | "stack pollAt returns null with no sockets" | PASS |
+| (original) | "stack TCP SYN no listener produces RST" | PASS |
+| (original) | "stack UDP to bound socket delivers data" | PASS |
+| (original) | "stack ICMP echo with bound socket delivers and auto-replies" | PASS |

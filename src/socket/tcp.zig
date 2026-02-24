@@ -64,7 +64,55 @@ pub const TcpRepr = struct {
     pub fn isEmpty(self: TcpRepr) bool {
         return self.control == .none and self.payload.len == 0;
     }
+
+    pub fn fromWireRepr(w: wire_tcp.Repr, tcp_payload: []const u8) TcpRepr {
+        return .{
+            .src_port = w.src_port,
+            .dst_port = w.dst_port,
+            .control = Control.fromFlags(w.flags),
+            .seq_number = SeqNumber.fromU32(w.seq_number),
+            .ack_number = if (w.flags.ack) SeqNumber.fromU32(w.ack_number) else null,
+            .window_len = w.window_size,
+            .window_scale = w.window_scale,
+            .max_seg_size = w.max_seg_size,
+            .sack_permitted = w.sack_permitted,
+            .payload = tcp_payload,
+        };
+    }
+
+    pub fn toWireRepr(self: TcpRepr) wire_tcp.Repr {
+        var flags = Flags{};
+        self.control.applyToFlags(&flags);
+        if (self.ack_number != null) flags.ack = true;
+        return .{
+            .src_port = self.src_port,
+            .dst_port = self.dst_port,
+            .seq_number = self.seq_number.toU32(),
+            .ack_number = if (self.ack_number) |ack| ack.toU32() else 0,
+            .data_offset = 5,
+            .flags = flags,
+            .window_size = self.window_len,
+            .checksum = 0,
+            .urgent_pointer = 0,
+            .max_seg_size = self.max_seg_size,
+            .window_scale = self.window_scale,
+            .sack_permitted = self.sack_permitted,
+        };
+    }
 };
+
+pub fn rstReply(repr: TcpRepr) TcpRepr {
+    var reply = TcpRepr{
+        .src_port = repr.dst_port,
+        .dst_port = repr.src_port,
+        .control = .rst,
+        .seq_number = if (repr.ack_number) |ack| ack else SeqNumber.ZERO,
+    };
+    if (repr.control == .syn and repr.ack_number == null) {
+        reply.ack_number = repr.seq_number.add(repr.segmentLen());
+    }
+    return reply;
+}
 
 // -------------------------------------------------------------------------
 // State enum (RFC 793)
@@ -639,7 +687,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                         .syn => {
                             if (repr.ack_number) |ack| {
                                 if (!ack.eql(self.local_seq_no.add(1))) {
-                                    return self.rstReply(repr);
+                                    return rstReply(repr);
                                 }
                             }
                             // SYN without ACK (simultaneous open) is OK
@@ -649,7 +697,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                                 if (ack.eql(self.local_seq_no.add(1))) {
                                     return null;
                                 }
-                                return self.rstReply(repr);
+                                return rstReply(repr);
                             }
                             return null;
                         },
@@ -666,7 +714,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                         if (repr.ack_number) |ack_number| {
                             if (self.state == .syn_received) {
                                 if (!ack_number.eql(self.local_seq_no.add(1))) {
-                                    return self.rstReply(repr);
+                                    return rstReply(repr);
                                 }
                             } else {
                                 const unacknowledged = self.tx_buffer.len() + control_len;
@@ -1253,19 +1301,6 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                 },
                 else => false,
             };
-        }
-
-        fn rstReply(_: Self, repr: TcpRepr) TcpRepr {
-            var reply = TcpRepr{
-                .src_port = repr.dst_port,
-                .dst_port = repr.src_port,
-                .control = .rst,
-                .seq_number = if (repr.ack_number) |ack| ack else SeqNumber.ZERO,
-            };
-            if (repr.control == .syn and repr.ack_number == null) {
-                reply.ack_number = repr.seq_number.add(repr.segmentLen());
-            }
-            return reply;
         }
 
         fn ackReply(self: *Self, repr: TcpRepr) TcpRepr {

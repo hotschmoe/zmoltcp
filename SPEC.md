@@ -309,15 +309,17 @@ Source: `ref/smoltcp/src/iface/interface/tests/ipv4.rs`
 These test the packet processing pipeline at two levels:
 
 - **iface.zig**: Interface-level processing (Ethernet frame parsing, ARP
-  neighbor cache, ICMP auto-reply, address management). Returns structured
-  Response values without serialization.
-- **stack.zig**: Full end-to-end integration. Stack(Device) wraps an
-  Interface, drains RX frames from a Device, processes them, serializes
-  responses (ARP replies, IPv4/ICMP), and transmits via Device. The
+  neighbor cache, ICMP auto-reply, TCP RST generation, address management).
+  Returns structured Response values without serialization.
+- **stack.zig**: Full end-to-end integration. Stack(Device, SocketConfig)
+  wraps an Interface, drains RX frames from a Device, routes packets to
+  sockets (TCP, UDP, ICMP), processes iface-level responses (ARP, ICMP
+  auto-reply, TCP RST, port unreachable), serializes, and transmits via
+  Device. SocketConfig is void (no sockets) or a struct with socket slices.
   LoopbackDevice provides an in-memory ring buffer device for testing.
 
 ```
-iface.zig (13 tests implemented)
+iface.zig (15 tests implemented)
   local_subnet_broadcasts             IpCidr broadcast detection /24, /16, /8
   get_source_address                  Source IP selection by subnet match
   get_source_address_empty            No addresses -> null
@@ -331,19 +333,23 @@ iface.zig (13 tests implemented)
   handle_udp_broadcast                UDP broadcast delivered to bound socket
   icmp_reply_size                     ICMP error clamped to IPV4_MIN_MTU (576)
   any_ip_accept_arp                   any_ip mode: reply to ARP for any IP
+  test_icmpv4_socket                  ICMP socket delivery + auto-reply coexistence
+  test_tcp_not_accepted               TCP SYN with no listener produces RST
 
-stack.zig (5 tests implemented)
+stack.zig (8 tests implemented)
   stack_arp_request_produces_reply    End-to-end ARP request -> serialized reply via Device
   stack_icmp_echo_produces_reply      End-to-end ICMP echo -> serialized reply with neighbor lookup
   stack_empty_rx_returns_false        Empty RX queue returns false from poll()
   stack_loopback_round_trip           TX -> RX loopback, re-poll processes without new response
   stack_pollAt_returns_null           No socket timers -> null
+  stack_tcp_syn_no_listener_rst       TCP SYN -> serialized RST with correct seq/ack/checksum
+  stack_udp_bound_socket_delivers     UDP to bound socket: data delivered, no ICMP error
+  stack_icmp_socket_and_auto_reply    ICMP echo: socket receives + auto-reply emitted
 
 Deferred (require features not yet in zmoltcp):
   test_handle_igmp                    IGMP/multicast
   test_packet_len, fragment_size      IP fragmentation
   test_raw_socket_*                   Raw sockets (4 tests)
-  test_icmpv4_socket                  ICMP socket + auto-reply integration
 ```
 
 ## Extracting Test Vectors from smoltcp

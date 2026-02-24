@@ -13,6 +13,8 @@ const arp = @import("wire/arp.zig");
 const ipv4 = @import("wire/ipv4.zig");
 const icmp = @import("wire/icmp.zig");
 const udp = @import("wire/udp.zig");
+const tcp_wire = @import("wire/tcp.zig");
+const tcp_socket = @import("socket/tcp.zig");
 const time = @import("time.zig");
 
 pub const MAX_ADDR_COUNT = 4;
@@ -148,6 +150,7 @@ pub const IpPayload = union(enum) {
         invoking_repr: ipv4.Repr,
         data: []const u8,
     },
+    tcp: tcp_socket.TcpRepr,
 };
 
 pub const Ipv4Response = struct {
@@ -270,7 +273,7 @@ pub const Interface = struct {
         }
     }
 
-    fn processIcmp(self: *const Interface, ip_repr: ipv4.Repr, payload_data: []const u8, is_broadcast: bool) ?Response {
+    pub fn processIcmp(self: *const Interface, ip_repr: ipv4.Repr, payload_data: []const u8, is_broadcast: bool) ?Response {
         const icmp_repr = icmp.parse(payload_data) catch return null;
         switch (icmp_repr) {
             .echo => |echo| {
@@ -306,7 +309,7 @@ pub const Interface = struct {
         }
     }
 
-    fn icmpProtoUnreachable(self: *const Interface, ip_repr: ipv4.Repr, ip_payload: []const u8) ?Response {
+    pub fn icmpProtoUnreachable(self: *const Interface, ip_repr: ipv4.Repr, ip_payload: []const u8) ?Response {
         const src = self.getSourceAddress(ip_repr.src_addr) orelse return null;
         return .{ .ipv4 = .{
             .ip = .{
@@ -340,6 +343,35 @@ pub const Interface = struct {
                 .invoking_repr = ip_repr,
                 .data = data,
             } },
+        } };
+    }
+
+    pub fn processTcp(self: *const Interface, ip_repr: ipv4.Repr, tcp_data: []const u8, socket_handled: bool) ?Response {
+        _ = self;
+        if (socket_handled) return null;
+
+        const wire_repr = tcp_wire.parse(tcp_data) catch return null;
+        const control = tcp_wire.Control.fromFlags(wire_repr.flags);
+
+        if (control == .rst) return null;
+
+        const UNSPECIFIED: ipv4.Address = .{ 0, 0, 0, 0 };
+        if (std.mem.eql(u8, &ip_repr.src_addr, &UNSPECIFIED)) return null;
+        if (std.mem.eql(u8, &ip_repr.dst_addr, &UNSPECIFIED)) return null;
+
+        const header_len: usize = @as(usize, wire_repr.data_offset) * 4;
+        const tcp_payload = if (tcp_data.len > header_len) tcp_data[header_len..] else &[_]u8{};
+        const sock_repr = tcp_socket.TcpRepr.fromWireRepr(wire_repr, tcp_payload);
+        const rst = tcp_socket.rstReply(sock_repr);
+
+        return .{ .ipv4 = .{
+            .ip = .{
+                .src_addr = ip_repr.dst_addr,
+                .dst_addr = ip_repr.src_addr,
+                .protocol = .tcp,
+                .hop_limit = DEFAULT_HOP_LIMIT,
+            },
+            .payload = .{ .tcp = rst },
         } };
     }
 };
@@ -770,4 +802,135 @@ test "any_ip accepts ARP for unknown address" {
         },
         else => return error.UnexpectedResponseType,
     }
+}
+
+// [smoltcp:iface/interface/tests/ipv4.rs:test_icmpv4_socket]
+test "ICMP socket receives echo request and auto-reply" {
+    const IcmpSocket = @import("socket/icmp.zig").Socket(.{ .payload_size = 128 });
+
+    var iface_inst = testInterface();
+
+    var rx_buf: [1]IcmpSocket.Packet = undefined;
+    var tx_buf: [1]IcmpSocket.Packet = undefined;
+    var sock = IcmpSocket.init(&rx_buf, &tx_buf);
+    try sock.bind(.{ .ident = 0x1234 });
+
+    const echo_data = [_]u8{0xAA} ** 16;
+    const echo_repr = icmp.EchoRepr{
+        .icmp_type = .echo_request,
+        .code = 0,
+        .checksum = 0,
+        .identifier = 0x1234,
+        .sequence = 0x5432,
+    };
+    var icmp_buf: [icmp.HEADER_LEN + 16]u8 = undefined;
+    _ = icmp.emitEcho(echo_repr, &echo_data, &icmp_buf) catch unreachable;
+
+    const ip_repr = testIpv4Repr(.icmp, REMOTE_IP, LOCAL_IP, icmp_buf.len);
+
+    // Parse ICMP and deliver to socket
+    const icmp_repr = icmp.parse(&icmp_buf) catch return error.ParseFailed;
+    const icmp_payload = icmp_buf[icmp.HEADER_LEN..];
+    try testing.expect(sock.accepts(REMOTE_IP, LOCAL_IP, icmp_repr, icmp_payload));
+    sock.process(REMOTE_IP, icmp_repr, icmp_payload);
+
+    // Auto-reply still works
+    const result = iface_inst.processIcmp(ip_repr, &icmp_buf, false) orelse
+        return error.ExpectedResponse;
+    switch (result) {
+        .ipv4 => |resp| {
+            try testing.expectEqual(LOCAL_IP, resp.ip.src_addr);
+            try testing.expectEqual(REMOTE_IP, resp.ip.dst_addr);
+            switch (resp.payload) {
+                .icmp_echo => |echo_resp| {
+                    try testing.expectEqual(icmp.Type.echo_reply, echo_resp.echo.icmp_type);
+                    try testing.expectEqual(@as(u16, 0x1234), echo_resp.echo.identifier);
+                    try testing.expectEqual(@as(u16, 0x5432), echo_resp.echo.sequence);
+                    try testing.expectEqualSlices(u8, &echo_data, echo_resp.data);
+                },
+                else => return error.UnexpectedPayload,
+            }
+        },
+        else => return error.UnexpectedResponseType,
+    }
+
+    // Verify socket received the packet
+    try testing.expect(sock.canRecv());
+    var recv_buf: [128]u8 = undefined;
+    const recv_result = try sock.recvSlice(&recv_buf);
+    try testing.expectEqual(REMOTE_IP, recv_result.src_addr);
+    // Socket stores the full ICMP packet (header + data)
+    try testing.expectEqual(icmp.HEADER_LEN + echo_data.len, recv_result.data_len);
+}
+
+// [smoltcp:iface/interface/tests/mod.rs:test_tcp_not_accepted]
+test "TCP SYN with no listener produces RST" {
+    var iface_inst = testInterface();
+
+    // Build TCP SYN
+    const syn_wire = tcp_wire.Repr{
+        .src_port = 4242,
+        .dst_port = 4243,
+        .seq_number = 12345,
+        .ack_number = 0,
+        .data_offset = 5,
+        .flags = .{ .syn = true },
+        .window_size = 1024,
+        .checksum = 0,
+        .urgent_pointer = 0,
+    };
+    var tcp_buf: [tcp_wire.HEADER_LEN]u8 = undefined;
+    _ = tcp_wire.emit(syn_wire, &tcp_buf) catch unreachable;
+
+    const ip_repr = testIpv4Repr(.tcp, REMOTE_IP, LOCAL_IP, tcp_buf.len);
+
+    // No socket handled -> should produce RST
+    const result = iface_inst.processTcp(ip_repr, &tcp_buf, false) orelse
+        return error.ExpectedResponse;
+    switch (result) {
+        .ipv4 => |resp| {
+            try testing.expectEqual(LOCAL_IP, resp.ip.src_addr);
+            try testing.expectEqual(REMOTE_IP, resp.ip.dst_addr);
+            try testing.expectEqual(ipv4.Protocol.tcp, resp.ip.protocol);
+            switch (resp.payload) {
+                .tcp => |rst| {
+                    try testing.expectEqual(@as(u16, 4243), rst.src_port);
+                    try testing.expectEqual(@as(u16, 4242), rst.dst_port);
+                    try testing.expectEqual(tcp_wire.Control.rst, rst.control);
+                    try testing.expect(rst.seq_number.eql(tcp_wire.SeqNumber.ZERO));
+                    // SYN without ACK: ack = seq + segmentLen (1 for SYN)
+                    try testing.expect(rst.ack_number.?.eql(
+                        tcp_wire.SeqNumber.fromU32(12345 + 1),
+                    ));
+                },
+                else => return error.UnexpectedPayload,
+            }
+        },
+        else => return error.UnexpectedResponseType,
+    }
+
+    // RST input -> no response (never RST a RST)
+    const rst_wire = tcp_wire.Repr{
+        .src_port = 4242,
+        .dst_port = 4243,
+        .seq_number = 0,
+        .ack_number = 0,
+        .data_offset = 5,
+        .flags = .{ .rst = true },
+        .window_size = 0,
+        .checksum = 0,
+        .urgent_pointer = 0,
+    };
+    var rst_buf: [tcp_wire.HEADER_LEN]u8 = undefined;
+    _ = tcp_wire.emit(rst_wire, &rst_buf) catch unreachable;
+    const rst_ip = testIpv4Repr(.tcp, REMOTE_IP, LOCAL_IP, rst_buf.len);
+    try testing.expectEqual(@as(?Response, null), iface_inst.processTcp(rst_ip, &rst_buf, false));
+
+    // Unspecified source -> no response
+    const UNSPECIFIED: ipv4.Address = .{ 0, 0, 0, 0 };
+    const unspec_ip = testIpv4Repr(.tcp, UNSPECIFIED, LOCAL_IP, tcp_buf.len);
+    try testing.expectEqual(@as(?Response, null), iface_inst.processTcp(unspec_ip, &tcp_buf, false));
+
+    // Socket handled -> no response
+    try testing.expectEqual(@as(?Response, null), iface_inst.processTcp(ip_repr, &tcp_buf, true));
 }
