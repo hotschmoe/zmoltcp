@@ -299,14 +299,26 @@ interface parses them, routes to correct socket, socket produces response,
 interface serializes and sends.
 
 ```
-iface.zig
-  test_arp_request_response           Receive ARP request, emit reply
-  test_arp_cache_update               Learn MAC from incoming packets
-  test_icmp_echo_response             Receive ping, emit pong
-  test_tcp_incoming_syn               Route SYN to listening socket
-  test_udp_incoming_datagram          Route UDP to bound socket
-  test_ip_ttl_exceeded                Emit ICMP time exceeded
-  test_ip_unknown_protocol            Emit ICMP protocol unreachable
+iface.zig (12 tests implemented)
+  local_subnet_broadcasts             IpCidr broadcast detection /24, /16, /8
+  get_source_address                  Source IP selection by subnet match
+  get_source_address_empty            No addresses -> null
+  handle_valid_arp_request            ARP request for our IP: reply + cache fill
+  handle_other_arp_request            ARP for wrong IP: no reply, no cache
+  arp_flush_after_update_ip           Cache flushed on IP address change
+  handle_ipv4_broadcast               ICMP echo to broadcast: reply from our IP
+  no_icmp_no_unicast                  Unknown protocol to broadcast: no ICMP
+  icmp_error_no_payload               Unknown protocol to unicast: proto unreachable
+  icmp_error_port_unreachable         UDP closed port: port unreachable / null for broadcast
+  handle_udp_broadcast                UDP broadcast delivered to bound socket
+  icmp_reply_size                     ICMP error clamped to IPV4_MIN_MTU (576)
+
+Deferred (require features not yet in zmoltcp):
+  test_any_ip_accept_arp              any_ip mode
+  test_handle_igmp                    IGMP/multicast
+  test_packet_len, fragment_size      IP fragmentation
+  test_raw_socket_*                   Raw sockets (4 tests)
+  test_icmpv4_socket                  ICMP socket + auto-reply integration
 ```
 
 ## Extracting Test Vectors from smoltcp
