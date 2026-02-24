@@ -336,7 +336,7 @@ iface.zig (15 tests implemented)
   test_icmpv4_socket                  ICMP socket delivery + auto-reply coexistence
   test_tcp_not_accepted               TCP SYN with no listener produces RST
 
-stack.zig (8 tests implemented)
+stack.zig (22 tests implemented)
   stack_arp_request_produces_reply    End-to-end ARP request -> serialized reply via Device
   stack_icmp_echo_produces_reply      End-to-end ICMP echo -> serialized reply with neighbor lookup
   stack_empty_rx_returns_false        Empty RX queue returns false from poll()
@@ -345,11 +345,25 @@ stack.zig (8 tests implemented)
   stack_tcp_syn_no_listener_rst       TCP SYN -> serialized RST with correct seq/ack/checksum
   stack_udp_bound_socket_delivers     UDP to bound socket: data delivered, no ICMP error
   stack_icmp_socket_and_auto_reply    ICMP echo: socket receives + auto-reply emitted
+  stack_tcp_egress_syn                TCP egress dispatches SYN on connect
+  stack_udp_egress_datagram           UDP egress dispatches datagram
+  stack_icmp_egress_echo              ICMP egress dispatches echo request
+  stack_poll_egress_only              poll() returns true for egress-only activity
+  stack_pollAt_syn_sent               pollAt returns ZERO for pending TCP SYN-SENT
+  stack_pollAt_idle_sockets           pollAt returns null for idle sockets
+  stack_egress_cached_neighbor        Egress uses cached neighbor MAC
+  stack_pollAt_retransmit_deadline    pollAt returns retransmit deadline after SYN dispatch
+  stack_dhcp_discover                 DHCP discover dispatches via UDP broadcast
+  stack_dhcp_ingress_offer            DHCP ingress processes offer -> request
+  stack_dhcp_pollAt                   DHCP pollAt returns socket deadline
+  stack_dns_query                     DNS query dispatches via UDP
+  stack_dns_ingress_response          DNS ingress delivers A-record response
+  stack_dns_pollAt                    DNS pollAt returns retransmit deadline
 
 Deferred (require features not yet in zmoltcp):
   test_handle_igmp                    IGMP/multicast
   test_packet_len, fragment_size      IP fragmentation
-  test_raw_socket_*                   Raw sockets (4 tests)
+  test_raw_socket_*                   Raw sockets (5 tests)
 ```
 
 ## Extracting Test Vectors from smoltcp

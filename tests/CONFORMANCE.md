@@ -16,7 +16,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | storage/ring_buffer | 15 | 14 | 1 | 14 | PASS |
 | storage/assembler | 38 | 37 | 1 | 37 | PASS |
 | time | 10 | 8 | 2 | 8 | PASS |
-| socket/tcp | 186 | 183 | ~10 | 183 | PASS |
+| socket/tcp | 175 | 184 | ~10 | 184 | PASS |
 | socket/udp | 16 | 17 | 0 | 17 | PASS |
 | wire/dhcp | 9 | 9 | 0 | 9 | PASS |
 | socket/dhcp | 11 | 11 | 0 | 11 | PASS |
@@ -24,7 +24,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | socket/dns | 0 | 12 | 0 | 12 | PASS |
 | socket/icmp | 6 | 7 | 0 | 7 | PASS |
 | iface | ~25 | 15 | 9 | 15 | PASS |
-| stack | 0 | 16 | 0 | 16 | PASS |
+| stack | 0 | 22 | 0 | 22 | PASS |
 
 ## Wire Layer Tests
 
@@ -253,6 +253,7 @@ were never actually run despite being listed here. The test module runs with
 | test_syn_sent_rst_bad_ack | "SYN-SENT sends RST for bad ACK seq too high" | PASS |
 | test_syn_sent_rst_bad_ack | "SYN-SENT sends RST for bad ACK seq too low" | PASS |
 | test_syn_sent_rst_no_ack | "SYN-SENT ignores RST without ACK" | PASS |
+| test_syn_sent_rst_bad_ack | "SYN-SENT ignores RST with wrong ACK" | PASS |
 | test_syn_sent_ignore_bare_ack | "SYN-SENT ignores bare ACK with correct seq" | PASS |
 | test_syn_sent_syn | "SYN-SENT receives SYN (simultaneous open) -> SYN-RECEIVED" | PASS |
 | test_syn_sent_simultaneous_rst | "SYN-SENT simultaneous open then RST" | PASS |
@@ -362,6 +363,7 @@ were never actually run despite being listed here. The test module runs with
 | test_delayed_ack | "delayed ack" | PASS |
 | test_delayed_ack_reply | "delayed ack piggybacks on outgoing data" | PASS |
 | test_delayed_ack_win | "delayed ack window update" | PASS |
+| test_window_update_with_delay_ack | "window update with delay ack" | PASS |
 | test_delayed_ack_every_rmss | "delayed ack every rmss" | PASS |
 | test_delayed_ack_every_rmss_or_more | "delayed ack every rmss or more" | PASS |
 | test_nagle | "nagle algorithm" | PASS |
@@ -509,6 +511,12 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "stack pollAt returns null for idle sockets" | PASS |
 | (original) | "stack egress uses cached neighbor MAC" | PASS |
 | (original) | "stack pollAt returns retransmit deadline after SYN dispatch" | PASS |
+| (original) | "stack DHCP discover dispatches via UDP broadcast" | PASS |
+| (original) | "stack DHCP ingress processes offer" | PASS |
+| (original) | "stack DHCP pollAt returns socket deadline" | PASS |
+| (original) | "stack DNS query dispatches via UDP" | PASS |
+| (original) | "stack DNS ingress delivers response" | PASS |
+| (original) | "stack DNS pollAt returns retransmit deadline" | PASS |
 
 ## Not Applicable (N/A) Tests
 
@@ -557,8 +565,8 @@ language differences, API design choices, or out-of-scope features.
 | test_handle_igmp | IGMP/multicast not implemented |
 | test_packet_len | IPv4 fragmentation not implemented |
 | test_ipv4_fragment_size | IPv4 fragmentation not implemented |
-| test_raw_socket_no_accept | Raw sockets not implemented |
-| test_raw_socket_with_udp | Raw sockets not implemented |
-| test_raw_socket_recv | Raw sockets not implemented |
-| test_raw_socket_send | Raw sockets not implemented |
-| test_raw_socket_no_double | Raw sockets not implemented |
+| test_raw_socket_no_reply_udp | Raw sockets not implemented |
+| test_raw_socket_no_reply_tcp | Raw sockets not implemented |
+| test_raw_socket_with_udp_socket | Raw sockets not implemented |
+| test_raw_socket_tx_fragmentation | Raw sockets not implemented |
+| test_raw_socket_rx_fragmentation | Raw sockets not implemented |

@@ -10,6 +10,9 @@ const udp_wire = @import("wire/udp.zig");
 const tcp_wire = @import("wire/tcp.zig");
 const udp_socket_mod = @import("socket/udp.zig");
 const tcp_socket = @import("socket/tcp.zig");
+const dhcp_wire = @import("wire/dhcp.zig");
+const dhcp_socket_mod = @import("socket/dhcp.zig");
+const dns_socket_mod = @import("socket/dns.zig");
 const iface_mod = @import("iface.zig");
 const time = @import("time.zig");
 
@@ -37,6 +40,8 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
     const has_tcp = SocketConfig != void and @hasField(SocketConfig, "tcp_sockets");
     const has_udp = SocketConfig != void and @hasField(SocketConfig, "udp_sockets");
     const has_icmp = SocketConfig != void and @hasField(SocketConfig, "icmp_sockets");
+    const has_dhcp = SocketConfig != void and @hasField(SocketConfig, "dhcp_sockets");
+    const has_dns = SocketConfig != void and @hasField(SocketConfig, "dns_sockets");
 
     return struct {
         const Self = @This();
@@ -83,6 +88,16 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     result = minOptInstant(result, sock.pollAt());
                 }
             }
+            if (comptime has_dhcp) {
+                for (self.sockets.dhcp_sockets) |sock| {
+                    result = minOptInstant(result, sock.pollAt());
+                }
+            }
+            if (comptime has_dns) {
+                for (self.sockets.dns_sockets) |sock| {
+                    result = minOptInstant(result, sock.pollAt());
+                }
+            }
 
             return result;
         }
@@ -123,7 +138,15 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     }
                 },
                 .udp => {
-                    const handled = self.routeToUdpSockets(ip_repr, ip_payload);
+                    if (comptime has_dhcp) {
+                        if (self.routeToDhcpSockets(timestamp, ip_repr, ip_payload)) return;
+                    }
+                    var handled = self.routeToUdpSockets(ip_repr, ip_payload);
+                    if (comptime has_dns) {
+                        if (!handled and self.routeToDnsSockets(ip_repr, ip_payload)) {
+                            handled = true;
+                        }
+                    }
                     if (self.iface.processUdp(ip_repr, ip_payload, handled)) |response| {
                         self.emitResponse(response, device);
                     }
@@ -203,6 +226,36 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             }
         }
 
+        fn routeToDhcpSockets(self: *Self, timestamp: Instant, ip_repr: ipv4.Repr, raw_udp: []const u8) bool {
+            if (comptime !has_dhcp) return false;
+
+            const wire_repr = udp_wire.parse(raw_udp) catch return false;
+            const payload = udp_wire.payloadSlice(raw_udp) catch return false;
+
+            for (self.sockets.dhcp_sockets) |sock| {
+                if (wire_repr.dst_port == sock.client_port and wire_repr.src_port == sock.server_port) {
+                    const dhcp_repr = dhcp_wire.parse(payload) catch return false;
+                    sock.process(timestamp, ip_repr.src_addr, dhcp_repr);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        fn routeToDnsSockets(self: *Self, ip_repr: ipv4.Repr, raw_udp: []const u8) bool {
+            _ = ip_repr;
+            if (comptime !has_dns) return false;
+
+            const wire_repr = udp_wire.parse(raw_udp) catch return false;
+            if (wire_repr.src_port != dns_socket_mod.DNS_PORT) return false;
+            const payload = udp_wire.payloadSlice(raw_udp) catch return false;
+
+            for (self.sockets.dns_sockets) |sock| {
+                sock.process(wire_repr.dst_port, payload);
+            }
+            return true;
+        }
+
         // -- Egress --
 
         fn processEgress(self: *Self, timestamp: Instant, device: *Device) bool {
@@ -236,6 +289,25 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                 for (self.sockets.icmp_sockets) |sock| {
                     while (sock.dispatch()) |result| {
                         self.emitIcmpEgress(result, device);
+                        dispatched = true;
+                    }
+                }
+            }
+
+            if (comptime has_dhcp) {
+                for (self.sockets.dhcp_sockets) |sock| {
+                    if (sock.dispatch(timestamp)) |result| {
+                        self.emitDhcpEgress(sock, result, device);
+                        dispatched = true;
+                    }
+                }
+            }
+
+            if (comptime has_dns) {
+                for (self.sockets.dns_sockets) |sock| {
+                    var dns_buf: [512]u8 = undefined;
+                    while (sock.dispatch(timestamp, &dns_buf)) |result| {
+                        self.emitDnsEgress(result, device);
                         dispatched = true;
                     }
                 }
@@ -340,6 +412,46 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                 (self.iface.ipv4Addr() orelse return);
             const hop_limit = result.hop_limit orelse iface_mod.DEFAULT_HOP_LIMIT;
             self.emitIpv4Frame(src_addr, result.dst_addr, .icmp, hop_limit, result.payload, device);
+        }
+
+        fn emitDhcpEgress(self: *Self, sock: anytype, result: dhcp_socket_mod.DispatchResult, device: *Device) void {
+            var payload_buf: [MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv4.HEADER_LEN]u8 = undefined;
+
+            const dhcp_len = dhcp_wire.emit(result.dhcp_repr, &payload_buf) catch return;
+
+            // Build UDP header around DHCP payload.
+            var udp_buf: [MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv4.HEADER_LEN]u8 = undefined;
+            const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + dhcp_len);
+            const hdr_len = udp_wire.emit(.{
+                .src_port = sock.client_port,
+                .dst_port = sock.server_port,
+                .length = udp_total,
+                .checksum = 0,
+            }, &udp_buf) catch return;
+            if (hdr_len + dhcp_len > udp_buf.len) return;
+            @memcpy(udp_buf[hdr_len..][0..dhcp_len], payload_buf[0..dhcp_len]);
+            const total = hdr_len + dhcp_len;
+
+            udp_wire.fillChecksum(udp_buf[0..total], result.src_ip, result.dst_ip);
+            self.emitIpv4Frame(result.src_ip, result.dst_ip, .udp, iface_mod.DEFAULT_HOP_LIMIT, udp_buf[0..total], device);
+        }
+
+        fn emitDnsEgress(self: *Self, result: dns_socket_mod.DispatchResult, device: *Device) void {
+            var udp_buf: [MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv4.HEADER_LEN]u8 = undefined;
+            const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + result.payload.len);
+            const hdr_len = udp_wire.emit(.{
+                .src_port = result.src_port,
+                .dst_port = dns_socket_mod.DNS_PORT,
+                .length = udp_total,
+                .checksum = 0,
+            }, &udp_buf) catch return;
+            if (hdr_len + result.payload.len > udp_buf.len) return;
+            @memcpy(udp_buf[hdr_len..][0..result.payload.len], result.payload);
+            const total = hdr_len + result.payload.len;
+
+            const src_addr = self.iface.getSourceAddress(result.dst_ip) orelse return;
+            udp_wire.fillChecksum(udp_buf[0..total], src_addr, result.dst_ip);
+            self.emitIpv4Frame(src_addr, result.dst_ip, .udp, iface_mod.DEFAULT_HOP_LIMIT, udp_buf[0..total], device);
         }
 
         fn emitTcpReply(self: *Self, orig_ip: ipv4.Repr, tcp_repr: tcp_socket.TcpRepr, device: *Device) void {
@@ -1118,4 +1230,350 @@ test "stack pollAt returns retransmit deadline after SYN dispatch" {
 
     const poll_at = stack.pollAt() orelse return error.TestUnexpectedResult;
     try testing.expectEqual(Instant.fromMillis(1000), poll_at);
+}
+
+// -------------------------------------------------------------------------
+// DHCP stack integration tests
+// -------------------------------------------------------------------------
+
+test "stack DHCP discover dispatches via UDP broadcast" {
+    const DhcpSock = dhcp_socket_mod.Socket;
+    const Sockets = struct { dhcp_sockets: []*DhcpSock };
+    const DhcpStack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+    var sock = DhcpSock.init(LOCAL_HW);
+    _ = sock.poll(); // consume initial deconfigured event
+
+    var sock_arr = [_]*DhcpSock{&sock};
+    var stack = DhcpStack.init(LOCAL_HW, .{ .dhcp_sockets = &sock_arr });
+
+    const activity = stack.poll(Instant.ZERO, &device);
+    try testing.expect(activity);
+
+    const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
+    const eth = try ethernet.parse(tx_frame);
+    try testing.expectEqual(ethernet.BROADCAST, eth.dst_addr);
+
+    const ip_data = try ethernet.payload(tx_frame);
+    const ip_repr = try ipv4.parse(ip_data);
+    try testing.expectEqual([4]u8{ 0, 0, 0, 0 }, ip_repr.src_addr);
+    try testing.expectEqual([4]u8{ 255, 255, 255, 255 }, ip_repr.dst_addr);
+    try testing.expectEqual(ipv4.Protocol.udp, ip_repr.protocol);
+
+    const udp_data = try ipv4.payloadSlice(ip_data);
+    const udp_repr = try udp_wire.parse(udp_data);
+    try testing.expectEqual(@as(u16, 68), udp_repr.src_port);
+    try testing.expectEqual(@as(u16, 67), udp_repr.dst_port);
+
+    const dhcp_payload = try udp_wire.payloadSlice(udp_data);
+    const dhcp_repr = try dhcp_wire.parse(dhcp_payload);
+    try testing.expectEqual(dhcp_wire.MessageType.discover, dhcp_repr.message_type);
+}
+
+test "stack DHCP ingress processes offer" {
+    const DhcpSock = dhcp_socket_mod.Socket;
+    const Sockets = struct { dhcp_sockets: []*DhcpSock };
+    const DhcpStack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+    var sock = DhcpSock.init(LOCAL_HW);
+    _ = sock.poll();
+
+    var sock_arr = [_]*DhcpSock{&sock};
+    var stack = DhcpStack.init(LOCAL_HW, .{ .dhcp_sockets = &sock_arr });
+
+    // Dispatch discover.
+    _ = stack.poll(Instant.ZERO, &device);
+    _ = device.dequeueTx();
+
+    // Build OFFER frame: Server -> client.
+    const server_ip = [4]u8{ 10, 0, 0, 1 };
+    const offered_ip = [4]u8{ 10, 0, 0, 42 };
+
+    const offer_repr = dhcp_wire.Repr{
+        .message_type = .offer,
+        .transaction_id = sock.transaction_id,
+        .secs = 0,
+        .client_hardware_address = LOCAL_HW,
+        .client_ip = .{ 0, 0, 0, 0 },
+        .your_ip = offered_ip,
+        .server_ip = server_ip,
+        .router = server_ip,
+        .subnet_mask = .{ 255, 255, 255, 0 },
+        .relay_agent_ip = .{ 0, 0, 0, 0 },
+        .broadcast = false,
+        .requested_ip = null,
+        .client_identifier = null,
+        .server_identifier = server_ip,
+        .parameter_request_list = null,
+        .max_size = null,
+        .lease_duration = 3600,
+        .renew_duration = null,
+        .rebind_duration = null,
+        .dns_servers = null,
+    };
+
+    var dhcp_buf: [576]u8 = undefined;
+    const dhcp_len = dhcp_wire.emit(offer_repr, &dhcp_buf) catch unreachable;
+
+    // Wrap in UDP (server:67 -> client:68).
+    var udp_buf: [600]u8 = undefined;
+    const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + dhcp_len);
+    const udp_hdr_len = udp_wire.emit(.{
+        .src_port = 67,
+        .dst_port = 68,
+        .length = udp_total,
+        .checksum = 0,
+    }, &udp_buf) catch unreachable;
+    @memcpy(udp_buf[udp_hdr_len..][0..dhcp_len], dhcp_buf[0..dhcp_len]);
+
+    // Wrap in IPv4.
+    var frame_buf: [MAX_FRAME_LEN]u8 = undefined;
+    const frame_ip = ipv4.Repr{
+        .version = 4,
+        .ihl = 5,
+        .dscp_ecn = 0,
+        .total_length = @intCast(ipv4.HEADER_LEN + udp_hdr_len + dhcp_len),
+        .identification = 0,
+        .dont_fragment = false,
+        .more_fragments = false,
+        .fragment_offset = 0,
+        .ttl = 64,
+        .protocol = .udp,
+        .checksum = 0,
+        .src_addr = server_ip,
+        .dst_addr = .{ 255, 255, 255, 255 },
+    };
+    const frame_eth = ethernet.Repr{
+        .dst_addr = ethernet.BROADCAST,
+        .src_addr = REMOTE_HW,
+        .ethertype = .ipv4,
+    };
+    const eth_len = ethernet.emit(frame_eth, &frame_buf) catch unreachable;
+    const ip_len = ipv4.emit(frame_ip, frame_buf[eth_len..]) catch unreachable;
+    @memcpy(frame_buf[eth_len + ip_len ..][0 .. udp_hdr_len + dhcp_len], udp_buf[0 .. udp_hdr_len + dhcp_len]);
+    const total_frame_len = eth_len + ip_len + udp_hdr_len + dhcp_len;
+
+    // Need to accept broadcast -- set any_ip or add broadcast addr.
+    stack.iface.any_ip = true;
+    device.enqueueRx(frame_buf[0..total_frame_len]);
+    _ = stack.poll(Instant.ZERO, &device);
+
+    // Socket should have transitioned to requesting -> dispatch produces REQUEST.
+    const tx2 = device.dequeueTx();
+    if (tx2) |frame| {
+        const ip_data2 = ethernet.payload(frame) catch unreachable;
+        const udp_data2 = ipv4.payloadSlice(ip_data2) catch unreachable;
+        const dhcp_payload2 = udp_wire.payloadSlice(udp_data2) catch unreachable;
+        const dhcp_repr2 = dhcp_wire.parse(dhcp_payload2) catch unreachable;
+        try testing.expectEqual(dhcp_wire.MessageType.request, dhcp_repr2.message_type);
+    } else {
+        // Socket processed the offer; verify state transition to requesting.
+        switch (sock.state) {
+            .requesting => {},
+            else => return error.TestExpectedEqual,
+        }
+    }
+}
+
+test "stack DHCP pollAt returns socket deadline" {
+    const DhcpSock = dhcp_socket_mod.Socket;
+    const Sockets = struct { dhcp_sockets: []*DhcpSock };
+    const DhcpStack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+    var sock = DhcpSock.init(LOCAL_HW);
+    _ = sock.poll();
+
+    var sock_arr = [_]*DhcpSock{&sock};
+    var stack = DhcpStack.init(LOCAL_HW, .{ .dhcp_sockets = &sock_arr });
+
+    // Before dispatch: pollAt should be ZERO (ready to discover immediately).
+    try testing.expectEqual(Instant.ZERO, stack.pollAt().?);
+
+    // After discover dispatch: retry timeout is 10s.
+    _ = stack.poll(Instant.ZERO, &device);
+    _ = device.dequeueTx();
+
+    const poll_at = stack.pollAt() orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(Instant.fromSecs(10), poll_at);
+}
+
+// -------------------------------------------------------------------------
+// DNS stack integration tests
+// -------------------------------------------------------------------------
+
+test "stack DNS query dispatches via UDP" {
+    const DnsSock = dns_socket_mod.Socket;
+    const Sockets = struct { dns_sockets: []*DnsSock };
+    const DnsStack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    const S = struct {
+        var slots: [4]dns_socket_mod.QuerySlot = [_]dns_socket_mod.QuerySlot{.{}} ** 4;
+    };
+    @memset(@as([*]u8, @ptrCast(&S.slots))[0..@sizeOf(@TypeOf(S.slots))], 0);
+    const servers = [_][4]u8{.{ 8, 8, 8, 8 }};
+    var sock = DnsSock.init(&S.slots, &servers);
+    _ = try sock.startQuery("example.com", .a);
+
+    var sock_arr = [_]*DnsSock{&sock};
+    var stack = DnsStack.init(LOCAL_HW, .{ .dns_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    const activity = stack.poll(Instant.ZERO, &device);
+    try testing.expect(activity);
+
+    const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
+    const ip_data = try ethernet.payload(tx_frame);
+    const ip_repr = try ipv4.parse(ip_data);
+    try testing.expectEqual(ipv4.Protocol.udp, ip_repr.protocol);
+    try testing.expectEqual(LOCAL_IP, ip_repr.src_addr);
+    try testing.expectEqual([4]u8{ 8, 8, 8, 8 }, ip_repr.dst_addr);
+
+    const udp_data = try ipv4.payloadSlice(ip_data);
+    const udp_repr = try udp_wire.parse(udp_data);
+    try testing.expectEqual(@as(u16, 49152), udp_repr.src_port);
+    try testing.expectEqual(@as(u16, 53), udp_repr.dst_port);
+}
+
+test "stack DNS ingress delivers response" {
+    const dns_wire = @import("wire/dns.zig");
+    const DnsSock = dns_socket_mod.Socket;
+    const Sockets = struct { dns_sockets: []*DnsSock };
+    const DnsStack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    const S = struct {
+        var slots: [4]dns_socket_mod.QuerySlot = [_]dns_socket_mod.QuerySlot{.{}} ** 4;
+    };
+    @memset(@as([*]u8, @ptrCast(&S.slots))[0..@sizeOf(@TypeOf(S.slots))], 0);
+    const servers = [_][4]u8{.{ 8, 8, 8, 8 }};
+    var sock = DnsSock.init(&S.slots, &servers);
+    const handle = try sock.startQuery("example.com", .a);
+
+    var sock_arr = [_]*DnsSock{&sock};
+    var stack = DnsStack.init(LOCAL_HW, .{ .dns_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    // Dispatch query.
+    _ = stack.poll(Instant.ZERO, &device);
+    _ = device.dequeueTx();
+
+    // Build DNS A-record response.
+    const txid: u16 = 0xABCD;
+    const answer_ip = [4]u8{ 93, 184, 216, 34 };
+
+    // Encode "example.com" in wire format.
+    const wire_name = [_]u8{ 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0 };
+    var resp_buf: [512]u8 = undefined;
+    @memset(&resp_buf, 0);
+
+    // DNS header.
+    resp_buf[0] = @truncate(txid >> 8);
+    resp_buf[1] = @truncate(txid);
+    const resp_flags: u16 = dns_wire.Flags.RESPONSE | dns_wire.Flags.RECURSION_DESIRED | dns_wire.Flags.RECURSION_AVAILABLE;
+    resp_buf[2] = @truncate(resp_flags >> 8);
+    resp_buf[3] = @truncate(resp_flags);
+    resp_buf[5] = 1; // QDCOUNT
+    resp_buf[7] = 1; // ANCOUNT
+
+    // Question section.
+    var pos: usize = 12;
+    @memcpy(resp_buf[pos..][0..wire_name.len], &wire_name);
+    pos += wire_name.len;
+    resp_buf[pos + 1] = 1; // TYPE A
+    resp_buf[pos + 3] = 1; // CLASS IN
+    pos += 4;
+
+    // Answer: pointer to name at offset 12.
+    resp_buf[pos] = 0xc0;
+    resp_buf[pos + 1] = 0x0c;
+    pos += 2;
+    resp_buf[pos + 1] = 1; // TYPE A
+    resp_buf[pos + 3] = 1; // CLASS IN
+    pos += 4;
+    resp_buf[pos + 3] = 60; // TTL
+    pos += 4;
+    resp_buf[pos + 1] = 4; // RDLENGTH
+    pos += 2;
+    @memcpy(resp_buf[pos..][0..4], &answer_ip);
+    pos += 4;
+
+    // Wrap in UDP (53 -> 49152).
+    var udp_resp: [600]u8 = undefined;
+    const resp_udp_total: u16 = @intCast(udp_wire.HEADER_LEN + pos);
+    const resp_udp_hdr = udp_wire.emit(.{
+        .src_port = 53,
+        .dst_port = 49152,
+        .length = resp_udp_total,
+        .checksum = 0,
+    }, &udp_resp) catch unreachable;
+    @memcpy(udp_resp[resp_udp_hdr..][0..pos], resp_buf[0..pos]);
+
+    var frame_buf: [MAX_FRAME_LEN]u8 = undefined;
+    const resp_frame = buildIpv4FrameFrom(&frame_buf, .{ 8, 8, 8, 8 }, LOCAL_IP, .udp, udp_resp[0 .. resp_udp_hdr + pos]);
+    device.enqueueRx(resp_frame);
+    _ = stack.poll(Instant.fromMillis(100), &device);
+
+    const result = try sock.getQueryResult(handle);
+    try testing.expectEqual(@as(u8, 1), result.len);
+    try testing.expectEqualSlices(u8, &answer_ip, &result.addrs[0]);
+}
+
+test "stack DNS pollAt returns retransmit deadline" {
+    const DnsSock = dns_socket_mod.Socket;
+    const Sockets = struct { dns_sockets: []*DnsSock };
+    const DnsStack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    const S = struct {
+        var slots: [4]dns_socket_mod.QuerySlot = [_]dns_socket_mod.QuerySlot{.{}} ** 4;
+    };
+    @memset(@as([*]u8, @ptrCast(&S.slots))[0..@sizeOf(@TypeOf(S.slots))], 0);
+    const servers = [_][4]u8{.{ 8, 8, 8, 8 }};
+    var sock = DnsSock.init(&S.slots, &servers);
+    _ = try sock.startQuery("example.com", .a);
+
+    var sock_arr = [_]*DnsSock{&sock};
+    var stack = DnsStack.init(LOCAL_HW, .{ .dns_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    // After dispatch: retransmit delay is 1s.
+    _ = stack.poll(Instant.ZERO, &device);
+    _ = device.dequeueTx();
+
+    const poll_at = stack.pollAt() orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(Instant.fromSecs(1), poll_at);
+}
+
+fn buildIpv4FrameFrom(buf: []u8, src: ipv4.Address, dst: ipv4.Address, protocol: ipv4.Protocol, payload_data: []const u8) []const u8 {
+    const ip_repr = ipv4.Repr{
+        .version = 4,
+        .ihl = 5,
+        .dscp_ecn = 0,
+        .total_length = @intCast(ipv4.HEADER_LEN + payload_data.len),
+        .identification = 0,
+        .dont_fragment = false,
+        .more_fragments = false,
+        .fragment_offset = 0,
+        .ttl = 64,
+        .protocol = protocol,
+        .checksum = 0,
+        .src_addr = src,
+        .dst_addr = dst,
+    };
+    const eth_repr = ethernet.Repr{
+        .dst_addr = LOCAL_HW,
+        .src_addr = REMOTE_HW,
+        .ethertype = .ipv4,
+    };
+    const eth_len = ethernet.emit(eth_repr, buf) catch unreachable;
+    const ip_len = ipv4.emit(ip_repr, buf[eth_len..]) catch unreachable;
+    @memcpy(buf[eth_len + ip_len ..][0..payload_data.len], payload_data);
+    return buf[0 .. eth_len + ip_len + payload_data.len];
 }

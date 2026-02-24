@@ -1338,16 +1338,23 @@ pub fn Socket(comptime max_asm_segs: usize) type {
             return false;
         }
 
+        fn lastScaledWindow(self: Self) ?u16 {
+            const last_ack = self.remote_last_ack orelse return null;
+            const next_ack = self.remote_seq_no.add(self.rx_buffer.len());
+            const last_win = @as(usize, self.remote_last_win) << @intCast(self.remote_win_shift);
+            const last_win_edge = last_ack.add(last_win);
+            const adjusted = last_win_edge.diff(next_ack);
+            const shifted: usize = adjusted >> @intCast(self.remote_win_shift);
+            return if (shifted > std.math.maxInt(u16)) std.math.maxInt(u16) else @intCast(shifted);
+        }
+
         fn windowToUpdate(self: Self) bool {
             return switch (self.state) {
                 .syn_sent, .syn_received, .established, .fin_wait_1, .fin_wait_2 => {
                     const new_win = self.scaledWindow();
                     if (new_win == 0) return false;
-                    // Approximate: send update if window doubled.
-                    if (self.remote_last_ack != null) {
-                        return new_win / 2 >= self.remote_last_win;
-                    }
-                    return false;
+                    const last_win = self.lastScaledWindow() orelse return false;
+                    return new_win / 2 >= last_win;
                 },
                 else => false,
             };
@@ -4745,6 +4752,62 @@ test "delayed ack window update" {
     const ack = recvPacket(&s, Instant.fromMillis(11));
     try testing.expect(ack != null);
     try testing.expect(ack.?.ack_number.?.eql(REMOTE_SEQ.add(1).add(3)));
+}
+
+// [smoltcp:socket/tcp.rs:test_window_update_with_delay_ack]
+test "window update with delay ack" {
+    var s = socketWithBuffers(6, 6);
+    s.state = .established;
+    s.listen_endpoint = LISTEN_END;
+    s.tuple = .{
+        .local = .{ .addr = LOCAL_ADDR, .port = LOCAL_PORT },
+        .remote = .{ .addr = REMOTE_ADDR, .port = REMOTE_PORT },
+    };
+    s.local_seq_no = LOCAL_SEQ.add(1);
+    s.remote_seq_no = REMOTE_SEQ.add(1);
+    s.remote_last_seq = LOCAL_SEQ.add(1);
+    s.remote_last_ack = REMOTE_SEQ.add(1);
+    s.remote_last_win = s.scaledWindow();
+    s.remote_win_len = 256;
+    s.ack_delay = ACK_DELAY_DEFAULT;
+
+    // Fill the 6-byte rx buffer.
+    _ = sendPacketAt0(&s, TcpRepr{
+        .src_port = SEND_TEMPL.src_port,
+        .dst_port = SEND_TEMPL.dst_port,
+        .seq_number = REMOTE_SEQ.add(1),
+        .ack_number = LOCAL_SEQ.add(1),
+        .window_len = SEND_TEMPL.window_len,
+        .payload = "abcdef",
+    });
+
+    // At t=5ms, no ACK yet (delayed ack timer not expired).
+    try testing.expectEqual(@as(?TcpRepr, null), recvPacket(&s, Instant.fromMillis(5)));
+
+    // Read 2 bytes -- window opens 0->2, windowToUpdate triggers (lastScaledWindow=0).
+    var buf2: [2]u8 = undefined;
+    _ = try s.recvSlice(&buf2);
+    try testing.expectEqualSlices(u8, "ab", &buf2);
+
+    const ack1 = recvPacket(&s, Instant.fromMillis(5));
+    try testing.expect(ack1 != null);
+    try testing.expect(ack1.?.ack_number.?.eql(REMOTE_SEQ.add(1).add(6)));
+    try testing.expectEqual(@as(u16, 2), ack1.?.window_len);
+
+    // Read 1 byte -- window=3, no update (3/2=1 < lastScaledWindow=2).
+    var buf1: [1]u8 = undefined;
+    _ = try s.recvSlice(&buf1);
+    try testing.expectEqualSlices(u8, "c", &buf1);
+    try testing.expectEqual(@as(?TcpRepr, null), recvPacket(&s, Instant.fromMillis(5)));
+
+    // Read 1 byte -- window=4, update triggers (4/2=2 >= lastScaledWindow=2).
+    _ = try s.recvSlice(&buf1);
+    try testing.expectEqualSlices(u8, "d", &buf1);
+
+    const ack2 = recvPacket(&s, Instant.fromMillis(5));
+    try testing.expect(ack2 != null);
+    try testing.expect(ack2.?.ack_number.?.eql(REMOTE_SEQ.add(1).add(6)));
+    try testing.expectEqual(@as(u16, 4), ack2.?.window_len);
 }
 
 // =========================================================================
