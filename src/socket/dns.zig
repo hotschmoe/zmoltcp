@@ -60,13 +60,9 @@ const PendingQuery = struct {
     server_idx: usize,
 };
 
-const CompletedQuery = struct {
-    addresses: Addresses,
-};
-
 const QueryState = union(enum) {
     pending: PendingQuery,
-    completed: CompletedQuery,
+    completed: Addresses,
     failure,
 };
 
@@ -121,14 +117,12 @@ pub const Socket = struct {
         var work_name = name;
         if (work_name.len == 0) return error.InvalidName;
 
-        // Strip trailing dot
         if (work_name[work_name.len - 1] == '.') {
             work_name = work_name[0 .. work_name.len - 1];
         }
 
         var remaining = work_name;
         while (remaining.len > 0) {
-            // Find next dot
             var dot_pos: usize = 0;
             while (dot_pos < remaining.len and remaining[dot_pos] != '.') : (dot_pos += 1) {}
 
@@ -182,10 +176,9 @@ pub const Socket = struct {
         const state = slot.state orelse unreachable;
         switch (state) {
             .pending => return error.Pending,
-            .completed => |cq| {
-                const result = cq.addresses;
+            .completed => |addrs| {
                 slot.state = null;
-                return result;
+                return addrs;
             },
             .failure => {
                 slot.state = null;
@@ -199,7 +192,6 @@ pub const Socket = struct {
         self.queries[handle.index].state = null;
     }
 
-    /// Process an incoming DNS response packet.
     pub fn process(self: *Socket, dst_port: u16, pkt_data: []const u8) void {
         if (pkt_data.len < wire.HEADER_LEN) return;
 
@@ -230,41 +222,29 @@ pub const Socket = struct {
                 continue;
             }
 
-            // Parse question section from response
             const pld = wire.payload(pkt_data) catch return;
             const qr = wire.parseQuestion(pld) catch return;
-
-            // Verify question type matches
             if (qr.question.type_ != pq.type_) return;
 
-            // Verify question name matches (resolve pointers for both)
             const q_name = wire.parseName(pkt_data, headerOffset(pkt_data, qr.question.name)) catch return;
             const pq_name = wire.parseName(pq.name[0..pq.name_len], 0) catch return;
             if (!wire.eqNames(q_name, pq_name)) return;
 
-            // Parse answer records
             var addresses = Addresses{};
             var rest = qr.rest;
             for (0..answer_count) |_| {
                 const ar = wire.parseRecord(rest) catch return;
                 rest = ar.rest;
 
-                // Check if answer name matches current query name
                 const rec_name = wire.parseName(pkt_data, headerOffset(pkt_data, ar.record.name)) catch return;
                 const cur_name = wire.parseName(pq.name[0..pq.name_len], 0) catch return;
                 if (!wire.eqNames(rec_name, cur_name)) continue;
 
                 switch (ar.record.data) {
-                    .a => |addr| {
-                        addresses.push(addr);
-                    },
+                    .a => |addr| addresses.push(addr),
                     .cname => |cname_data| {
-                        // Follow CNAME: resolve the pointer-compressed name and
-                        // write it back into pq.name in wire format
                         const cname_labels = wire.parseName(pkt_data, headerOffset(pkt_data, cname_data)) catch return;
-                        const new_len = wire.copyName(&pq.name, cname_labels) catch return;
-                        pq.name_len = new_len;
-                        // Update the slot so subsequent records match against new name
+                        pq.name_len = wire.copyName(&pq.name, cname_labels) catch return;
                         slot.state = .{ .pending = pq };
                     },
                     .other => {},
@@ -272,7 +252,7 @@ pub const Socket = struct {
             }
 
             if (addresses.len > 0) {
-                slot.state = .{ .completed = .{ .addresses = addresses } };
+                slot.state = .{ .completed = addresses };
             } else {
                 slot.state = .failure;
             }
@@ -280,7 +260,6 @@ pub const Socket = struct {
         }
     }
 
-    /// Build and emit the next pending DNS query packet.
     pub fn dispatch(self: *Socket, now: Instant, buf: []u8) ?DispatchResult {
         for (self.queries) |*slot| {
             const state = slot.state orelse continue;
@@ -289,34 +268,25 @@ pub const Socket = struct {
                 else => continue,
             };
 
-            // Set timeout on first dispatch
-            const timeout = if (pq.timeout_at) |t| t else blk: {
-                const v = now.add(RETRANSMIT_TIMEOUT);
-                pq.timeout_at = v;
-                break :blk v;
-            };
+            if (pq.timeout_at == null) pq.timeout_at = now.add(RETRANSMIT_TIMEOUT);
 
-            // Check timeout -> advance to next server
-            if (timeout.lessThan(now)) {
+            if (pq.timeout_at.?.lessThan(now)) {
                 pq.timeout_at = now.add(RETRANSMIT_TIMEOUT);
                 pq.retransmit_at = Instant.ZERO;
                 pq.delay = RETRANSMIT_DELAY;
                 pq.server_idx += 1;
             }
 
-            // All servers exhausted -> failure
             if (pq.server_idx >= self.server_count) {
                 slot.state = .failure;
                 continue;
             }
 
-            // Waiting for retransmit time
             if (pq.retransmit_at.micros > now.micros) {
                 slot.state = .{ .pending = pq };
                 continue;
             }
 
-            // Build query packet
             const repr = wire.Repr{
                 .transaction_id = pq.txid,
                 .flags = wire.Flags.RECURSION_DESIRED,
@@ -332,7 +302,6 @@ pub const Socket = struct {
                 continue;
             };
 
-            // Update retransmit timer with exponential backoff
             pq.retransmit_at = now.add(pq.delay);
             pq.delay = MAX_RETRANSMIT_DELAY.min(Duration.fromMicros(pq.delay.micros * 2));
 
@@ -348,23 +317,17 @@ pub const Socket = struct {
         return null;
     }
 
-    /// Return the earliest time at which dispatch should be called again.
     pub fn pollAt(self: *const Socket) ?Instant {
         var earliest: ?Instant = null;
-        for (self.queries) |*slot| {
-            const state = slot.state orelse continue;
-            switch (state) {
-                .pending => |pq| {
-                    if (earliest) |e| {
-                        if (pq.retransmit_at.lessThan(e)) {
-                            earliest = pq.retransmit_at;
-                        }
-                    } else {
-                        earliest = pq.retransmit_at;
-                    }
-                },
-                else => {},
-            }
+        for (self.queries) |slot| {
+            const pq = switch (slot.state orelse continue) {
+                .pending => |p| p,
+                else => continue,
+            };
+            earliest = if (earliest) |e|
+                if (pq.retransmit_at.lessThan(e)) pq.retransmit_at else e
+            else
+                pq.retransmit_at;
         }
         return earliest;
     }
@@ -378,7 +341,6 @@ pub const Socket = struct {
     }
 };
 
-/// Compute the offset of a sub-slice within the full packet (for parseName).
 fn headerOffset(packet: []const u8, sub: []const u8) usize {
     return @intFromPtr(sub.ptr) - @intFromPtr(packet.ptr);
 }
@@ -434,11 +396,10 @@ fn buildResponse(txid: u16, rcode: wire.Rcode, question_name: []const u8, questi
     var buf: [512]u8 = undefined;
     @memset(&buf, 0);
 
-    // Header
     buf[0] = @truncate(txid >> 8);
     buf[1] = @truncate(txid);
-    const f: u16 = wire.Flags.RESPONSE | wire.Flags.RECURSION_DESIRED | wire.Flags.RECURSION_AVAILABLE;
-    const flags_val = f | @as(u16, @intFromEnum(rcode));
+    const flags_val = (wire.Flags.RESPONSE | wire.Flags.RECURSION_DESIRED | wire.Flags.RECURSION_AVAILABLE) |
+        @as(u16, @intFromEnum(rcode));
     buf[2] = @truncate(flags_val >> 8);
     buf[3] = @truncate(flags_val);
     buf[4] = 0;
@@ -446,7 +407,6 @@ fn buildResponse(txid: u16, rcode: wire.Rcode, question_name: []const u8, questi
     buf[6] = 0;
     buf[7] = @truncate(answers.len); // ANCOUNT
 
-    // Question section
     var pos: usize = 12;
     @memcpy(buf[pos..][0..question_name.len], question_name);
     pos += question_name.len;
@@ -457,10 +417,9 @@ fn buildResponse(txid: u16, rcode: wire.Rcode, question_name: []const u8, questi
     buf[pos + 3] = 1; // CLASS_IN
     pos += 4;
 
-    // Answer records (using pointer compression back to question name)
     for (answers) |addr| {
         buf[pos] = 0xc0;
-        buf[pos + 1] = 0x0c; // pointer to question name
+        buf[pos + 1] = 0x0c;
         pos += 2;
         buf[pos] = 0;
         buf[pos + 1] = 1; // TYPE A
@@ -486,17 +445,16 @@ fn buildCnameResponse(txid: u16, question_name: []const u8, cname_wire: []const 
     var buf: [512]u8 = undefined;
     @memset(&buf, 0);
 
+    const f: u16 = wire.Flags.RESPONSE | wire.Flags.RECURSION_DESIRED | wire.Flags.RECURSION_AVAILABLE;
     buf[0] = @truncate(txid >> 8);
     buf[1] = @truncate(txid);
-    const f: u16 = wire.Flags.RESPONSE | wire.Flags.RECURSION_DESIRED | wire.Flags.RECURSION_AVAILABLE;
     buf[2] = @truncate(f >> 8);
     buf[3] = @truncate(f);
     buf[4] = 0;
     buf[5] = 1; // QDCOUNT
     buf[6] = 0;
-    buf[7] = 2; // ANCOUNT (CNAME + A)
+    buf[7] = 2; // ANCOUNT
 
-    // Question
     var pos: usize = 12;
     @memcpy(buf[pos..][0..question_name.len], question_name);
     pos += question_name.len;
@@ -506,7 +464,6 @@ fn buildCnameResponse(txid: u16, question_name: []const u8, cname_wire: []const 
     buf[pos + 3] = 1; // CLASS IN
     pos += 4;
 
-    // CNAME answer (pointing back to question name)
     buf[pos] = 0xc0;
     buf[pos + 1] = 0x0c;
     pos += 2;
@@ -524,12 +481,8 @@ fn buildCnameResponse(txid: u16, question_name: []const u8, cname_wire: []const 
     buf[pos + 1] = @truncate(cname_wire.len); // RDLENGTH
     pos += 2;
     @memcpy(buf[pos..][0..cname_wire.len], cname_wire);
-    const cname_offset = pos;
-    _ = cname_offset;
     pos += cname_wire.len;
 
-    // A answer for the CNAME target (using the cname wire bytes inline)
-    // We write the cname wire name again as the record name
     @memcpy(buf[pos..][0..cname_wire.len], cname_wire);
     pos += cname_wire.len;
     buf[pos] = 0;

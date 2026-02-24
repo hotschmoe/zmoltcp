@@ -42,6 +42,10 @@ pub const Flags = struct {
     pub const RECURSION_AVAILABLE: u16 = 0x0080;
     pub const AUTHENTIC_DATA: u16 = 0x0020;
     pub const CHECK_DISABLED: u16 = 0x0010;
+
+    pub const MASK: u16 = RESPONSE | AUTHORITATIVE | TRUNCATED |
+        RECURSION_DESIRED | RECURSION_AVAILABLE |
+        AUTHENTIC_DATA | CHECK_DISABLED;
 };
 
 pub const ParseError = error{Truncated};
@@ -55,8 +59,6 @@ fn readU32Be(data: []const u8, off: usize) u32 {
         @as(u32, data[off + 2]) << 8 | @as(u32, data[off + 3]);
 }
 
-// Header accessors -- free functions on raw packet bytes.
-
 pub fn transactionId(data: []const u8) ParseError!u16 {
     if (data.len < HEADER_LEN) return error.Truncated;
     return readU16Be(data, 0);
@@ -64,10 +66,7 @@ pub fn transactionId(data: []const u8) ParseError!u16 {
 
 pub fn flags(data: []const u8) ParseError!u16 {
     if (data.len < HEADER_LEN) return error.Truncated;
-    const all_flags = Flags.RESPONSE | Flags.AUTHORITATIVE | Flags.TRUNCATED |
-        Flags.RECURSION_DESIRED | Flags.RECURSION_AVAILABLE |
-        Flags.AUTHENTIC_DATA | Flags.CHECK_DISABLED;
-    return readU16Be(data, 2) & all_flags;
+    return readU16Be(data, 2) & Flags.MASK;
 }
 
 pub fn opcode(data: []const u8) ParseError!Opcode {
@@ -107,12 +106,6 @@ pub fn payload(data: []const u8) ParseError![]const u8 {
     return data[HEADER_LEN..];
 }
 
-// Name parsing.
-//
-// DNS names use label-length encoding with optional pointer compression
-// (RFC 1035 sec 4.1.4). Pointers use the top 2 bits of the length byte
-// set to 0xC0, with the remaining 14 bits as an offset into the packet.
-
 pub const NameLabels = struct {
     labels: [MAX_LABELS][]const u8 = undefined,
     len: usize = 0,
@@ -122,16 +115,13 @@ pub const NameLabels = struct {
     }
 };
 
-/// Walk a name without following pointers. Returns how far we consumed in
-/// `bytes` (the "rest" after the name ends) and the end-of-name position
-/// within `bytes`. Used by parseQuestion/parseRecord to find where the
-/// name bytes end in the sequential payload.
+/// Walk a name without following pointers. Returns the remaining bytes
+/// after the name and the byte offset where the name ends.
 pub fn parseNamePart(bytes: []const u8) ParseError!struct { rest: []const u8, name_end: usize } {
     var pos: usize = 0;
     while (pos < bytes.len) {
         const x = bytes[pos];
         if (x == 0x00) {
-            // Terminator
             return .{ .rest = bytes[pos + 1 ..], .name_end = pos + 1 };
         } else if (x & 0xC0 == 0x00) {
             const label_len = @as(usize, x & 0x3F);
@@ -139,7 +129,6 @@ pub fn parseNamePart(bytes: []const u8) ParseError!struct { rest: []const u8, na
             pos += 1 + label_len;
         } else if (x & 0xC0 == 0xC0) {
             if (pos + 2 > bytes.len) return error.Truncated;
-            // Pointer: 2 bytes consumed, name continues elsewhere
             return .{ .rest = bytes[pos + 2 ..], .name_end = pos + 2 };
         } else {
             return error.Truncated;
@@ -148,12 +137,8 @@ pub fn parseNamePart(bytes: []const u8) ParseError!struct { rest: []const u8, na
     return error.Truncated;
 }
 
-/// Parse a DNS name following pointer compression. `packet_data` is the
-/// full packet (needed for pointer targets). `name_start` is the offset
-/// within `packet_data` where the name begins.
-///
-/// Anti-loop: on each pointer follow, we shrink the visible packet so we
-/// never visit the same byte twice (same technique as smoltcp).
+/// Parse a DNS name following pointer compression. Shrinks the visible
+/// packet on each pointer follow to prevent loops (same as smoltcp).
 pub fn parseName(packet_data: []const u8, name_start: usize) ParseError!NameLabels {
     var result = NameLabels{};
     var packet = packet_data;
@@ -175,7 +160,6 @@ pub fn parseName(packet_data: []const u8, name_start: usize) ParseError!NameLabe
             if (bytes.len < 2) return error.Truncated;
             const ptr = (@as(usize, x & 0x3F) << 8) | @as(usize, bytes[1]);
             if (packet.len <= ptr) return error.Truncated;
-            // Anti-loop: shrink visible packet, continue from pointer target
             bytes = packet[ptr..];
             packet = packet[0..ptr];
         } else {
@@ -192,7 +176,7 @@ pub fn eqNames(a: NameLabels, b: NameLabels) bool {
     return true;
 }
 
-/// Flatten parsed name labels back into wire format (length-prefixed labels + 0x00).
+/// Write name labels back to wire format (length-prefixed labels + terminator).
 pub fn copyName(dest: []u8, labels: NameLabels) ParseError!usize {
     var pos: usize = 0;
     for (0..labels.len) |i| {
@@ -206,8 +190,6 @@ pub fn copyName(dest: []u8, labels: NameLabels) ParseError!usize {
     dest[pos] = 0x00;
     return pos + 1;
 }
-
-// Question and Record parsing.
 
 pub const Question = struct {
     name: []const u8,
@@ -263,11 +245,9 @@ pub fn parseRecord(bytes: []const u8) ParseError!struct { rest: []const u8, reco
     const rdata = after_fixed[0..rdlength];
     const type_: Type = @enumFromInt(type_val);
 
+    if (type_ == .a and rdata.len != 4) return error.Truncated;
     const record_data: RecordData = switch (type_) {
-        .a => blk: {
-            if (rdata.len != 4) return error.Truncated;
-            break :blk .{ .a = rdata[0..4].* };
-        },
+        .a => .{ .a = rdata[0..4].* },
         .cname => .{ .cname = rdata },
         else => .{ .other = .{ .type_ = type_, .data = rdata } },
     };
@@ -281,8 +261,6 @@ pub fn parseRecord(bytes: []const u8) ParseError!struct { rest: []const u8, reco
         },
     };
 }
-
-// Repr and emit (query-only).
 
 pub const Repr = struct {
     transaction_id: u16,
@@ -299,30 +277,17 @@ pub fn emit(repr: Repr, buf: []u8) ParseError!usize {
     const required = bufferLen(repr);
     if (buf.len < required) return error.Truncated;
 
-    // Transaction ID
     buf[0] = @truncate(repr.transaction_id >> 8);
     buf[1] = @truncate(repr.transaction_id);
 
-    // Flags + opcode
-    const opcode_bits = @as(u16, @intFromEnum(repr.opcode)) << 11;
-    const flags_val = repr.flags | opcode_bits;
+    const flags_val = repr.flags | @as(u16, @intFromEnum(repr.opcode)) << 11;
     buf[2] = @truncate(flags_val >> 8);
     buf[3] = @truncate(flags_val);
 
-    // QDCOUNT = 1
     buf[4] = 0;
-    buf[5] = 1;
-    // ANCOUNT = 0
-    buf[6] = 0;
-    buf[7] = 0;
-    // NSCOUNT = 0
-    buf[8] = 0;
-    buf[9] = 0;
-    // ARCOUNT = 0
-    buf[10] = 0;
-    buf[11] = 0;
+    buf[5] = 1; // QDCOUNT = 1
+    @memset(buf[6..12], 0); // ANCOUNT, NSCOUNT, ARCOUNT = 0
 
-    // Question section: name + type + class
     const name_len = repr.question.name.len;
     @memcpy(buf[HEADER_LEN..][0..name_len], repr.question.name);
     const qoff = HEADER_LEN + name_len;
