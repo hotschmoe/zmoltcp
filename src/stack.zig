@@ -2,6 +2,7 @@
 //
 // Reference: smoltcp src/iface/interface.rs (poll, socket_ingress, socket_egress)
 
+const std = @import("std");
 const ethernet = @import("wire/ethernet.zig");
 const arp = @import("wire/arp.zig");
 const ipv4 = @import("wire/ipv4.zig");
@@ -13,6 +14,8 @@ const tcp_socket = @import("socket/tcp.zig");
 const dhcp_wire = @import("wire/dhcp.zig");
 const dhcp_socket_mod = @import("socket/dhcp.zig");
 const dns_socket_mod = @import("socket/dns.zig");
+const raw_socket_mod = @import("socket/raw.zig");
+const igmp_wire = @import("wire/igmp.zig");
 const iface_mod = @import("iface.zig");
 const frag_mod = @import("fragmentation.zig");
 const time = @import("time.zig");
@@ -27,20 +30,25 @@ const IP_PAYLOAD_MAX = MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv4.HEADER_LEN;
 
 /// Serialize a TCP repr (header + payload + checksum) into buf.
 /// Returns total byte length on success, or null if buf is too small.
+/// When `fill_checksum` is false, the checksum field is left zeroed
+/// (for hardware offload).
 fn serializeTcp(
     repr: tcp_socket.TcpRepr,
     src_addr: ipv4.Address,
     dst_addr: ipv4.Address,
     buf: []u8,
+    fill_checksum: bool,
 ) ?usize {
     const wire_repr = repr.toWireRepr();
     const tcp_len = tcp_wire.emit(wire_repr, buf) catch return null;
     const total = tcp_len + repr.payload.len;
     if (total > buf.len) return null;
     @memcpy(buf[tcp_len..][0..repr.payload.len], repr.payload);
-    const cksum = tcp_wire.computeChecksum(src_addr, dst_addr, buf[0..total]);
-    buf[16] = @truncate(cksum >> 8);
-    buf[17] = @truncate(cksum & 0xFF);
+    if (fill_checksum) {
+        const cksum = tcp_wire.computeChecksum(src_addr, dst_addr, buf[0..total]);
+        buf[16] = @truncate(cksum >> 8);
+        buf[17] = @truncate(cksum & 0xFF);
+    }
     return total;
 }
 
@@ -54,6 +62,7 @@ fn serializeTcp(
 ///   tcp_sockets: []*SomeTcpSocket
 ///   udp_sockets: []*SomeUdpSocket
 ///   icmp_sockets: []*SomeIcmpSocket
+///   raw_sockets: []*SomeRawSocket
 pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
     comptime {
         if (!@hasDecl(Device, "receive")) @compileError("Device must have receive()");
@@ -65,17 +74,23 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
     const has_icmp = SocketConfig != void and @hasField(SocketConfig, "icmp_sockets");
     const has_dhcp = SocketConfig != void and @hasField(SocketConfig, "dhcp_sockets");
     const has_dns = SocketConfig != void and @hasField(SocketConfig, "dns_sockets");
+    const has_raw = SocketConfig != void and @hasField(SocketConfig, "raw_sockets");
 
     const FRAG_BUFFER_SIZE = 4096;
     const REASSEMBLY_BUFFER_SIZE = 1500;
     const REASSEMBLY_MAX_SEGMENTS = 4;
     const IP_MTU = MAX_FRAME_LEN - ethernet.HEADER_LEN;
 
+    const device_caps: iface_mod.DeviceCapabilities = if (@hasDecl(Device, "capabilities"))
+        Device.capabilities()
+    else
+        .{};
+
     return struct {
         const Self = @This();
 
         const EmitResult = enum { sent, neighbor_pending };
-        pub const REASSEMBLY_TIMEOUT = time.Duration.fromSecs(60);
+        pub const DEFAULT_REASSEMBLY_TIMEOUT = time.Duration.fromSecs(60);
 
         iface: iface_mod.Interface,
         sockets: SocketConfig,
@@ -85,6 +100,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             .max_segments = REASSEMBLY_MAX_SEGMENTS,
         }) = .{},
         ipv4_id: u16 = 0,
+        reassembly_timeout: time.Duration = DEFAULT_REASSEMBLY_TIMEOUT,
 
         pub fn init(hw_addr: ethernet.Address, sockets: SocketConfig) Self {
             return .{
@@ -157,6 +173,14 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     result = minOptInstant(result, sock.pollAt());
                 }
             }
+            if (comptime has_raw) {
+                for (self.sockets.raw_sockets) |sock| {
+                    if (sock.pollAt()) |sock_at| {
+                        const effective = self.adjustForNeighbor(sock_at, sock.peekDstAddr());
+                        result = minOptInstant(result, effective);
+                    }
+                }
+            }
 
             return result;
         }
@@ -164,7 +188,8 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
         fn adjustForNeighbor(self: *const Self, sock_at: Instant, dst: ?ipv4.Address) Instant {
             const addr = dst orelse return sock_at;
             if (self.iface.isBroadcast(addr) or ipv4.isBroadcast(addr)) return sock_at;
-            return switch (self.iface.neighbor_cache.lookupFull(addr, sock_at)) {
+            const next_hop = self.iface.route(addr) orelse return sock_at;
+            return switch (self.iface.neighbor_cache.lookupFull(next_hop, sock_at)) {
                 .rate_limited => self.iface.neighbor_cache.silent_until,
                 else => sock_at,
             };
@@ -188,10 +213,14 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                 },
                 .ipv4 => {
                     const ip_repr = ipv4.parse(payload_data) catch return;
+                    // RFC 1122: reject packets with broadcast or multicast
+                    // source address -- such packets are never valid.
+                    if (ipv4.isBroadcast(ip_repr.src_addr) or ipv4.isMulticast(ip_repr.src_addr)) return;
                     // Opportunistic neighbor caching: learn source MAC from
-                    // incoming IPv4 frames so response packets can find
-                    // the neighbor without a separate ARP exchange.
-                    if (!ipv4.isUnspecified(ip_repr.src_addr)) {
+                    // incoming IPv4 frames when the source is on our subnet,
+                    // so response packets can find the neighbor without a
+                    // separate ARP exchange.
+                    if (!ipv4.isUnspecified(ip_repr.src_addr) and self.iface.inSameNetwork(ip_repr.src_addr)) {
                         self.iface.neighbor_cache.fill(ip_repr.src_addr, eth_repr.src_addr, self.iface.now);
                     }
                     self.processIpv4Ingress(timestamp, ip_repr, payload_data, device);
@@ -202,7 +231,8 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
 
         fn processIpv4Ingress(self: *Self, timestamp: Instant, ip_repr: ipv4.Repr, data: []const u8, device: *Device) void {
             const is_broadcast = self.iface.isBroadcast(ip_repr.dst_addr);
-            if (!is_broadcast and !self.iface.hasIpAddr(ip_repr.dst_addr)) return;
+            const is_multicast = ipv4.isMulticast(ip_repr.dst_addr) and self.iface.hasMulticastGroup(ip_repr.dst_addr);
+            if (!is_broadcast and !is_multicast and !self.iface.hasIpAddr(ip_repr.dst_addr)) return;
 
             const raw_payload = ipv4.payloadSlice(data) catch return;
 
@@ -214,7 +244,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     .protocol = ip_repr.protocol,
                 };
                 const byte_offset = @as(usize, ip_repr.fragment_offset) * 8;
-                const expires_at = timestamp.add(REASSEMBLY_TIMEOUT);
+                const expires_at = timestamp.add(self.reassembly_timeout);
                 self.reassembler.accept(key, expires_at);
                 if (!ip_repr.more_fragments) {
                     self.reassembler.setTotalSize(byte_offset + raw_payload.len);
@@ -222,6 +252,8 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                 if (!self.reassembler.add(raw_payload, byte_offset)) return;
                 break :blk self.reassembler.assemble() orelse return;
             } else raw_payload;
+
+            const raw_handled = self.routeToRawSockets(ip_repr, ip_payload);
 
             switch (ip_repr.protocol) {
                 .icmp => {
@@ -242,6 +274,9 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                         self.emitResponse(response, device);
                     }
                 },
+                .igmp => {
+                    self.processIgmp(ip_repr, ip_payload, device);
+                },
                 .tcp => {
                     const result = self.routeToTcpSockets(timestamp, ip_repr, ip_payload);
                     if (result.reply) |reply| {
@@ -252,7 +287,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     }
                 },
                 _ => {
-                    if (is_broadcast) return;
+                    if (is_broadcast or raw_handled) return;
                     if (self.iface.icmpProtoUnreachable(ip_repr, ip_payload)) |response| {
                         self.emitResponse(response, device);
                     }
@@ -346,13 +381,67 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             return true;
         }
 
+        fn processIgmp(self: *Self, ip_repr: ipv4.Repr, ip_payload: []const u8, device: *Device) void {
+            const repr = igmp_wire.parse(ip_payload) catch return;
+            switch (repr) {
+                .membership_query => |q| {
+                    // Respond to general or group-specific queries with reports
+                    // for all joined groups (general) or the specific group.
+                    if (ipv4.isUnspecified(q.group_addr)) {
+                        // General query: report for each joined group.
+                        for (self.iface.multicast_groups) |slot| {
+                            if (slot) |group| {
+                                self.emitIgmpReport(group, device);
+                            }
+                        }
+                    } else {
+                        // Group-specific query.
+                        if (self.iface.hasMulticastGroup(q.group_addr)) {
+                            self.emitIgmpReport(q.group_addr, device);
+                        }
+                    }
+                    _ = ip_repr;
+                },
+                .membership_report, .leave_group => {},
+            }
+        }
+
+        fn emitIgmpReport(self: *Self, group_addr: ipv4.Address, device: *Device) void {
+            var igmp_buf: [igmp_wire.HEADER_LEN]u8 = undefined;
+            _ = igmp_wire.emit(.{ .membership_report = .{
+                .group_addr = group_addr,
+                .version = .v2,
+            } }, &igmp_buf) catch return;
+            const src_addr = self.iface.ipv4Addr() orelse return;
+            _ = self.emitIpv4Frame(src_addr, group_addr, .igmp, 1, &igmp_buf, device);
+        }
+
+        fn multicastMac(addr: ipv4.Address) ethernet.Address {
+            return .{ 0x01, 0x00, 0x5e, addr[1] & 0x7F, addr[2], addr[3] };
+        }
+
+        fn routeToRawSockets(self: *Self, ip_repr: ipv4.Repr, ip_payload: []const u8) bool {
+            if (comptime !has_raw) return false;
+
+            var handled = false;
+            for (self.sockets.raw_sockets) |sock| {
+                if (sock.accepts(ip_repr.protocol)) {
+                    sock.process(ip_repr.src_addr, ip_repr.protocol, ip_payload);
+                    handled = true;
+                }
+            }
+            return handled;
+        }
+
         // -- Egress --
 
         fn processEgress(self: *Self, timestamp: Instant, device: *Device) bool {
             var dispatched = false;
+            var burst_budget: usize = if (device_caps.max_burst_size) |b| b else std.math.maxInt(usize);
 
             if (comptime has_tcp) {
                 for (self.sockets.tcp_sockets) |sock| {
+                    if (burst_budget == 0) break;
                     if (sock.tuple) |tuple| {
                         if (!self.neighborAvailableOrRequest(tuple.remote.addr, device)) continue;
                     }
@@ -365,49 +454,77 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                             device,
                         );
                         dispatched = true;
+                        burst_budget -= 1;
+                        if (burst_budget == 0) break;
                     }
                 }
             }
 
             if (comptime has_udp) {
                 for (self.sockets.udp_sockets) |sock| {
+                    if (burst_budget == 0) break;
                     if (sock.peekDstAddr()) |dst| {
                         if (!self.neighborAvailableOrRequest(dst, device)) continue;
                     }
                     while (sock.dispatch()) |result| {
                         _ = self.emitUdpEgress(result, device);
                         dispatched = true;
+                        burst_budget -= 1;
+                        if (burst_budget == 0) break;
                     }
                 }
             }
 
             if (comptime has_icmp) {
                 for (self.sockets.icmp_sockets) |sock| {
+                    if (burst_budget == 0) break;
                     if (sock.peekDstAddr()) |dst| {
                         if (!self.neighborAvailableOrRequest(dst, device)) continue;
                     }
                     while (sock.dispatch()) |result| {
                         _ = self.emitIcmpEgress(result, device);
                         dispatched = true;
+                        burst_budget -= 1;
+                        if (burst_budget == 0) break;
                     }
                 }
             }
 
             if (comptime has_dhcp) {
                 for (self.sockets.dhcp_sockets) |sock| {
+                    if (burst_budget == 0) break;
                     if (sock.dispatch(timestamp)) |result| {
                         self.emitDhcpEgress(sock, result, device);
                         dispatched = true;
+                        burst_budget -= 1;
                     }
                 }
             }
 
             if (comptime has_dns) {
                 for (self.sockets.dns_sockets) |sock| {
+                    if (burst_budget == 0) break;
                     var dns_buf: [512]u8 = undefined;
                     while (sock.dispatch(timestamp, &dns_buf)) |result| {
                         if (self.emitDnsEgress(result, device) == .neighbor_pending) break;
                         dispatched = true;
+                        burst_budget -= 1;
+                        if (burst_budget == 0) break;
+                    }
+                }
+            }
+
+            if (comptime has_raw) {
+                for (self.sockets.raw_sockets) |sock| {
+                    if (burst_budget == 0) break;
+                    if (sock.peekDstAddr()) |dst| {
+                        if (!self.neighborAvailableOrRequest(dst, device)) continue;
+                    }
+                    while (sock.dispatch()) |result| {
+                        _ = self.emitRawEgress(result, device);
+                        dispatched = true;
+                        burst_budget -= 1;
+                        if (burst_budget == 0) break;
                     }
                 }
             }
@@ -424,16 +541,21 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             payload_data: []const u8,
             device: *Device,
         ) EmitResult {
-            const dst_mac = if (self.iface.isBroadcast(dst_addr) or ipv4.isBroadcast(dst_addr))
+            const dst_mac = if (ipv4.isMulticast(dst_addr))
+                multicastMac(dst_addr)
+            else if (self.iface.isBroadcast(dst_addr) or ipv4.isBroadcast(dst_addr))
                 ethernet.BROADCAST
-            else switch (self.iface.neighbor_cache.lookupFull(dst_addr, self.iface.now)) {
-                .found => |mac| mac,
-                .rate_limited => return .neighbor_pending,
-                .not_found => {
-                    self.emitArpRequest(dst_addr, device);
-                    self.iface.neighbor_cache.limitRate(self.iface.now);
-                    return .neighbor_pending;
-                },
+            else blk: {
+                const next_hop = self.iface.route(dst_addr) orelse return .neighbor_pending;
+                break :blk switch (self.iface.neighbor_cache.lookupFull(next_hop, self.iface.now)) {
+                    .found => |mac| mac,
+                    .rate_limited => return .neighbor_pending,
+                    .not_found => {
+                        self.emitArpRequest(next_hop, device);
+                        self.iface.neighbor_cache.limitRate(self.iface.now);
+                        return .neighbor_pending;
+                    },
+                };
             };
 
             const total_ip_len = ipv4.HEADER_LEN + payload_data.len;
@@ -509,11 +631,12 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
 
         fn neighborAvailableOrRequest(self: *Self, dst_addr: ipv4.Address, device: *Device) bool {
             if (self.iface.isBroadcast(dst_addr) or ipv4.isBroadcast(dst_addr)) return true;
-            switch (self.iface.neighbor_cache.lookupFull(dst_addr, self.iface.now)) {
+            const next_hop = self.iface.route(dst_addr) orelse return false;
+            switch (self.iface.neighbor_cache.lookupFull(next_hop, self.iface.now)) {
                 .found => return true,
                 .rate_limited => return false,
                 .not_found => {
-                    self.emitArpRequest(dst_addr, device);
+                    self.emitArpRequest(next_hop, device);
                     self.iface.neighbor_cache.limitRate(self.iface.now);
                     return false;
                 },
@@ -529,7 +652,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             device: *Device,
         ) EmitResult {
             var payload_buf: [IP_PAYLOAD_MAX]u8 = undefined;
-            const total_tcp = serializeTcp(repr, src_addr, dst_addr, &payload_buf) orelse return .sent;
+            const total_tcp = serializeTcp(repr, src_addr, dst_addr, &payload_buf, device_caps.checksum.tcp.shouldComputeTx()) orelse return .sent;
             return self.emitIpv4Frame(src_addr, dst_addr, .tcp, hop_limit, payload_buf[0..total_tcp], device);
         }
 
@@ -551,7 +674,8 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             else
                 (self.iface.getSourceAddress(result.dst_addr) orelse return .sent);
 
-            udp_wire.fillChecksum(payload_buf[0..total], src_addr, result.dst_addr);
+            if (device_caps.checksum.udp.shouldComputeTx())
+                udp_wire.fillChecksum(payload_buf[0..total], src_addr, result.dst_addr);
             const hop_limit = result.hop_limit orelse iface_mod.DEFAULT_HOP_LIMIT;
             return self.emitIpv4Frame(src_addr, result.dst_addr, .udp, hop_limit, payload_buf[0..total], device);
         }
@@ -577,7 +701,8 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             _ = dhcp_wire.emit(result.dhcp_repr, payload_buf[hdr_len..]) catch return;
             const total = hdr_len + dhcp_len;
 
-            udp_wire.fillChecksum(payload_buf[0..total], result.src_ip, result.dst_ip);
+            if (device_caps.checksum.udp.shouldComputeTx())
+                udp_wire.fillChecksum(payload_buf[0..total], result.src_ip, result.dst_ip);
             _ = self.emitIpv4Frame(result.src_ip, result.dst_ip, .udp, iface_mod.DEFAULT_HOP_LIMIT, payload_buf[0..total], device);
         }
 
@@ -595,8 +720,16 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             const total = hdr_len + result.payload.len;
 
             const src_addr = self.iface.getSourceAddress(result.dst_ip) orelse return .sent;
-            udp_wire.fillChecksum(payload_buf[0..total], src_addr, result.dst_ip);
+            if (device_caps.checksum.udp.shouldComputeTx())
+                udp_wire.fillChecksum(payload_buf[0..total], src_addr, result.dst_ip);
             return self.emitIpv4Frame(src_addr, result.dst_ip, .udp, iface_mod.DEFAULT_HOP_LIMIT, payload_buf[0..total], device);
+        }
+
+        fn emitRawEgress(self: *Self, result: anytype, device: *Device) EmitResult {
+            const src_addr = self.iface.getSourceAddress(result.dst_addr) orelse
+                (self.iface.ipv4Addr() orelse return .sent);
+            const hop_limit = result.hop_limit orelse iface_mod.DEFAULT_HOP_LIMIT;
+            return self.emitIpv4Frame(src_addr, result.dst_addr, result.ip_protocol, hop_limit, result.payload, device);
         }
 
         fn emitTcpReply(self: *Self, orig_ip: ipv4.Repr, tcp_repr: tcp_socket.TcpRepr, device: *Device) void {
@@ -656,7 +789,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                         .data = 0,
                     }, inner_buf[0 .. inv_len + data_len], &payload_buf) catch return null;
                 },
-                .tcp => |tcp_repr| serializeTcp(tcp_repr, resp.ip.src_addr, resp.ip.dst_addr, &payload_buf) orelse return null,
+                .tcp => |tcp_repr| serializeTcp(tcp_repr, resp.ip.src_addr, resp.ip.dst_addr, &payload_buf, device_caps.checksum.tcp.shouldComputeTx()) orelse return null,
             };
 
             const ip_repr = ipv4.Repr{
@@ -677,9 +810,10 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
 
             const dst_mac = if (self.iface.isBroadcast(resp.ip.dst_addr) or ipv4.isBroadcast(resp.ip.dst_addr))
                 ethernet.BROADCAST
-            else
-                (self.iface.neighbor_cache.lookup(resp.ip.dst_addr, self.iface.now) orelse
-                    return null);
+            else blk: {
+                const next_hop = self.iface.route(resp.ip.dst_addr) orelse return null;
+                break :blk self.iface.neighbor_cache.lookup(next_hop, self.iface.now) orelse return null;
+            };
 
             const eth_repr = ethernet.Repr{
                 .dst_addr = dst_mac,
@@ -1672,7 +1806,10 @@ test "stack DNS query dispatches via UDP" {
     var sock_arr = [_]*DnsSock{&sock};
     var stack = DnsStack.init(LOCAL_HW, .{ .dns_sockets = &sock_arr });
     stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
-    stack.iface.neighbor_cache.fill(.{ 8, 8, 8, 8 }, REMOTE_HW, Instant.ZERO);
+    // DNS server 8.8.8.8 is off-subnet; add a default gateway route.
+    const gateway: ipv4.Address = .{ 10, 0, 0, 254 };
+    _ = stack.iface.routes.add(iface_mod.Route.newDefaultGateway(gateway));
+    stack.iface.neighbor_cache.fill(gateway, REMOTE_HW, Instant.ZERO);
 
     const activity = stack.poll(Instant.ZERO, &device);
     try testing.expect(activity);
@@ -1709,6 +1846,9 @@ test "stack DNS ingress delivers response" {
     var sock_arr = [_]*DnsSock{&sock};
     var stack = DnsStack.init(LOCAL_HW, .{ .dns_sockets = &sock_arr });
     stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+    const gateway2: ipv4.Address = .{ 10, 0, 0, 254 };
+    _ = stack.iface.routes.add(iface_mod.Route.newDefaultGateway(gateway2));
+    stack.iface.neighbor_cache.fill(gateway2, REMOTE_HW, Instant.ZERO);
 
     // Dispatch query.
     _ = stack.poll(Instant.ZERO, &device);
@@ -1793,6 +1933,9 @@ test "stack DNS pollAt returns retransmit deadline" {
     var sock_arr = [_]*DnsSock{&sock};
     var stack = DnsStack.init(LOCAL_HW, .{ .dns_sockets = &sock_arr });
     stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+    const gateway3: ipv4.Address = .{ 10, 0, 0, 254 };
+    _ = stack.iface.routes.add(iface_mod.Route.newDefaultGateway(gateway3));
+    stack.iface.neighbor_cache.fill(gateway3, REMOTE_HW, Instant.ZERO);
 
     // After dispatch: retransmit delay is 1s.
     _ = stack.poll(Instant.ZERO, &device);
@@ -2318,5 +2461,423 @@ test "stack non-fragmented packets bypass reassembly" {
 
     // Reassembler should still be free (never touched).
     try testing.expect(stack.reassembler.isFree());
+}
+
+// -- Ingress hardening tests --
+
+test "stack rejects IPv4 with broadcast source address" {
+    var device = TestDevice.init();
+    var stack = testStack();
+
+    // Populate neighbor cache so a response would normally be sent.
+    var arp_buf: [128]u8 = undefined;
+    device.enqueueRx(buildArpRequest(&arp_buf));
+    _ = stack.poll(Instant.ZERO, &device);
+    _ = device.dequeueTx();
+
+    // Build ICMP echo with broadcast source address (255.255.255.255).
+    const echo_data = [_]u8{ 0xDE, 0xAD };
+    var icmp_buf: [icmp.HEADER_LEN + 2]u8 = undefined;
+    _ = icmp.emitEcho(.{
+        .icmp_type = .echo_request,
+        .code = 0,
+        .checksum = 0,
+        .identifier = 0x1234,
+        .sequence = 1,
+    }, &echo_data, &icmp_buf) catch unreachable;
+
+    var frame_buf: [256]u8 = undefined;
+    const bcast_src: ipv4.Address = .{ 255, 255, 255, 255 };
+    device.enqueueRx(buildIpv4FrameFrom(&frame_buf, bcast_src, LOCAL_IP, .icmp, &icmp_buf));
+
+    const processed = stack.poll(Instant.ZERO, &device);
+    try testing.expect(processed);
+    // No reply should be generated for broadcast-sourced packets.
+    try testing.expectEqual(@as(?[]const u8, null), device.dequeueTx());
+}
+
+test "stack rejects IPv4 with multicast source address" {
+    var device = TestDevice.init();
+    var stack = testStack();
+
+    // Populate neighbor cache.
+    var arp_buf: [128]u8 = undefined;
+    device.enqueueRx(buildArpRequest(&arp_buf));
+    _ = stack.poll(Instant.ZERO, &device);
+    _ = device.dequeueTx();
+
+    // Build ICMP echo with multicast source address (224.0.0.1).
+    const echo_data = [_]u8{ 0xDE, 0xAD };
+    var icmp_buf: [icmp.HEADER_LEN + 2]u8 = undefined;
+    _ = icmp.emitEcho(.{
+        .icmp_type = .echo_request,
+        .code = 0,
+        .checksum = 0,
+        .identifier = 0x1234,
+        .sequence = 1,
+    }, &echo_data, &icmp_buf) catch unreachable;
+
+    var frame_buf: [256]u8 = undefined;
+    const mcast_src: ipv4.Address = .{ 224, 0, 0, 1 };
+    device.enqueueRx(buildIpv4FrameFrom(&frame_buf, mcast_src, LOCAL_IP, .icmp, &icmp_buf));
+
+    const processed = stack.poll(Instant.ZERO, &device);
+    try testing.expect(processed);
+    try testing.expectEqual(@as(?[]const u8, null), device.dequeueTx());
+}
+
+test "stack neighbor cache refresh gated by same network" {
+    var device = TestDevice.init();
+    var stack = testStack();
+
+    // Send ICMP from a same-subnet source (10.0.0.99).
+    const echo_data = [_]u8{ 0xDE, 0xAD };
+    var icmp_buf: [icmp.HEADER_LEN + 2]u8 = undefined;
+    _ = icmp.emitEcho(.{
+        .icmp_type = .echo_request,
+        .code = 0,
+        .checksum = 0,
+        .identifier = 0x1234,
+        .sequence = 1,
+    }, &echo_data, &icmp_buf) catch unreachable;
+
+    const same_net: ipv4.Address = .{ 10, 0, 0, 99 };
+    var frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv4FrameFrom(&frame_buf, same_net, LOCAL_IP, .icmp, &icmp_buf));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    // Same-subnet source should be cached.
+    try testing.expect(stack.iface.neighbor_cache.lookup(same_net, stack.iface.now) != null);
+
+    // Now send from a different subnet (192.168.1.1) -- should NOT be cached.
+    const diff_net: ipv4.Address = .{ 192, 168, 1, 1 };
+    // We need the packet to actually be accepted by processIpv4Ingress,
+    // so we add the diff_net address to the interface.
+    stack.iface.addIpAddr(.{ .address = diff_net, .prefix_len = 24 });
+
+    var frame_buf2: [256]u8 = undefined;
+    device.enqueueRx(buildIpv4FrameFrom(&frame_buf2, .{ 192, 168, 1, 50 }, diff_net, .icmp, &icmp_buf));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    // 192.168.1.50 is on the 192.168.1.0/24 subnet we just added, so it
+    // SHOULD be cached (it's in the same network as an interface address).
+    try testing.expect(stack.iface.neighbor_cache.lookup(.{ 192, 168, 1, 50 }, stack.iface.now) != null);
+}
+
+test "stack egress routes via gateway for off-subnet destination" {
+    const TcpSock = tcp_socket.Socket(4);
+    const Sockets = struct { tcp_sockets: []*TcpSock };
+    const TcpStack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    const S = struct {
+        var rx_buf: [64]u8 = undefined;
+        var tx_buf: [64]u8 = undefined;
+    };
+    @memset(&S.rx_buf, 0);
+    @memset(&S.tx_buf, 0);
+    var sock = TcpSock.init(&S.rx_buf, &S.tx_buf);
+
+    var sock_arr = [_]*TcpSock{&sock};
+    var stack = TcpStack.init(LOCAL_HW, .{ .tcp_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    // Add a default gateway.
+    const gateway: ipv4.Address = .{ 10, 0, 0, 254 };
+    const gw_mac: ethernet.Address = .{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF };
+    _ = stack.iface.routes.add(iface_mod.Route.newDefaultGateway(gateway));
+    stack.iface.neighbor_cache.fill(gateway, gw_mac, Instant.ZERO);
+
+    // Connect to off-subnet destination.
+    const remote: ipv4.Address = .{ 8, 8, 8, 8 };
+    try sock.connect(remote, 80, LOCAL_IP, 12345);
+
+    // Poll to dispatch SYN.
+    const activity = stack.poll(Instant.ZERO, &device);
+    try testing.expect(activity);
+
+    // The SYN frame should be sent to the gateway's MAC, not the remote's.
+    const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
+    const eth = try ethernet.parse(tx_frame);
+    try testing.expectEqual(gw_mac, eth.dst_addr);
+
+    // IP destination should still be the remote address.
+    const ip_data = try ethernet.payload(tx_frame);
+    const ip_repr = try ipv4.parse(ip_data);
+    try testing.expectEqual(remote, ip_repr.dst_addr);
+}
+
+test "stack raw socket receives IP payload" {
+    const RawSock = raw_socket_mod.Socket(.{ .payload_size = 128 });
+    const Sockets = struct { raw_sockets: []*RawSock };
+    const RawStack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    var rx_buf: [2]RawSock.Packet = undefined;
+    var tx_buf: [2]RawSock.Packet = undefined;
+    var sock = RawSock.init(&rx_buf, &tx_buf);
+    try sock.bind(.udp);
+
+    var sock_arr = [_]*RawSock{&sock};
+    var stack = RawStack.init(LOCAL_HW, .{ .raw_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    // Build a raw UDP-protocol IP frame.
+    const udp_payload = [_]u8{ 0x00, 0x43, 0x00, 0x44, 0x00, 0x0D, 0x00, 0x00, 0x48, 0x65, 0x6c, 0x6c, 0x6f };
+    var frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv4Frame(&frame_buf, .udp, &udp_payload));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    try testing.expect(sock.canRecv());
+    var recv_buf: [128]u8 = undefined;
+    const result = try sock.recvSlice(&recv_buf);
+    try testing.expectEqualSlices(u8, &udp_payload, recv_buf[0..result.data_len]);
+}
+
+test "stack raw socket suppresses ICMP proto unreachable" {
+    const RawSock = raw_socket_mod.Socket(.{ .payload_size = 128 });
+    const Sockets = struct { raw_sockets: []*RawSock };
+    const RawStack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    var rx_buf: [2]RawSock.Packet = undefined;
+    var tx_buf: [2]RawSock.Packet = undefined;
+    var sock = RawSock.init(&rx_buf, &tx_buf);
+    // Bind to protocol 253 (experimental).
+    try sock.bind(@enumFromInt(253));
+
+    var sock_arr = [_]*RawSock{&sock};
+    var stack = RawStack.init(LOCAL_HW, .{ .raw_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    // Populate neighbor cache for reply path.
+    var arp_buf: [128]u8 = undefined;
+    device.enqueueRx(buildArpRequest(&arp_buf));
+    _ = stack.poll(Instant.ZERO, &device);
+    _ = device.dequeueTx();
+
+    // Send a packet with protocol 253.
+    const payload = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF };
+    var frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv4Frame(&frame_buf, @enumFromInt(253), &payload));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    // Raw socket should have received it.
+    try testing.expect(sock.canRecv());
+
+    // No ICMP protocol unreachable should be emitted.
+    try testing.expectEqual(@as(?[]const u8, null), device.dequeueTx());
+}
+
+test "stack IGMP query triggers report for joined group" {
+    var device = TestDevice.init();
+    var stack = testStack();
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    const group = ipv4.Address{ 239, 1, 2, 3 };
+    try testing.expect(stack.iface.joinMulticastGroup(group));
+
+    // Build IGMP general query (type=0x11, max_resp=100, group=0.0.0.0).
+    var igmp_buf: [igmp_wire.HEADER_LEN]u8 = undefined;
+    _ = igmp_wire.emit(.{ .membership_query = .{
+        .max_resp_time = 100,
+        .group_addr = ipv4.UNSPECIFIED,
+        .version = .v2,
+    } }, &igmp_buf) catch unreachable;
+
+    var frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv4FrameFrom(&frame_buf, REMOTE_IP, igmp_wire.IPV4_MULTICAST_ALL_SYSTEMS, .igmp, &igmp_buf));
+    // Join the all-systems group so the packet is accepted.
+    try testing.expect(stack.iface.joinMulticastGroup(igmp_wire.IPV4_MULTICAST_ALL_SYSTEMS));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    // Should have emitted a report for the joined group(s).
+    const tx_frame = device.dequeueTx();
+    try testing.expect(tx_frame != null);
+}
+
+test "stack multicast destination accepted for joined group" {
+    const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 64 });
+    const Sockets = struct { udp_sockets: []*UdpSock };
+    const McastStack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    var rx_buf: [1]UdpSock.Packet = undefined;
+    var tx_buf: [1]UdpSock.Packet = undefined;
+    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    try sock.bind(.{ .port = 5000 });
+
+    var sock_arr = [_]*UdpSock{&sock};
+    var stack = McastStack.init(LOCAL_HW, .{ .udp_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    const mcast_group = ipv4.Address{ 239, 1, 2, 3 };
+    try testing.expect(stack.iface.joinMulticastGroup(mcast_group));
+
+    // Build UDP frame destined for multicast group address.
+    const udp_payload = [_]u8{ 0x48, 0x65, 0x6c, 0x6c, 0x6f };
+    var raw_udp: [udp_wire.HEADER_LEN + 5]u8 = undefined;
+    _ = udp_wire.emit(.{
+        .src_port = 9999,
+        .dst_port = 5000,
+        .length = @intCast(udp_wire.HEADER_LEN + udp_payload.len),
+        .checksum = 0,
+    }, &raw_udp) catch unreachable;
+    @memcpy(raw_udp[udp_wire.HEADER_LEN..], &udp_payload);
+
+    var frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv4FrameFrom(&frame_buf, REMOTE_IP, mcast_group, .udp, &raw_udp));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    try testing.expect(sock.canRecv());
+}
+
+// -- Device Capabilities Tests --
+
+test "TCP checksum offload skips computation" {
+    // Device where hardware computes TX checksums (software only verifies RX).
+    const OffloadDevice = struct {
+        const Self = @This();
+        inner: TestDevice = TestDevice.init(),
+
+        pub fn capabilities() iface_mod.DeviceCapabilities {
+            return .{ .checksum = .{ .tcp = .rx_only } };
+        }
+
+        pub fn receive(self: *Self) ?[]const u8 {
+            return self.inner.receive();
+        }
+
+        pub fn transmit(self: *Self, frame: []const u8) void {
+            self.inner.transmit(frame);
+        }
+    };
+
+    const TcpSock = tcp_socket.Socket(4);
+    const Sockets = struct { tcp_sockets: []*TcpSock };
+    const OffloadStack = Stack(OffloadDevice, Sockets);
+
+    var device = OffloadDevice{};
+
+    const S = struct {
+        var rx_buf: [64]u8 = .{0} ** 64;
+        var tx_buf: [64]u8 = .{0} ** 64;
+    };
+    @memset(&S.rx_buf, 0);
+    @memset(&S.tx_buf, 0);
+    var sock = TcpSock.init(&S.rx_buf, &S.tx_buf);
+    sock.ack_delay = null;
+    try sock.connect(REMOTE_IP, 4242, LOCAL_IP, 4243);
+
+    var sock_arr = [_]*TcpSock{&sock};
+    var stack = OffloadStack.init(LOCAL_HW, .{ .tcp_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+    stack.iface.neighbor_cache.fill(REMOTE_IP, REMOTE_HW, Instant.ZERO);
+
+    _ = stack.poll(Instant.ZERO, &device);
+
+    const tx_frame = device.inner.dequeueTx() orelse return error.ExpectedTxFrame;
+    const ip_data = try ethernet.payload(tx_frame);
+    const ip_repr = try ipv4.parse(ip_data);
+    try testing.expectEqual(ipv4.Protocol.tcp, ip_repr.protocol);
+
+    // With rx_only mode, shouldComputeTx() returns false (hardware
+    // computes TX checksum). Checksum field should be left zeroed.
+    const tcp_data = try ipv4.payloadSlice(ip_data);
+    const tcp_cksum = @as(u16, tcp_data[16]) << 8 | @as(u16, tcp_data[17]);
+    try testing.expectEqual(@as(u16, 0), tcp_cksum);
+}
+
+test "burst size limits frames per poll cycle" {
+    // Device with burst size of 1.
+    const BurstDevice = struct {
+        const Self = @This();
+        inner: TestDevice = TestDevice.init(),
+
+        pub fn capabilities() iface_mod.DeviceCapabilities {
+            return .{ .max_burst_size = 1 };
+        }
+
+        pub fn receive(self: *Self) ?[]const u8 {
+            return self.inner.receive();
+        }
+
+        pub fn transmit(self: *Self, frame: []const u8) void {
+            self.inner.transmit(frame);
+        }
+    };
+
+    const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 64 });
+    const Sockets = struct { udp_sockets: []*UdpSock };
+    const BurstStack = Stack(BurstDevice, Sockets);
+
+    var device = BurstDevice{};
+
+    var rx_buf: [4]UdpSock.Packet = undefined;
+    var tx_buf: [4]UdpSock.Packet = undefined;
+    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    try sock.bind(.{ .port = 3000 });
+
+    // Enqueue 3 outgoing UDP packets.
+    const meta = udp_socket_mod.Metadata{ .endpoint = .{ .addr = REMOTE_IP, .port = 4000 } };
+    try sock.sendSlice("aaa", meta);
+    try sock.sendSlice("bbb", meta);
+    try sock.sendSlice("ccc", meta);
+
+    var sock_arr = [_]*UdpSock{&sock};
+    var stack = BurstStack.init(LOCAL_HW, .{ .udp_sockets = &sock_arr });
+    stack.iface.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+    stack.iface.neighbor_cache.fill(REMOTE_IP, REMOTE_HW, Instant.ZERO);
+
+    // First poll: burst=1 means only 1 frame emitted.
+    _ = stack.poll(Instant.ZERO, &device);
+    try testing.expectEqual(@as(usize, 1), device.inner.tx_count);
+
+    // Second poll: another 1 frame.
+    _ = stack.poll(Instant.ZERO, &device);
+    try testing.expectEqual(@as(usize, 2), device.inner.tx_count);
+
+    // Third poll: last frame.
+    _ = stack.poll(Instant.ZERO, &device);
+    try testing.expectEqual(@as(usize, 3), device.inner.tx_count);
+
+    // Fourth poll: no more frames.
+    _ = stack.poll(Instant.ZERO, &device);
+    try testing.expectEqual(@as(usize, 3), device.inner.tx_count);
+}
+
+test "DeviceCapabilities defaults enable all checksums" {
+    const caps = iface_mod.DeviceCapabilities{};
+    try testing.expect(caps.checksum.ipv4.shouldComputeTx());
+    try testing.expect(caps.checksum.ipv4.shouldVerifyRx());
+    try testing.expect(caps.checksum.tcp.shouldComputeTx());
+    try testing.expect(caps.checksum.tcp.shouldVerifyRx());
+    try testing.expect(caps.checksum.udp.shouldComputeTx());
+    try testing.expect(caps.checksum.udp.shouldVerifyRx());
+    try testing.expect(caps.checksum.icmp.shouldComputeTx());
+    try testing.expect(caps.checksum.icmp.shouldVerifyRx());
+    try testing.expectEqual(@as(?u16, null), caps.max_burst_size);
+}
+
+test "ChecksumMode shouldVerifyRx and shouldComputeTx" {
+    const both = iface_mod.ChecksumMode.both;
+    try testing.expect(both.shouldVerifyRx());
+    try testing.expect(both.shouldComputeTx());
+
+    const tx_only = iface_mod.ChecksumMode.tx_only;
+    try testing.expect(!tx_only.shouldVerifyRx());
+    try testing.expect(tx_only.shouldComputeTx());
+
+    const rx_only = iface_mod.ChecksumMode.rx_only;
+    try testing.expect(rx_only.shouldVerifyRx());
+    try testing.expect(!rx_only.shouldComputeTx());
+
+    const none_mode = iface_mod.ChecksumMode.none;
+    try testing.expect(!none_mode.shouldVerifyRx());
+    try testing.expect(!none_mode.shouldComputeTx());
 }
 

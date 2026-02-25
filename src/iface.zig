@@ -17,7 +17,45 @@ const tcp_wire = @import("wire/tcp.zig");
 const tcp_socket = @import("socket/tcp.zig");
 const time = @import("time.zig");
 
+// -------------------------------------------------------------------------
+// Device Capabilities
+// -------------------------------------------------------------------------
+
+pub const ChecksumMode = enum {
+    both,
+    tx_only,
+    rx_only,
+    none,
+
+    pub fn shouldVerifyRx(self: ChecksumMode) bool {
+        return self == .both or self == .rx_only;
+    }
+
+    pub fn shouldComputeTx(self: ChecksumMode) bool {
+        return self == .both or self == .tx_only;
+    }
+};
+
+pub const DeviceCapabilities = struct {
+    max_transmission_unit: u16 = 1514,
+    max_burst_size: ?u16 = null,
+    checksum: struct {
+        ipv4: ChecksumMode = .both,
+        tcp: ChecksumMode = .both,
+        udp: ChecksumMode = .both,
+        icmp: ChecksumMode = .both,
+    } = .{},
+};
+
+/// Opaque per-packet metadata for hardware timestamping, flow IDs,
+/// or other device-specific information. Attached to socket dispatch
+/// results and packet buffers. The stack does not interpret this value.
+pub const PacketMeta = struct {
+    token: usize = 0,
+};
+
 pub const MAX_ADDR_COUNT = 4;
+pub const MAX_MULTICAST_GROUPS = 4;
 pub const DEFAULT_HOP_LIMIT: u8 = 64;
 pub const IPV4_MIN_MTU: usize = 576;
 
@@ -66,6 +104,56 @@ pub const IpCidr = struct {
 
     pub fn contains(self: IpCidr, addr: ipv4.Address) bool {
         return (addrToU32(addr) & self.networkMask()) == (addrToU32(self.address) & self.networkMask());
+    }
+};
+
+// -------------------------------------------------------------------------
+// Routing table
+// -------------------------------------------------------------------------
+
+pub const MAX_ROUTE_COUNT = 4;
+
+pub const Route = struct {
+    cidr: IpCidr,
+    via_router: ipv4.Address,
+    expires_at: ?time.Instant = null,
+
+    pub fn newDefaultGateway(gateway: ipv4.Address) Route {
+        return .{
+            .cidr = .{ .address = .{ 0, 0, 0, 0 }, .prefix_len = 0 },
+            .via_router = gateway,
+        };
+    }
+};
+
+pub const Routes = struct {
+    entries: [MAX_ROUTE_COUNT]?Route = .{ null, null, null, null },
+
+    pub fn add(self: *Routes, route: Route) bool {
+        for (&self.entries) |*slot| {
+            if (slot.* == null) {
+                slot.* = route;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn lookup(self: *const Routes, addr: ipv4.Address, now: time.Instant) ?ipv4.Address {
+        var best_prefix: ?u6 = null;
+        var best_router: ?ipv4.Address = null;
+        for (self.entries) |maybe_route| {
+            const route = maybe_route orelse continue;
+            if (route.expires_at) |exp| {
+                if (exp.lessThan(now)) continue;
+            }
+            if (!route.cidr.contains(addr)) continue;
+            if (best_prefix == null or route.cidr.prefix_len > best_prefix.?) {
+                best_prefix = route.cidr.prefix_len;
+                best_router = route.via_router;
+            }
+        }
+        return best_router;
     }
 };
 
@@ -188,8 +276,10 @@ pub const Interface = struct {
     ip_addrs: [MAX_ADDR_COUNT]IpCidr = undefined,
     ip_addr_count: usize = 0,
     neighbor_cache: NeighborCache = .{},
+    routes: Routes = .{},
     now: time.Instant = time.Instant.ZERO,
     any_ip: bool = false,
+    multicast_groups: [MAX_MULTICAST_GROUPS]?ipv4.Address = .{ null, null, null, null },
 
     pub fn init(hw_addr: ethernet.Address) Interface {
         return .{ .hardware_addr = hw_addr };
@@ -245,6 +335,64 @@ pub const Interface = struct {
         return self.ip_addrs[0].address;
     }
 
+    pub fn inSameNetwork(self: *const Interface, addr: ipv4.Address) bool {
+        for (self.ipAddrs()) |cidr| {
+            if (cidr.contains(addr)) return true;
+        }
+        return false;
+    }
+
+    pub fn route(self: *const Interface, dst: ipv4.Address) ?ipv4.Address {
+        if (self.inSameNetwork(dst) or self.isBroadcast(dst)) return dst;
+        return self.routes.lookup(dst, self.now);
+    }
+
+    pub fn hasNeighbor(self: *const Interface, dst: ipv4.Address) bool {
+        const next_hop = self.route(dst) orelse return false;
+        return switch (self.neighbor_cache.lookupFull(next_hop, self.now)) {
+            .found => true,
+            .not_found, .rate_limited => false,
+        };
+    }
+
+    // -- Multicast group management --
+
+    pub fn joinMulticastGroup(self: *Interface, addr: ipv4.Address) bool {
+        for (&self.multicast_groups) |*slot| {
+            if (slot.*) |existing| {
+                if (std.mem.eql(u8, &existing, &addr)) return true;
+            }
+        }
+        for (&self.multicast_groups) |*slot| {
+            if (slot.* == null) {
+                slot.* = addr;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn leaveMulticastGroup(self: *Interface, addr: ipv4.Address) bool {
+        for (&self.multicast_groups) |*slot| {
+            if (slot.*) |existing| {
+                if (std.mem.eql(u8, &existing, &addr)) {
+                    slot.* = null;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    pub fn hasMulticastGroup(self: *const Interface, addr: ipv4.Address) bool {
+        for (self.multicast_groups) |slot| {
+            if (slot) |existing| {
+                if (std.mem.eql(u8, &existing, &addr)) return true;
+            }
+        }
+        return false;
+    }
+
     pub fn processEthernet(self: *Interface, frame: []const u8) ?Response {
         const eth_repr = ethernet.parse(frame) catch return null;
         const payload_data = ethernet.payload(frame) catch return null;
@@ -283,6 +431,7 @@ pub const Interface = struct {
 
         switch (ip_repr.protocol) {
             .icmp => return self.processIcmp(ip_repr, ip_payload, is_broadcast),
+            .igmp => return null, // caller handles via stack
             .udp => return null, // caller handles via processUdp
             .tcp => return null, // caller handles
             _ => {
@@ -1134,4 +1283,127 @@ test "neighbor cache lookupFull prefers found over rate_limited" {
         .found => |mac| try testing.expectEqual(mac_a, mac),
         else => return error.ExpectedFound,
     }
+}
+
+// -------------------------------------------------------------------------
+// Route tests
+// -------------------------------------------------------------------------
+
+// [smoltcp:iface/route.rs:test_fill]
+test "route lookup empty table" {
+    const routes = Routes{};
+    try testing.expectEqual(@as(?ipv4.Address, null), routes.lookup(.{ 192, 0, 2, 1 }, time.Instant.ZERO));
+}
+
+test "route lookup match and no match" {
+    var routes = Routes{};
+    _ = routes.add(.{
+        .cidr = .{ .address = .{ 192, 0, 2, 0 }, .prefix_len = 24 },
+        .via_router = .{ 192, 0, 2, 1 },
+    });
+
+    // Address in the route's subnet should match.
+    try testing.expectEqual([4]u8{ 192, 0, 2, 1 }, routes.lookup(.{ 192, 0, 2, 13 }, time.Instant.ZERO).?);
+    try testing.expectEqual([4]u8{ 192, 0, 2, 1 }, routes.lookup(.{ 192, 0, 2, 42 }, time.Instant.ZERO).?);
+    // Address outside the subnet should not match.
+    try testing.expectEqual(@as(?ipv4.Address, null), routes.lookup(.{ 198, 51, 100, 1 }, time.Instant.ZERO));
+}
+
+test "route lookup longest prefix match" {
+    var routes = Routes{};
+    _ = routes.add(.{
+        .cidr = .{ .address = .{ 10, 0, 0, 0 }, .prefix_len = 8 },
+        .via_router = .{ 10, 0, 0, 1 },
+    });
+    _ = routes.add(.{
+        .cidr = .{ .address = .{ 10, 1, 0, 0 }, .prefix_len = 16 },
+        .via_router = .{ 10, 1, 0, 1 },
+    });
+    // /16 is more specific than /8 for 10.1.x.x addresses.
+    try testing.expectEqual([4]u8{ 10, 1, 0, 1 }, routes.lookup(.{ 10, 1, 2, 3 }, time.Instant.ZERO).?);
+    // 10.2.x.x only matches the /8.
+    try testing.expectEqual([4]u8{ 10, 0, 0, 1 }, routes.lookup(.{ 10, 2, 3, 4 }, time.Instant.ZERO).?);
+}
+
+test "route lookup expiry" {
+    var routes = Routes{};
+    _ = routes.add(.{
+        .cidr = .{ .address = .{ 198, 51, 100, 0 }, .prefix_len = 24 },
+        .via_router = .{ 198, 51, 100, 1 },
+        .expires_at = time.Instant.fromMillis(10),
+    });
+    // Before expiry: should match.
+    try testing.expectEqual([4]u8{ 198, 51, 100, 1 }, routes.lookup(.{ 198, 51, 100, 21 }, time.Instant.ZERO).?);
+    // At expiry: should still match (not strictly after).
+    try testing.expectEqual([4]u8{ 198, 51, 100, 1 }, routes.lookup(.{ 198, 51, 100, 21 }, time.Instant.fromMillis(10)).?);
+    // After expiry: should not match.
+    try testing.expectEqual(@as(?ipv4.Address, null), routes.lookup(.{ 198, 51, 100, 21 }, time.Instant.fromMillis(11)));
+}
+
+test "route default gateway" {
+    const gw = Route.newDefaultGateway(.{ 10, 0, 0, 1 });
+    try testing.expectEqual(@as(u6, 0), gw.cidr.prefix_len);
+    var routes = Routes{};
+    _ = routes.add(gw);
+    // Default gateway matches any address.
+    try testing.expectEqual([4]u8{ 10, 0, 0, 1 }, routes.lookup(.{ 1, 2, 3, 4 }, time.Instant.ZERO).?);
+    try testing.expectEqual([4]u8{ 10, 0, 0, 1 }, routes.lookup(.{ 192, 168, 1, 1 }, time.Instant.ZERO).?);
+}
+
+test "interface route direct delivery vs gateway" {
+    var iface = Interface.init(LOCAL_HW_ADDR);
+    iface.addIpAddr(.{ .address = .{ 10, 0, 0, 1 }, .prefix_len = 24 });
+    _ = iface.routes.add(Route.newDefaultGateway(.{ 10, 0, 0, 254 }));
+
+    // Same-subnet address: direct delivery (returns dst itself).
+    try testing.expectEqual([4]u8{ 10, 0, 0, 99 }, iface.route(.{ 10, 0, 0, 99 }).?);
+    // Off-subnet address: via gateway.
+    try testing.expectEqual([4]u8{ 10, 0, 0, 254 }, iface.route(.{ 8, 8, 8, 8 }).?);
+    // Broadcast: direct delivery.
+    try testing.expectEqual([4]u8{ 255, 255, 255, 255 }, iface.route(.{ 255, 255, 255, 255 }).?);
+}
+
+test "interface hasNeighbor with routing" {
+    var iface = Interface.init(LOCAL_HW_ADDR);
+    iface.addIpAddr(.{ .address = .{ 10, 0, 0, 1 }, .prefix_len = 24 });
+    _ = iface.routes.add(Route.newDefaultGateway(.{ 10, 0, 0, 254 }));
+    iface.neighbor_cache.fill(.{ 10, 0, 0, 254 }, .{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF }, time.Instant.ZERO);
+
+    // Off-subnet: gateway neighbor is cached.
+    try testing.expect(iface.hasNeighbor(.{ 8, 8, 8, 8 }));
+    // Same-subnet with no cache entry: no neighbor.
+    try testing.expect(!iface.hasNeighbor(.{ 10, 0, 0, 99 }));
+}
+
+test "multicast group join leave has" {
+    var iface = Interface.init(LOCAL_HW_ADDR);
+    const group1 = ipv4.Address{ 224, 0, 0, 1 };
+    const group2 = ipv4.Address{ 239, 1, 2, 3 };
+
+    try testing.expect(!iface.hasMulticastGroup(group1));
+    try testing.expect(iface.joinMulticastGroup(group1));
+    try testing.expect(iface.hasMulticastGroup(group1));
+
+    // Duplicate join is OK.
+    try testing.expect(iface.joinMulticastGroup(group1));
+
+    try testing.expect(iface.joinMulticastGroup(group2));
+    try testing.expect(iface.hasMulticastGroup(group2));
+
+    try testing.expect(iface.leaveMulticastGroup(group1));
+    try testing.expect(!iface.hasMulticastGroup(group1));
+    try testing.expect(iface.hasMulticastGroup(group2));
+
+    // Leave non-member is false.
+    try testing.expect(!iface.leaveMulticastGroup(group1));
+}
+
+test "multicast group full capacity" {
+    var iface = Interface.init(LOCAL_HW_ADDR);
+    var i: u8 = 0;
+    while (i < MAX_MULTICAST_GROUPS) : (i += 1) {
+        try testing.expect(iface.joinMulticastGroup(.{ 224, 0, 0, i + 1 }));
+    }
+    // Table is full.
+    try testing.expect(!iface.joinMulticastGroup(.{ 224, 0, 0, 99 }));
 }

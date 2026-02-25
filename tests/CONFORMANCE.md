@@ -16,16 +16,19 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | storage/ring_buffer | 15 | 14 | 1 | 14 | PASS |
 | storage/assembler | 38 | 37 | 1 | 37 | PASS |
 | time | 10 | 8 | 2 | 8 | PASS |
-| socket/tcp | 175 | 190 | ~4 | 190 | PASS |
+| socket/tcp | 175 | 217 | ~3 | 217 | PASS |
 | socket/udp | 16 | 17 | 0 | 17 | PASS |
 | wire/dhcp | 9 | 9 | 0 | 9 | PASS |
 | socket/dhcp | 11 | 11 | 0 | 11 | PASS |
 | wire/dns | 7 | 7 | 0 | 7 | PASS |
 | socket/dns | 0 | 12 | 0 | 12 | PASS |
 | socket/icmp | 6 | 7 | 0 | 7 | PASS |
-| iface | 24 | 24 | 7 | 24 | PASS |
-| fragmentation | 0 | 8 | 0 | 8 | PASS |
-| stack | 2 | 35 | 0 | 35 | PASS |
+| socket/raw | 5 | 11 | 0 | 11 | PASS |
+| wire/igmp | 4 | 8 | 0 | 8 | PASS |
+| iface | 24 | 33 | 1 | 33 | PASS |
+| phy | 0 | 9 | 0 | 9 | PASS |
+| fragmentation | 3 | 8 | 0 | 8 | PASS |
+| stack | 2 | 47 | 0 | 47 | PASS |
 
 ## Wire Layer Tests
 
@@ -145,6 +148,18 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/dns.rs:test_parse_response_cname | "parse response CNAME" | PASS |
 | wire/dns.rs:test_parse_response_nxdomain | "parse response NXDomain" | PASS |
 | wire/dns.rs:test_emit | "emit query" | PASS |
+
+### wire/igmp.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| wire/igmp.rs:test_leave_group_deconstruct | "IGMP leave group parse" | PASS |
+| wire/igmp.rs:test_report_deconstruct | "IGMP membership report v2 parse" | PASS |
+| wire/igmp.rs:test_leave_construct | "IGMP leave group emit and checksum" | PASS |
+| wire/igmp.rs:test_report_construct | "IGMP report v2 emit and checksum" | PASS |
+| (original) | "IGMP parse rejects too short" | PASS |
+| (original) | "IGMP parse rejects non-multicast group" | PASS |
+| (original) | "IGMP emit roundtrip" | PASS |
+| (original) | "IGMP v1 query detected by zero max_resp_code" | PASS |
 
 ## Storage Layer Tests
 
@@ -421,6 +436,33 @@ were never actually run despite being listed here. The test module runs with
 | test_tsval_disabled_in_remote_server | "tsval disabled in remote server" | PASS |
 | test_tsval_disabled_in_local_client | "tsval disabled in local client" | PASS |
 | test_established_rfc2018_cases | "established rfc2018 cases" | PASS |
+| (original) | "localEndpoint and remoteEndpoint" | PASS |
+| (original) | "setTimeout and setKeepAlive" | PASS |
+| (original) | "setAckDelay" | PASS |
+| (original) | "setNagleEnabled" | PASS |
+| (original) | "sendQueue and recvQueue" | PASS |
+| (original) | "sendCapacity and recvCapacity" | PASS |
+| (original) | "setHopLimit validation" | PASS |
+| (original) | "NoControl window is maxInt" | PASS |
+| (original) | "Reno slow start doubles cwnd" | PASS |
+| (original) | "Reno congestion avoidance linear growth" | PASS |
+| (original) | "Reno onRetransmit halves cwnd" | PASS |
+| (original) | "Reno onDuplicateAck sets ssthresh" | PASS |
+| (original) | "Reno cwnd capped by rwnd" | PASS |
+| (original) | "Reno setMss updates min_cwnd" | PASS |
+| (original) | "Cubic cubeRoot correctness" | PASS |
+| (original) | "Cubic onRetransmit records w_max and halves ssthresh" | PASS |
+| (original) | "Cubic slow start grows like Reno" | PASS |
+| (original) | "Cubic preTransmit sets recovery_start on first call" | PASS |
+| (original) | "CongestionController dispatch to Reno variant" | PASS |
+| test_set_get_congestion_control | "setCongestionControl and congestionControl roundtrip" | PASS |
+| (original) | "Reno cwnd limits send window in established" | PASS |
+| (original) | "Reno onAck grows cwnd via process" | PASS |
+| (original) | "Reno onRetransmit via dispatch retransmit path" | PASS |
+| (original) | "congestion controller survives socket reset" | PASS |
+| (original) | "closure send enqueues data and dispatches" | PASS |
+| (original) | "closure recv consumes data from rx buffer" | PASS |
+| (original) | "closure send returns zero when tx buffer full" | PASS |
 
 ### socket/udp.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -453,6 +495,21 @@ were never actually run despite being listed here. The test module runs with
 | socket/icmp.rs:test_accept_bad_id | "rejects packet with wrong identifier" | PASS |
 | socket/icmp.rs:test_accepts_udp | "accepts ICMP error for bound UDP port" | PASS |
 | (original) | "pollAt returns ZERO when tx queued, null when empty" | PASS |
+
+### socket/raw.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| socket/raw.rs:test_send_truncated | "raw send truncation" | PASS |
+| socket/raw.rs:test_send_dispatch | "raw send dispatch roundtrip" | PASS |
+| socket/raw.rs:test_recv_process | "raw recv process roundtrip" | PASS |
+| socket/raw.rs:test_peek | "raw peek returns data without consuming" | PASS |
+| socket/raw.rs:test_recv_truncated | "raw recv truncated" | PASS |
+| (original) | "raw accepts filters by protocol" | PASS |
+| (original) | "raw unbound socket rejects all" | PASS |
+| (original) | "raw close resets state" | PASS |
+| (original) | "raw pollAt returns ZERO when tx pending" | PASS |
+| (original) | "raw setHopLimit validation" | PASS |
+| (original) | "raw process truncates oversized payload" | PASS |
 
 ### socket/dhcp.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -519,6 +576,19 @@ were never actually run despite being listed here. The test module runs with
 | iface/neighbor.rs:test_hush (adapted) | "neighbor cache lookupFull rate limited" | PASS |
 | (original) | "neighbor cache rate limit expires" | PASS |
 
+### iface/route -- Routing table unit tests
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| iface/route.rs:test_fill (adapted) | "route lookup empty table" | PASS |
+| iface/route.rs:test_fill (adapted) | "route lookup match and no match" | PASS |
+| (original) | "route lookup longest prefix match" | PASS |
+| iface/route.rs:test_fill (adapted) | "route lookup expiry" | PASS |
+| (original) | "route default gateway" | PASS |
+| (original) | "interface route direct delivery vs gateway" | PASS |
+| (original) | "interface hasNeighbor with routing" | PASS |
+| (original) | "multicast group join leave has" | PASS |
+| (original) | "multicast group full capacity" | PASS |
+
 ## Stack Layer Tests
 
 ### stack.zig
@@ -559,6 +629,31 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "stack reassembles two-fragment ICMP echo" | PASS |
 | (original) | "stack reassembles out-of-order UDP fragments" | PASS |
 | (original) | "stack non-fragmented packets bypass reassembly" | PASS |
+| (original) | "stack rejects IPv4 with broadcast source address" | PASS |
+| (original) | "stack rejects IPv4 with multicast source address" | PASS |
+| (original) | "stack neighbor cache refresh gated by same network" | PASS |
+| (original) | "stack egress routes via gateway for off-subnet destination" | PASS |
+| (original) | "stack raw socket receives IP payload" | PASS |
+| (original) | "stack raw socket suppresses ICMP proto unreachable" | PASS |
+| (original) | "stack IGMP query triggers report for joined group" | PASS |
+| (original) | "stack multicast destination accepted for joined group" | PASS |
+| (original) | "TCP checksum offload skips computation" | PASS |
+| (original) | "burst size limits frames per poll cycle" | PASS |
+| (original) | "DeviceCapabilities defaults enable all checksums" | PASS |
+| (original) | "ChecksumMode shouldVerifyRx and shouldComputeTx" | PASS |
+
+### phy.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| (original) | "Tracer forwards receive and transmit" | PASS |
+| (original) | "Tracer returns null when inner has no frames" | PASS |
+| (original) | "FaultInjector drops rx frames at configured rate" | PASS |
+| (original) | "FaultInjector passes rx frames when rng above threshold" | PASS |
+| (original) | "FaultInjector drops tx frames at configured rate" | PASS |
+| (original) | "FaultInjector corrupts rx frame" | PASS |
+| (original) | "FaultInjector corrupts tx frame" | PASS |
+| (original) | "FaultInjector zero config passes everything through" | PASS |
+| (original) | "Tracer and FaultInjector compose" | PASS |
 
 ### fragmentation.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -596,23 +691,32 @@ language differences, API design choices, or out-of-scope features.
 |---|---|
 | test_fuzz_* | Fuzz-only test; not a deterministic conformance test |
 
-### socket/tcp.zig (~4 N/A)
+### socket/tcp.zig (~3 N/A)
 
 | smoltcp Test | Reason |
 |---|---|
 | test_syn_paused_ack | pause_synack API not in zmoltcp |
-| test_set_get_congestion_control | No congestion control abstraction |
 | test_established_close_on_src_ip_change | No socket-level IP tracking |
 | test_connect_unspecified_local / test_connect_specified_local | API design: zmoltcp always takes explicit 4 params |
 
-### iface.zig (7 N/A)
+### iface.zig (1 N/A)
 
 | smoltcp Test | Reason |
 |---|---|
 | test_new_panic | Alloc-dependent behavior (zmoltcp is zero-alloc) |
-| test_handle_igmp | IGMP/multicast not implemented |
-| test_raw_socket_no_reply_udp | Raw sockets not implemented |
-| test_raw_socket_no_reply_tcp | Raw sockets not implemented |
-| test_raw_socket_with_udp_socket | Raw sockets not implemented |
-| test_raw_socket_tx_fragmentation | Raw sockets not implemented |
-| test_raw_socket_rx_fragmentation | Raw sockets not implemented |
+
+### Out-of-scope protocol families
+
+The following smoltcp modules are IPv6-only or 802.15.4 link layers, which
+are outside zmoltcp's IPv4/Ethernet scope:
+
+| smoltcp Module | Reason |
+|---|---|
+| wire/ipv6.rs, wire/icmpv6.rs | IPv6 not in scope |
+| wire/ipv6hbh.rs, wire/ipv6hopbyhop.rs | IPv6 extension headers |
+| wire/ipv6routing.rs, wire/ipv6fragment.rs | IPv6 extension headers |
+| wire/ndiscover.rs, wire/mld.rs | IPv6 neighbor discovery / multicast |
+| wire/sixlowpan.rs, wire/ieee802154.rs | 802.15.4 / 6LoWPAN link layer |
+| wire/rpl.rs | RPL routing (6LoWPAN) |
+| iface/interface/sixlowpan.rs | 6LoWPAN interface |
+| socket/tcp/congestion/no_control.rs | Split files in smoltcp; unified in zmoltcp |

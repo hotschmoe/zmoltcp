@@ -10,6 +10,7 @@ const std = @import("std");
 const ipv4 = @import("../wire/ipv4.zig");
 const ring_buffer_mod = @import("../storage/ring_buffer.zig");
 const time = @import("../time.zig");
+const iface_mod = @import("../iface.zig");
 
 const Instant = time.Instant;
 
@@ -95,6 +96,7 @@ pub fn Socket(comptime config: Config) type {
             dst_addr: ipv4.Address,
             hop_limit: ?u8,
             payload: []const u8,
+            meta: iface_mod.PacketMeta = .{},
         };
 
         // -- Init / lifecycle --

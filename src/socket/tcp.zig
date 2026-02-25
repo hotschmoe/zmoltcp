@@ -11,6 +11,7 @@ const wire_tcp = @import("../wire/tcp.zig");
 const ipv4 = @import("../wire/ipv4.zig");
 const assembler_mod = @import("../storage/assembler.zig");
 const ring_buffer_mod = @import("../storage/ring_buffer.zig");
+const iface_mod = @import("../iface.zig");
 
 const Instant = time.Instant;
 const Duration = time.Duration;
@@ -376,6 +377,238 @@ const AckDelayTimer = union(enum) {
 };
 
 // -------------------------------------------------------------------------
+// Congestion Control
+// -------------------------------------------------------------------------
+
+pub const NoControl = struct {
+    pub fn window(_: NoControl) usize {
+        return std.math.maxInt(usize);
+    }
+    pub fn onAck(_: *NoControl, _: Instant, _: usize, _: *const RttEstimator) void {}
+    pub fn onRetransmit(_: *NoControl, _: Instant) void {}
+    pub fn onDuplicateAck(_: *NoControl, _: Instant) void {}
+    pub fn preTransmit(_: *NoControl, _: Instant) void {}
+    pub fn postTransmit(_: *NoControl, _: Instant, _: usize) void {}
+    pub fn setMss(_: *NoControl, _: usize) void {}
+    pub fn setRemoteWindow(_: *NoControl, _: usize) void {}
+};
+
+pub const Reno = struct {
+    cwnd: usize = 2048,
+    min_cwnd: usize = 2048,
+    ssthresh: usize = std.math.maxInt(usize),
+    rwnd: usize = 64 * 1024,
+
+    pub fn window(self: Reno) usize {
+        return self.cwnd;
+    }
+
+    pub fn onAck(self: *Reno, _: Instant, len: usize, _: *const RttEstimator) void {
+        const inc = if (self.cwnd < self.ssthresh) len else blk: {
+            self.ssthresh = self.cwnd;
+            break :blk self.min_cwnd;
+        };
+        self.cwnd = @min(
+            @max(std.math.add(usize, self.cwnd, inc) catch std.math.maxInt(usize), self.min_cwnd),
+            self.rwnd,
+        );
+    }
+
+    pub fn onRetransmit(self: *Reno, _: Instant) void {
+        self.cwnd = @max(self.cwnd >> 1, self.min_cwnd);
+    }
+
+    pub fn onDuplicateAck(self: *Reno, _: Instant) void {
+        self.ssthresh = @max(self.cwnd >> 1, self.min_cwnd);
+    }
+
+    pub fn preTransmit(_: *Reno, _: Instant) void {}
+    pub fn postTransmit(_: *Reno, _: Instant, _: usize) void {}
+
+    pub fn setMss(self: *Reno, mss: usize) void {
+        self.min_cwnd = mss;
+    }
+
+    pub fn setRemoteWindow(self: *Reno, remote_window: usize) void {
+        if (self.rwnd < remote_window) self.rwnd = remote_window;
+    }
+};
+
+pub const Cubic = struct {
+    const BETA: f64 = 0.7;
+    const C_CONST: f64 = 0.4;
+
+    cwnd: usize = 2048,
+    min_cwnd: usize = 2048,
+    w_max: usize = 2048,
+    recovery_start: ?Instant = null,
+    rwnd: usize = 64 * 1024,
+    last_update: Instant = Instant.ZERO,
+    ssthresh: usize = std.math.maxInt(usize),
+
+    fn cubeRoot(a: f64) ?f64 {
+        if (a <= 0.0) return null;
+        const Range = struct { tol: f64, x0: f64 };
+        const range: Range = if (a < 1e3)
+            .{ .tol = 1.0, .x0 = 8.879 }
+        else if (a < 1e6)
+            .{ .tol = 5.0, .x0 = 88.79 }
+        else if (a < 1e9)
+            .{ .tol = 50.0, .x0 = 887.9 }
+        else if (a < 1e12)
+            .{ .tol = 500.0, .x0 = 8879.0 }
+        else if (a < 1e15)
+            .{ .tol = 5000.0, .x0 = 88790.0 }
+        else
+            .{ .tol = 50000.0, .x0 = 887904.0 };
+
+        var x = range.x0;
+        var i: usize = 0;
+        while (i < 20) : (i += 1) {
+            const x2 = x * x;
+            const x3 = x2 * x;
+            const diff = x3 - a;
+            const abs_diff = if (diff >= 0) diff else -diff;
+            if (abs_diff < range.tol) break;
+            x = x - (x3 - a) / (3.0 * x2);
+        }
+        return x;
+    }
+
+    pub fn window(self: Cubic) usize {
+        return self.cwnd;
+    }
+
+    pub fn onAck(self: *Cubic, _: Instant, len: usize, _: *const RttEstimator) void {
+        if (self.cwnd < self.ssthresh) {
+            self.cwnd = @min(
+                @max(std.math.add(usize, self.cwnd, len) catch std.math.maxInt(usize), self.min_cwnd),
+                self.rwnd,
+            );
+        }
+    }
+
+    pub fn onRetransmit(self: *Cubic, now: Instant) void {
+        self.w_max = self.cwnd;
+        self.ssthresh = self.cwnd >> 1;
+        self.recovery_start = now;
+    }
+
+    pub fn onDuplicateAck(self: *Cubic, now: Instant) void {
+        self.w_max = self.cwnd;
+        self.ssthresh = self.cwnd >> 1;
+        self.recovery_start = now;
+    }
+
+    pub fn preTransmit(self: *Cubic, now: Instant) void {
+        const recovery = self.recovery_start orelse {
+            self.recovery_start = now;
+            return;
+        };
+
+        const now_ms = now.totalMillis();
+        const recovery_ms = recovery.totalMillis();
+        const last_ms = self.last_update.totalMillis();
+
+        if (last_ms > recovery_ms and now_ms - last_ms < 100) return;
+
+        const t_ms = now_ms - recovery_ms;
+        if (t_ms < 0) return;
+
+        const k3 = @as(f64, @floatFromInt(self.w_max)) * (1.0 - BETA) / C_CONST;
+        const k = cubeRoot(k3) orelse return;
+
+        const t_sec = @as(f64, @floatFromInt(t_ms)) / 1000.0;
+        const s = t_sec - k;
+        const w_cubic = C_CONST * s * s * s + @as(f64, @floatFromInt(self.w_max));
+
+        self.last_update = now;
+        const w_int: usize = if (w_cubic < 0) 0 else if (w_cubic > @as(f64, @floatFromInt(std.math.maxInt(usize)))) std.math.maxInt(usize) else @intFromFloat(w_cubic);
+        self.cwnd = @min(@max(w_int, self.min_cwnd), self.rwnd);
+    }
+
+    pub fn postTransmit(_: *Cubic, _: Instant, _: usize) void {}
+
+    pub fn setMss(self: *Cubic, mss: usize) void {
+        self.min_cwnd = mss;
+    }
+
+    pub fn setRemoteWindow(self: *Cubic, remote_window: usize) void {
+        if (self.rwnd < remote_window) self.rwnd = remote_window;
+    }
+};
+
+pub const CongestionController = union(enum) {
+    none: NoControl,
+    reno: Reno,
+    cubic: Cubic,
+
+    pub fn window(self: CongestionController) usize {
+        return switch (self) {
+            .none => |c| c.window(),
+            .reno => |c| c.window(),
+            .cubic => |c| c.window(),
+        };
+    }
+
+    pub fn onAck(self: *CongestionController, now: Instant, len: usize, rtte: *const RttEstimator) void {
+        switch (self.*) {
+            .none => |*c| c.onAck(now, len, rtte),
+            .reno => |*c| c.onAck(now, len, rtte),
+            .cubic => |*c| c.onAck(now, len, rtte),
+        }
+    }
+
+    pub fn onRetransmit(self: *CongestionController, now: Instant) void {
+        switch (self.*) {
+            .none => |*c| c.onRetransmit(now),
+            .reno => |*c| c.onRetransmit(now),
+            .cubic => |*c| c.onRetransmit(now),
+        }
+    }
+
+    pub fn onDuplicateAck(self: *CongestionController, now: Instant) void {
+        switch (self.*) {
+            .none => |*c| c.onDuplicateAck(now),
+            .reno => |*c| c.onDuplicateAck(now),
+            .cubic => |*c| c.onDuplicateAck(now),
+        }
+    }
+
+    pub fn preTransmit(self: *CongestionController, now: Instant) void {
+        switch (self.*) {
+            .none => |*c| c.preTransmit(now),
+            .reno => |*c| c.preTransmit(now),
+            .cubic => |*c| c.preTransmit(now),
+        }
+    }
+
+    pub fn postTransmit(self: *CongestionController, now: Instant, len: usize) void {
+        switch (self.*) {
+            .none => |*c| c.postTransmit(now, len),
+            .reno => |*c| c.postTransmit(now, len),
+            .cubic => |*c| c.postTransmit(now, len),
+        }
+    }
+
+    pub fn setMss(self: *CongestionController, mss: usize) void {
+        switch (self.*) {
+            .none => |*c| c.setMss(mss),
+            .reno => |*c| c.setMss(mss),
+            .cubic => |*c| c.setMss(mss),
+        }
+    }
+
+    pub fn setRemoteWindow(self: *CongestionController, remote_window: usize) void {
+        switch (self.*) {
+            .none => |*c| c.setRemoteWindow(remote_window),
+            .reno => |*c| c.setRemoteWindow(remote_window),
+            .cubic => |*c| c.setRemoteWindow(remote_window),
+        }
+    }
+};
+
+// -------------------------------------------------------------------------
 // Socket
 // -------------------------------------------------------------------------
 
@@ -424,6 +657,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
         challenge_ack_timer: Instant,
 
         nagle: bool,
+        congestion_controller: CongestionController,
 
         fn windowShiftFor(rx_cap: usize) u8 {
             const rx_cap_log2 = if (rx_cap == 0) 0 else @as(usize, @sizeOf(usize) * 8) - @as(usize, @clz(@as(usize, rx_cap)));
@@ -464,6 +698,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                 .ack_delay_timer = .idle,
                 .challenge_ack_timer = Instant.fromSecs(0),
                 .nagle = true,
+                .congestion_controller = .{ .none = .{} },
             };
         }
 
@@ -531,6 +766,74 @@ pub fn Socket(comptime max_asm_segs: usize) type {
 
         pub fn canRecv(self: Self) bool {
             return !self.rx_buffer.isEmpty();
+        }
+
+        // -- Endpoint accessors --
+
+        pub fn localEndpoint(self: Self) ?Endpoint {
+            return if (self.tuple) |t| t.local else null;
+        }
+
+        pub fn remoteEndpoint(self: Self) ?Endpoint {
+            return if (self.tuple) |t| t.remote else null;
+        }
+
+        // -- Setters with validation --
+
+        pub fn setTimeout(self: *Self, duration: ?Duration) void {
+            self.timeout = duration;
+        }
+
+        pub fn setAckDelay(self: *Self, duration: ?Duration) void {
+            self.ack_delay = duration;
+        }
+
+        pub fn setNagleEnabled(self: *Self, enabled: bool) void {
+            self.nagle = enabled;
+        }
+
+        pub fn setKeepAlive(self: *Self, interval: ?Duration) void {
+            self.keep_alive = interval;
+            if (interval != null) {
+                self.timer.setKeepAlive();
+            }
+        }
+
+        pub const SetHopLimitError = error{InvalidValue};
+
+        pub fn setHopLimit(self: *Self, hop_limit: ?u8) SetHopLimitError!void {
+            if (hop_limit) |h| {
+                if (h == 0) return error.InvalidValue;
+            }
+            self.hop_limit = hop_limit;
+        }
+
+        // -- Congestion control --
+
+        pub fn setCongestionControl(self: *Self, cc: CongestionController) void {
+            self.congestion_controller = cc;
+        }
+
+        pub fn congestionControl(self: Self) CongestionController {
+            return self.congestion_controller;
+        }
+
+        // -- Queue inspection --
+
+        pub fn sendQueue(self: Self) usize {
+            return self.tx_buffer.len();
+        }
+
+        pub fn recvQueue(self: Self) usize {
+            return self.rx_buffer.len();
+        }
+
+        pub fn sendCapacity(self: Self) usize {
+            return self.tx_buffer.capacity();
+        }
+
+        pub fn recvCapacity(self: Self) usize {
+            return self.rx_buffer.capacity();
         }
 
         fn scaledWindow(self: Self) u16 {
@@ -659,6 +962,48 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                 return error.InvalidState;
             }
             return self.rx_buffer.getAllocated(0, max);
+        }
+
+        /// Zero-copy send: calls `f` with writable buffer, returns bytes enqueued.
+        pub fn send(self: *Self, ctx: anytype, f: *const fn (@TypeOf(ctx), []u8) usize) SendError!usize {
+            if (!self.maySend()) return error.InvalidState;
+
+            const window = self.tx_buffer.window();
+            if (window == 0) return 0;
+
+            const old_length = self.tx_buffer.len();
+            const buf = self.tx_buffer.getUnallocated(0, window);
+            const written = f(ctx, buf);
+            if (written > 0) {
+                self.tx_buffer.enqueueUnallocated(written);
+                if (old_length == 0) {
+                    self.remote_last_ts = null;
+                }
+                if (self.remote_win_len == 0 and self.timer.isIdle()) {
+                    const delay = self.rtte.retransmissionTimeout();
+                    self.timer.setForZeroWindowProbe(Instant.ZERO, delay);
+                }
+            }
+            return written;
+        }
+
+        /// Zero-copy recv: calls `f` with readable buffer, returns bytes consumed.
+        pub fn recv(self: *Self, ctx: anytype, f: *const fn (@TypeOf(ctx), []const u8) usize) RecvError!usize {
+            if (!self.mayRecv()) {
+                if (self.rx_fin_received) return error.Finished;
+                return error.InvalidState;
+            }
+
+            const available = self.rx_buffer.len();
+            if (available == 0) return 0;
+
+            const buf = self.rx_buffer.getAllocated(0, available);
+            const consumed = f(ctx, buf);
+            if (consumed > 0) {
+                self.rx_buffer.dequeueAllocated(consumed);
+                self.remote_seq_no = self.remote_seq_no.add(consumed);
+            }
+            return consumed;
         }
 
         // -- Packet processing --
@@ -854,6 +1199,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                         if (repr.max_seg_size) |mss| {
                             if (mss == 0) return null;
                             self.remote_mss = mss;
+                            self.congestion_controller.setMss(mss);
                         }
                         self.tuple = .{
                             .local = .{ .addr = dst_addr, .port = repr.dst_port },
@@ -900,6 +1246,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                         if (repr.max_seg_size) |mss| {
                             if (mss == 0) return null;
                             self.remote_mss = mss;
+                            self.congestion_controller.setMss(mss);
                         }
                         self.remote_seq_no = repr.seq_number.add(1);
                         self.remote_last_seq = self.local_seq_no.add(1);
@@ -1015,10 +1362,12 @@ pub fn Socket(comptime max_asm_segs: usize) type {
             const new_remote_win_len = @as(usize, repr.window_len) << @intCast(scale);
             const is_window_update = new_remote_win_len != self.remote_win_len;
             self.remote_win_len = new_remote_win_len;
+            self.congestion_controller.setRemoteWindow(new_remote_win_len);
 
             if (ack_len > 0) {
                 std.debug.assert(self.tx_buffer.len() >= ack_len);
                 self.tx_buffer.dequeueAllocated(ack_len);
+                self.congestion_controller.onAck(timestamp, ack_len, &self.rtte);
             }
 
             if (repr.ack_number) |ack_number| {
@@ -1032,6 +1381,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                         self.local_rx_dup_acks +|= 1;
                         if (self.local_rx_dup_acks == 3) {
                             self.timer.setForFastRetransmit();
+                            self.congestion_controller.onDuplicateAck(timestamp);
                         }
                     } else {
                         if (self.local_rx_dup_acks > 0) self.local_rx_dup_acks = 0;
@@ -1110,6 +1460,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
             src_addr: ipv4.Address,
             dst_addr: ipv4.Address,
             hop_limit: u8,
+            meta: iface_mod.PacketMeta = .{},
         };
 
         pub fn dispatch(self: *Self, timestamp: Instant) ?DispatchResult {
@@ -1119,6 +1470,8 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                 self.remote_last_ts = timestamp;
             }
 
+            self.congestion_controller.preTransmit(timestamp);
+
             // Timeout check.
             if (self.timedOut(timestamp)) {
                 self.state = .closed;
@@ -1126,6 +1479,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                 self.remote_last_seq = self.local_seq_no;
                 self.timer.setForIdle(timestamp, self.keep_alive);
                 self.rtte.onRetransmit();
+                self.congestion_controller.onRetransmit(timestamp);
             }
 
             // Decide whether to send.
@@ -1176,7 +1530,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                     }
                 },
                 .established, .fin_wait_1, .closing, .close_wait, .last_ack => {
-                    const win_right_edge = self.local_seq_no.add(self.remote_win_len);
+                    const win_right_edge = self.local_seq_no.add(@min(self.remote_win_len, self.congestion_controller.window()));
                     var win_limit: usize = if (win_right_edge.greaterThanOrEqual(self.remote_last_seq))
                         win_right_edge.diff(self.remote_last_seq)
                     else
@@ -1247,6 +1601,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
 
             if (repr.segmentLen() > 0) {
                 self.rtte.onSend(timestamp, repr.seq_number.add(repr.segmentLen()));
+                self.congestion_controller.postTransmit(timestamp, repr.segmentLen());
             }
 
             if (repr.segmentLen() > 0 and !self.timer.isRetransmit()) {
@@ -1322,7 +1677,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
                 return true;
             }
 
-            const max_send_seq_len = @min(self.remote_win_len, self.tx_buffer.len());
+            const max_send_seq_len = @min(self.remote_win_len, @min(self.tx_buffer.len(), self.congestion_controller.window()));
             const max_send_seq = self.local_seq_no.add(max_send_seq_len);
 
             const max_send: usize = if (max_send_seq.greaterThanOrEqual(self.remote_last_seq))
@@ -5944,7 +6299,7 @@ test "buffer wraparound tx" {
 // [smoltcp:socket/tcp.rs:test_set_hop_limit]
 test "set hop limit propagates to dispatch" {
     var s = socketSynReceived();
-    s.hop_limit = 0x2a;
+    try s.setHopLimit(0x2a);
 
     const result = s.dispatch(Instant.ZERO) orelse return error.ExpectedDispatch;
     try testing.expectEqual(@as(u8, 0x2a), result.hop_limit);
@@ -5957,8 +6312,10 @@ test "set hop limit propagates to dispatch" {
 // [smoltcp:socket/tcp.rs:test_set_hop_limit_zero]
 test "set hop limit zero rejected" {
     var s = socketSynReceived();
+    try testing.expectError(error.InvalidValue, s.setHopLimit(0));
+
     // null disables the override and uses DEFAULT_HOP_LIMIT (64)
-    s.hop_limit = null;
+    try s.setHopLimit(null);
     const result = s.dispatch(Instant.ZERO) orelse return error.ExpectedDispatch;
     try testing.expectEqual(@as(u8, 64), result.hop_limit);
 }
@@ -6460,4 +6817,350 @@ test "established rfc2018 cases" {
         try testing.expectEqual(REMOTE_SEQ.add(1).add(5500 + sack_offset).toU32(), sack.right);
         try testing.expect(reply.sack_ranges[1] == null);
     }
+}
+
+// =========================================================================
+// Public API tests
+// =========================================================================
+
+test "localEndpoint and remoteEndpoint" {
+    var s = socketEstablished();
+    const local = s.localEndpoint() orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(LOCAL_ADDR, local.addr);
+    try testing.expectEqual(LOCAL_PORT, local.port);
+
+    const remote = s.remoteEndpoint() orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(REMOTE_ADDR, remote.addr);
+    try testing.expectEqual(REMOTE_PORT, remote.port);
+
+    // In LISTEN state, no tuple is set.
+    var s2 = socketListen();
+    try testing.expectEqual(@as(?Endpoint, null), s2.localEndpoint());
+    try testing.expectEqual(@as(?Endpoint, null), s2.remoteEndpoint());
+}
+
+test "setTimeout and setKeepAlive" {
+    var s = socketEstablished();
+
+    s.setTimeout(Duration.fromSecs(30));
+    try testing.expectEqual(Duration.fromSecs(30), s.timeout.?);
+
+    s.setTimeout(null);
+    try testing.expectEqual(@as(?Duration, null), s.timeout);
+
+    s.setKeepAlive(Duration.fromSecs(10));
+    try testing.expectEqual(Duration.fromSecs(10), s.keep_alive.?);
+
+    // setKeepAlive arms the timer when idle.
+    switch (s.timer) {
+        .idle => |v| try testing.expect(v.keep_alive_at != null),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "setAckDelay" {
+    var s = socketNew();
+    try testing.expectEqual(@as(?Duration, null), s.ack_delay);
+
+    s.setAckDelay(Duration.fromMillis(20));
+    try testing.expectEqual(Duration.fromMillis(20), s.ack_delay.?);
+
+    s.setAckDelay(null);
+    try testing.expectEqual(@as(?Duration, null), s.ack_delay);
+}
+
+test "setNagleEnabled" {
+    var s = socketNew();
+    try testing.expect(s.nagle);
+
+    s.setNagleEnabled(false);
+    try testing.expect(!s.nagle);
+
+    s.setNagleEnabled(true);
+    try testing.expect(s.nagle);
+}
+
+test "sendQueue and recvQueue" {
+    var s = socketEstablished();
+    try testing.expectEqual(@as(usize, 0), s.sendQueue());
+    try testing.expectEqual(@as(usize, 0), s.recvQueue());
+
+    // Enqueue data for sending.
+    _ = try s.sendSlice("hello");
+    try testing.expectEqual(@as(usize, 5), s.sendQueue());
+
+    // Receive data into socket.
+    _ = sendPacketAt0(&s, TcpRepr{
+        .src_port = SEND_TEMPL.src_port,
+        .dst_port = SEND_TEMPL.dst_port,
+        .seq_number = REMOTE_SEQ.add(1),
+        .ack_number = LOCAL_SEQ.add(1),
+        .window_len = SEND_TEMPL.window_len,
+        .payload = "world",
+    });
+    try testing.expectEqual(@as(usize, 5), s.recvQueue());
+}
+
+test "sendCapacity and recvCapacity" {
+    var s = socketNew();
+    try testing.expectEqual(@as(usize, 64), s.sendCapacity());
+    try testing.expectEqual(@as(usize, 64), s.recvCapacity());
+}
+
+test "setHopLimit validation" {
+    var s = socketNew();
+    try testing.expectError(error.InvalidValue, s.setHopLimit(0));
+    try s.setHopLimit(1);
+    try testing.expectEqual(@as(?u8, 1), s.hop_limit);
+    try s.setHopLimit(255);
+    try testing.expectEqual(@as(?u8, 255), s.hop_limit);
+    try s.setHopLimit(null);
+    try testing.expectEqual(@as(?u8, null), s.hop_limit);
+}
+
+// -- Congestion Control: Unit Tests --
+
+const dummy_rtte = RttEstimator{};
+
+test "NoControl window is maxInt" {
+    var cc = CongestionController{ .none = .{} };
+    try testing.expectEqual(std.math.maxInt(usize), cc.window());
+    cc.onAck(Instant.ZERO, 1000, &dummy_rtte);
+    cc.onRetransmit(Instant.ZERO);
+    cc.onDuplicateAck(Instant.ZERO);
+    try testing.expectEqual(std.math.maxInt(usize), cc.window());
+}
+
+test "Reno slow start doubles cwnd" {
+    var reno = Reno{ .cwnd = 1460, .min_cwnd = 1460, .ssthresh = std.math.maxInt(usize) };
+    reno.onAck(Instant.ZERO, 1460, &dummy_rtte);
+    try testing.expectEqual(@as(usize, 2920), reno.cwnd);
+    reno.onAck(Instant.ZERO, 1460, &dummy_rtte);
+    try testing.expectEqual(@as(usize, 4380), reno.cwnd);
+}
+
+test "Reno congestion avoidance linear growth" {
+    var reno = Reno{ .cwnd = 4000, .min_cwnd = 1460, .ssthresh = 3000 };
+    reno.onAck(Instant.ZERO, 1460, &dummy_rtte);
+    // cwnd >= ssthresh, so ssthresh = cwnd (4000), add min_cwnd (1460)
+    try testing.expectEqual(@as(usize, 5460), reno.cwnd);
+}
+
+test "Reno onRetransmit halves cwnd" {
+    var reno = Reno{ .cwnd = 8000, .min_cwnd = 1460 };
+    reno.onRetransmit(Instant.ZERO);
+    try testing.expectEqual(@as(usize, 4000), reno.cwnd);
+    reno.onRetransmit(Instant.ZERO);
+    try testing.expectEqual(@as(usize, 2000), reno.cwnd);
+    reno.onRetransmit(Instant.ZERO);
+    try testing.expectEqual(@as(usize, 1460), reno.cwnd);
+}
+
+test "Reno onDuplicateAck sets ssthresh" {
+    var reno = Reno{ .cwnd = 8000, .min_cwnd = 1460, .ssthresh = std.math.maxInt(usize) };
+    reno.onDuplicateAck(Instant.ZERO);
+    try testing.expectEqual(@as(usize, 4000), reno.ssthresh);
+    try testing.expectEqual(@as(usize, 8000), reno.cwnd);
+}
+
+test "Reno cwnd capped by rwnd" {
+    var reno = Reno{ .cwnd = 3000, .min_cwnd = 1460, .ssthresh = std.math.maxInt(usize), .rwnd = 4000 };
+    reno.onAck(Instant.ZERO, 3000, &dummy_rtte);
+    try testing.expectEqual(@as(usize, 4000), reno.cwnd);
+}
+
+test "Reno setMss updates min_cwnd" {
+    var reno = Reno{};
+    reno.setMss(536);
+    try testing.expectEqual(@as(usize, 536), reno.min_cwnd);
+}
+
+test "Cubic cubeRoot correctness" {
+    const result = Cubic.cubeRoot(27.0) orelse unreachable;
+    try testing.expect(result > 2.9 and result < 3.1);
+
+    const result2 = Cubic.cubeRoot(1000.0) orelse unreachable;
+    try testing.expect(result2 > 9.9 and result2 < 10.1);
+
+    const result3 = Cubic.cubeRoot(1e6) orelse unreachable;
+    try testing.expect(result3 > 99.0 and result3 < 101.0);
+
+    try testing.expectEqual(@as(?f64, null), Cubic.cubeRoot(0.0));
+    try testing.expectEqual(@as(?f64, null), Cubic.cubeRoot(-1.0));
+}
+
+test "Cubic onRetransmit records w_max and halves ssthresh" {
+    var cubic = Cubic{ .cwnd = 10000, .min_cwnd = 1460 };
+    cubic.onRetransmit(Instant.fromMillis(100));
+    try testing.expectEqual(@as(usize, 10000), cubic.w_max);
+    try testing.expectEqual(@as(usize, 5000), cubic.ssthresh);
+    try testing.expect(cubic.recovery_start != null);
+}
+
+test "Cubic slow start grows like Reno" {
+    var cubic = Cubic{ .cwnd = 1460, .min_cwnd = 1460, .ssthresh = std.math.maxInt(usize) };
+    cubic.onAck(Instant.ZERO, 1460, &dummy_rtte);
+    try testing.expectEqual(@as(usize, 2920), cubic.cwnd);
+}
+
+test "Cubic preTransmit sets recovery_start on first call" {
+    var cubic = Cubic{};
+    try testing.expectEqual(@as(?Instant, null), cubic.recovery_start);
+    cubic.preTransmit(Instant.fromMillis(500));
+    try testing.expect(cubic.recovery_start != null);
+}
+
+test "CongestionController dispatch to Reno variant" {
+    var cc = CongestionController{ .reno = .{ .cwnd = 4000, .min_cwnd = 1460 } };
+    try testing.expectEqual(@as(usize, 4000), cc.window());
+    cc.onRetransmit(Instant.ZERO);
+    try testing.expectEqual(@as(usize, 2000), cc.window());
+}
+
+// -- Congestion Control: Socket Integration Tests --
+
+test "setCongestionControl and congestionControl roundtrip" {
+    var s = socketNew();
+    try testing.expect(s.congestionControl() == .none);
+    s.setCongestionControl(.{ .reno = .{} });
+    try testing.expect(s.congestionControl() == .reno);
+    s.setCongestionControl(.{ .cubic = .{} });
+    try testing.expect(s.congestionControl() == .cubic);
+}
+
+test "Reno cwnd limits send window in established" {
+    var s = socketEstablished();
+    s.setCongestionControl(.{ .reno = .{ .cwnd = 3, .min_cwnd = 1 } });
+    _ = s.sendSlice("abcdefghij") catch unreachable;
+    const repr = recvAt0(&s) orelse unreachable;
+    // Reno cwnd=3, so payload should be at most 3 bytes
+    try testing.expectEqual(@as(usize, 3), repr.payload.len);
+}
+
+test "Reno onAck grows cwnd via process" {
+    var s = socketEstablished();
+    s.setCongestionControl(.{ .reno = .{
+        .cwnd = 1460,
+        .min_cwnd = 1460,
+        .ssthresh = std.math.maxInt(usize),
+    } });
+    _ = s.sendSlice("hello") catch unreachable;
+    // Dispatch the data segment.
+    _ = recvAt0(&s);
+    // Send ACK back from remote, acknowledging data.
+    _ = sendPacketAt0(&s, .{
+        .src_port = SEND_TEMPL.src_port,
+        .dst_port = SEND_TEMPL.dst_port,
+        .seq_number = REMOTE_SEQ.add(1),
+        .ack_number = LOCAL_SEQ.add(1).add(5),
+        .window_len = 256,
+        .payload = &.{},
+    });
+    // cwnd should have grown (slow start: += ack_len=5)
+    const cwnd = switch (s.congestion_controller) {
+        .reno => |r| r.cwnd,
+        else => unreachable,
+    };
+    try testing.expectEqual(@as(usize, 1465), cwnd);
+}
+
+test "Reno onRetransmit via dispatch retransmit path" {
+    var s = socketEstablished();
+    s.setCongestionControl(.{ .reno = .{
+        .cwnd = 4000,
+        .min_cwnd = 1460,
+    } });
+    _ = s.sendSlice("data") catch unreachable;
+    _ = recvAt0(&s);
+    // Advance time past retransmit timeout to trigger retransmit.
+    const far_future = Instant.fromSecs(10);
+    s.remote_last_ts = Instant.ZERO;
+    s.timeout = null;
+    _ = recvPacket(&s, far_future);
+    const cwnd = switch (s.congestion_controller) {
+        .reno => |r| r.cwnd,
+        else => unreachable,
+    };
+    try testing.expectEqual(@as(usize, 2000), cwnd);
+}
+
+test "congestion controller survives socket reset" {
+    var s = socketNew();
+    s.setCongestionControl(.{ .reno = .{ .cwnd = 5000 } });
+    s.reset();
+    try testing.expect(s.congestionControl() == .reno);
+    try testing.expectEqual(@as(usize, 5000), switch (s.congestion_controller) {
+        .reno => |r| r.cwnd,
+        else => unreachable,
+    });
+}
+
+// -- Closure-based send/recv Tests --
+
+fn testSendCallback(_: *const u0, buf: []u8) usize {
+    const msg = "hello";
+    if (buf.len < msg.len) return 0;
+    @memcpy(buf[0..msg.len], msg);
+    return msg.len;
+}
+
+fn testRecvCallback(out: *[64]u8, buf: []const u8) usize {
+    const n = @min(buf.len, out.len);
+    @memcpy(out[0..n], buf[0..n]);
+    return n;
+}
+
+test "closure send enqueues data and dispatches" {
+    var s = socketEstablished();
+    const ctx: *const u0 = &0;
+    const written = try s.send(ctx, &testSendCallback);
+    try testing.expectEqual(@as(usize, 5), written);
+    try testing.expectEqual(@as(usize, 5), s.sendQueue());
+
+    const repr = recvAt0(&s) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualSlices(u8, "hello", repr.payload);
+}
+
+test "closure recv consumes data from rx buffer" {
+    var s = socketEstablished();
+    // Inject data via process (simulated incoming segment).
+    _ = sendPacketAt0(&s, .{
+        .src_port = SEND_TEMPL.src_port,
+        .dst_port = SEND_TEMPL.dst_port,
+        .seq_number = REMOTE_SEQ.add(1),
+        .ack_number = LOCAL_SEQ.add(1),
+        .window_len = 256,
+        .payload = "world",
+    });
+    try testing.expectEqual(@as(usize, 5), s.recvQueue());
+
+    var out: [64]u8 = undefined;
+    const consumed = try s.recv(&out, &testRecvCallback);
+    try testing.expectEqual(@as(usize, 5), consumed);
+    try testing.expectEqualSlices(u8, "world", out[0..5]);
+    try testing.expectEqual(@as(usize, 0), s.recvQueue());
+}
+
+test "closure send returns zero when tx buffer full" {
+    var s = socketWithBuffers(4, 4);
+    s.state = .established;
+    s.listen_endpoint = LISTEN_END;
+    s.tuple = .{
+        .local = .{ .addr = LOCAL_ADDR, .port = LOCAL_PORT },
+        .remote = .{ .addr = REMOTE_ADDR, .port = REMOTE_PORT },
+    };
+    s.local_seq_no = LOCAL_SEQ.add(1);
+    s.remote_last_seq = LOCAL_SEQ.add(1);
+    s.remote_last_ack = REMOTE_SEQ.add(1);
+    s.remote_last_win = s.scaledWindow();
+    s.remote_win_len = 256;
+    s.remote_seq_no = REMOTE_SEQ.add(1);
+
+    // Fill the 4-byte tx buffer.
+    _ = try s.sendSlice("abcd");
+    try testing.expectEqual(@as(usize, 0), s.tx_buffer.window());
+
+    const ctx: *const u0 = &0;
+    const written = try s.send(ctx, &testSendCallback);
+    try testing.expectEqual(@as(usize, 0), written);
 }

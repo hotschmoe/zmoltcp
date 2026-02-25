@@ -9,6 +9,7 @@ pub const MAX_HEADER_LEN = 60; // IHL=15 * 4
 
 pub const Protocol = enum(u8) {
     icmp = 1,
+    igmp = 2,
     tcp = 6,
     udp = 17,
     _,

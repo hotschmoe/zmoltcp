@@ -13,6 +13,7 @@ pub const wire = struct {
     pub const icmp = @import("wire/icmp.zig");
     pub const dhcp = @import("wire/dhcp.zig");
     pub const dns = @import("wire/dns.zig");
+    pub const igmp = @import("wire/igmp.zig");
 };
 
 pub const storage = struct {
@@ -28,11 +29,13 @@ pub const socket = struct {
     pub const icmp = @import("socket/icmp.zig");
     pub const dhcp = @import("socket/dhcp.zig");
     pub const dns = @import("socket/dns.zig");
+    pub const raw = @import("socket/raw.zig");
 };
 
 pub const iface = @import("iface.zig");
 pub const fragmentation = @import("fragmentation.zig");
 pub const stack = @import("stack.zig");
+pub const phy = @import("phy.zig");
 
 test {
     // refAllDecls ensures all declarations compile but does NOT discover
@@ -56,7 +59,10 @@ test {
     _ = @import("socket/tcp.zig");
     _ = @import("wire/dns.zig");
     _ = @import("socket/dns.zig");
+    _ = @import("socket/raw.zig");
+    _ = @import("wire/igmp.zig");
     _ = @import("iface.zig");
     _ = @import("fragmentation.zig");
     _ = @import("stack.zig");
+    _ = @import("phy.zig");
 }
