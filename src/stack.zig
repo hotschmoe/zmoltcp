@@ -112,10 +112,8 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
     const medium: iface_mod.Medium = if (@hasDecl(Device, "medium")) Device.medium else .ethernet;
     const is_ethernet = medium == .ethernet;
 
-    const IP_MTU = if (is_ethernet)
-        @as(usize, device_caps.max_transmission_unit) - ethernet.HEADER_LEN
-    else
-        @as(usize, device_caps.max_transmission_unit);
+    const LINK_HEADER_LEN: usize = if (is_ethernet) ethernet.HEADER_LEN else 0;
+    const IP_MTU: usize = device_caps.max_transmission_unit - LINK_HEADER_LEN;
 
     comptime {
         if (has_dhcp and !is_ethernet)
@@ -1050,6 +1048,9 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             payload_data: []const u8,
             device: *Device,
         ) EmitResult {
+            var buf: [MAX_FRAME_LEN]u8 = undefined;
+            var pos: usize = 0;
+
             if (comptime is_ethernet) {
                 const dst_mac = if (ipv6.isMulticast(dst_addr))
                     multicastMacV6(dst_addr)
@@ -1066,44 +1067,26 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     };
                 };
 
-                var buf: [MAX_FRAME_LEN]u8 = undefined;
-
-                const eth_len = ethernet.emit(.{
+                pos += ethernet.emit(.{
                     .dst_addr = dst_mac,
                     .src_addr = self.iface.hardware_addr,
                     .ethertype = .ipv6,
                 }, &buf) catch return .sent;
-
-                const ip_len = ipv6.emit(.{
-                    .payload_len = @intCast(payload_data.len),
-                    .next_header = next_header,
-                    .hop_limit = hop_limit,
-                    .src_addr = src_addr,
-                    .dst_addr = dst_addr,
-                }, buf[eth_len..]) catch return .sent;
-
-                const total = eth_len + ip_len + payload_data.len;
-                if (total > buf.len) return .sent;
-                @memcpy(buf[eth_len + ip_len ..][0..payload_data.len], payload_data);
-                device.transmit(buf[0..total]);
-                return .sent;
-            } else {
-                var buf: [MAX_FRAME_LEN]u8 = undefined;
-
-                const ip_len = ipv6.emit(.{
-                    .payload_len = @intCast(payload_data.len),
-                    .next_header = next_header,
-                    .hop_limit = hop_limit,
-                    .src_addr = src_addr,
-                    .dst_addr = dst_addr,
-                }, &buf) catch return .sent;
-
-                const total = ip_len + payload_data.len;
-                if (total > buf.len) return .sent;
-                @memcpy(buf[ip_len..][0..payload_data.len], payload_data);
-                device.transmit(buf[0..total]);
-                return .sent;
             }
+
+            const ip_len = ipv6.emit(.{
+                .payload_len = @intCast(payload_data.len),
+                .next_header = next_header,
+                .hop_limit = hop_limit,
+                .src_addr = src_addr,
+                .dst_addr = dst_addr,
+            }, buf[pos..]) catch return .sent;
+
+            const total = pos + ip_len + payload_data.len;
+            if (total > buf.len) return .sent;
+            @memcpy(buf[pos + ip_len ..][0..payload_data.len], payload_data);
+            device.transmit(buf[0..total]);
+            return .sent;
         }
 
         fn emitNdpSolicit(self: *Self, target_ip: ipv6.Address, device: *Device) void {
@@ -1516,6 +1499,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                 .dst_addr = resp.ip.dst_addr,
             };
 
+            var pos: usize = 0;
             if (comptime is_ethernet) {
                 const dst_mac = if (self.iface.isBroadcast(resp.ip.dst_addr) or ipv4.isBroadcast(resp.ip.dst_addr))
                     ethernet.BROADCAST
@@ -1524,21 +1508,16 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     break :blk self.iface.neighbor_cache.lookup(next_hop, self.iface.now) orelse return null;
                 };
 
-                const eth_repr = ethernet.Repr{
+                pos += ethernet.emit(.{
                     .dst_addr = dst_mac,
                     .src_addr = self.iface.hardware_addr,
                     .ethertype = .ipv4,
-                };
-
-                const eth_len = ethernet.emit(eth_repr, buf) catch return null;
-                const ip_len = ipv4.emit(ip_repr, buf[eth_len..]) catch return null;
-                @memcpy(buf[eth_len + ip_len ..][0..payload_len], payload_buf[0..payload_len]);
-                return buf[0 .. eth_len + ip_len + payload_len];
-            } else {
-                const ip_len = ipv4.emit(ip_repr, buf) catch return null;
-                @memcpy(buf[ip_len..][0..payload_len], payload_buf[0..payload_len]);
-                return buf[0 .. ip_len + payload_len];
+                }, buf) catch return null;
             }
+
+            const ip_len = ipv4.emit(ip_repr, buf[pos..]) catch return null;
+            @memcpy(buf[pos + ip_len ..][0..payload_len], payload_buf[0..payload_len]);
+            return buf[0 .. pos + ip_len + payload_len];
         }
 
         fn serializeIpv6Response(self: *const Self, resp: iface_mod.Ipv6Response, buf: []u8) ?[]const u8 {
@@ -1578,6 +1557,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                 ) orelse return null,
             };
 
+            var pos: usize = 0;
             if (comptime is_ethernet) {
                 const dst_mac = if (ipv6.isMulticast(resp.ip.dst_addr))
                     multicastMacV6(resp.ip.dst_addr)
@@ -1586,34 +1566,23 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     break :blk self.iface.neighbor_cache_v6.lookup(next_hop, self.iface.now) orelse return null;
                 };
 
-                const eth_len = ethernet.emit(.{
+                pos += ethernet.emit(.{
                     .dst_addr = dst_mac,
                     .src_addr = self.iface.hardware_addr,
                     .ethertype = .ipv6,
                 }, buf) catch return null;
-
-                const ip_len = ipv6.emit(.{
-                    .payload_len = @intCast(payload_len),
-                    .next_header = resp.ip.protocol,
-                    .hop_limit = resp.ip.hop_limit,
-                    .src_addr = resp.ip.src_addr,
-                    .dst_addr = resp.ip.dst_addr,
-                }, buf[eth_len..]) catch return null;
-
-                @memcpy(buf[eth_len + ip_len ..][0..payload_len], payload_buf[0..payload_len]);
-                return buf[0 .. eth_len + ip_len + payload_len];
-            } else {
-                const ip_len = ipv6.emit(.{
-                    .payload_len = @intCast(payload_len),
-                    .next_header = resp.ip.protocol,
-                    .hop_limit = resp.ip.hop_limit,
-                    .src_addr = resp.ip.src_addr,
-                    .dst_addr = resp.ip.dst_addr,
-                }, buf) catch return null;
-
-                @memcpy(buf[ip_len..][0..payload_len], payload_buf[0..payload_len]);
-                return buf[0 .. ip_len + payload_len];
             }
+
+            const ip_len = ipv6.emit(.{
+                .payload_len = @intCast(payload_len),
+                .next_header = resp.ip.protocol,
+                .hop_limit = resp.ip.hop_limit,
+                .src_addr = resp.ip.src_addr,
+                .dst_addr = resp.ip.dst_addr,
+            }, buf[pos..]) catch return null;
+
+            @memcpy(buf[pos + ip_len ..][0..payload_len], payload_buf[0..payload_len]);
+            return buf[0 .. pos + ip_len + payload_len];
         }
 
         fn serializeTcpV6(
@@ -5451,23 +5420,23 @@ test "stack v6 extension header chain walking" {
 // Medium::Ip tests -- raw IP device (no Ethernet framing)
 // -------------------------------------------------------------------------
 
-const TestIpDevice = struct {
-    pub const medium: iface_mod.Medium = .ip;
-    inner: LoopbackDevice(8) = .{},
+fn IpLoopbackDevice(comptime max_frames: usize, comptime caps: ?iface_mod.DeviceCapabilities) type {
+    return struct {
+        const Self = @This();
+        pub const medium: iface_mod.Medium = .ip;
+        inner: LoopbackDevice(max_frames) = .{},
 
-    pub fn receive(self: *@This()) ?[]const u8 {
-        return self.inner.receive();
-    }
-    pub fn transmit(self: *@This(), frame: []const u8) void {
-        self.inner.transmit(frame);
-    }
-    pub fn enqueueRx(self: *@This(), frame: []const u8) void {
-        self.inner.enqueueRx(frame);
-    }
-    pub fn dequeueTx(self: *@This()) ?[]const u8 {
-        return self.inner.dequeueTx();
-    }
-};
+        pub fn capabilities() iface_mod.DeviceCapabilities {
+            return caps orelse .{};
+        }
+        pub fn receive(self: *Self) ?[]const u8 { return self.inner.receive(); }
+        pub fn transmit(self: *Self, frame: []const u8) void { self.inner.transmit(frame); }
+        pub fn enqueueRx(self: *Self, frame: []const u8) void { self.inner.enqueueRx(frame); }
+        pub fn dequeueTx(self: *Self) ?[]const u8 { return self.inner.dequeueTx(); }
+    };
+}
+
+const TestIpDevice = IpLoopbackDevice(8, null);
 
 const TestIpStack = Stack(TestIpDevice, void);
 
@@ -5536,9 +5505,7 @@ test "Medium::Ip IPv4 ingress echo reply" {
     const processed = stack.poll(Instant.ZERO, &device);
     try testing.expect(processed);
 
-    // Reply should be raw IP (no Ethernet header)
     const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
-    // First byte: IP version nibble (0x45 = IPv4, IHL=5)
     try testing.expectEqual(@as(u8, 0x45), tx_frame[0]);
     const ip_repr = try ipv4.parse(tx_frame);
     try testing.expectEqual(LOCAL_IP, ip_repr.src_addr);
@@ -5576,7 +5543,6 @@ test "Medium::Ip IPv6 ingress echo reply" {
     const processed = stack.poll(Instant.ZERO, &device);
     try testing.expect(processed);
 
-    // Reply should be raw IPv6 (version nibble 0x60)
     const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
     try testing.expectEqual(@as(u8, 0x60), tx_frame[0] & 0xF0);
     const ip_repr = try ipv6.parse(tx_frame);
@@ -5589,7 +5555,6 @@ test "Medium::Ip IPv4 no ARP emitted" {
     var device = TestIpDevice{};
     var stack = testIpStack();
 
-    // Build ICMP echo to trigger a response -- no ARP needed for IP medium
     const echo_data = [_]u8{0x42};
     var icmp_buf: [icmp.HEADER_LEN + 1]u8 = undefined;
     _ = icmp.emitEcho(.{
@@ -5605,13 +5570,12 @@ test "Medium::Ip IPv4 no ARP emitted" {
     device.enqueueRx(frame);
     _ = stack.poll(Instant.ZERO, &device);
 
-    // Should get ICMP reply directly (no ARP request)
     const tx1 = device.dequeueTx() orelse return error.ExpectedTxFrame;
     try testing.expectEqual(@as(u8, 0x45), tx1[0]);
     const reply_ip = try ipv4.parse(tx1);
     try testing.expectEqual(ipv4.Protocol.icmp, reply_ip.protocol);
 
-    // No second frame (no ARP)
+    // No ARP solicitation emitted
     try testing.expectEqual(@as(?[]const u8, null), device.dequeueTx());
 }
 
@@ -5633,11 +5597,10 @@ test "Medium::Ip IPv6 no NDP emitted" {
     device.enqueueRx(frame);
     _ = stack.poll(Instant.ZERO, &device);
 
-    // Should get echo reply directly (no NDP solicit)
     const tx1 = device.dequeueTx() orelse return error.ExpectedTxFrame;
     try testing.expectEqual(@as(u8, 0x60), tx1[0] & 0xF0);
 
-    // No second frame (no NDP)
+    // No NDP solicitation emitted
     try testing.expectEqual(@as(?[]const u8, null), device.dequeueTx());
 }
 
@@ -5660,7 +5623,6 @@ test "Medium::Ip IPv4 UDP port unreachable" {
     device.enqueueRx(frame);
     _ = stack.poll(Instant.ZERO, &device);
 
-    // Should get ICMP dest unreachable as raw IP
     const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
     try testing.expectEqual(@as(u8, 0x45), tx_frame[0]);
     const ip_repr = try ipv4.parse(tx_frame);
@@ -5755,7 +5717,6 @@ test "Medium::Ip UDP socket roundtrip" {
     var stack = IpUdpStack.init(LOCAL_HW, .{ .udp4_sockets = &sock_arr });
     stack.iface.v4.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
 
-    // Build raw IP UDP frame
     const udp_payload = [_]u8{ 0x48, 0x65, 0x6c, 0x6c, 0x6f };
     var raw_udp: [udp_wire.HEADER_LEN + 5]u8 = undefined;
     _ = udp_wire.emit(.{
@@ -5771,13 +5732,11 @@ test "Medium::Ip UDP socket roundtrip" {
     device.enqueueRx(frame);
     _ = stack.poll(Instant.ZERO, &device);
 
-    // Socket received the data
     try testing.expect(sock.canRecv());
     var recv_buf: [64]u8 = undefined;
     const recv = try sock.recvSlice(&recv_buf);
     try testing.expectEqualSlices(u8, &udp_payload, recv_buf[0..recv.data_len]);
 
-    // No ICMP port unreachable emitted
     try testing.expectEqual(@as(?[]const u8, null), device.dequeueTx());
 }
 
@@ -5802,7 +5761,6 @@ test "Medium::Ip TCP socket SYN-ACK" {
     var stack = IpTcpStack.init(LOCAL_HW, .{ .tcp4_sockets = &sock_arr });
     stack.iface.v4.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
 
-    // Build raw IP TCP SYN
     var tcp_buf: [tcp_wire.HEADER_LEN]u8 = undefined;
     _ = tcp_wire.emit(.{
         .src_port = 4242,
@@ -5821,7 +5779,6 @@ test "Medium::Ip TCP socket SYN-ACK" {
     device.enqueueRx(frame);
     _ = stack.poll(Instant.ZERO, &device);
 
-    // Should get SYN-ACK as raw IP
     const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
     try testing.expectEqual(@as(u8, 0x45), tx_frame[0]);
     const ip_repr = try ipv4.parse(tx_frame);
@@ -5834,18 +5791,7 @@ test "Medium::Ip TCP socket SYN-ACK" {
     try testing.expectEqual(@as(u32, 101), tcp_repr.ack_number);
 }
 
-const TestIpSmallMtuDevice = struct {
-    pub const medium: iface_mod.Medium = .ip;
-    inner: LoopbackDevice(8) = .{},
-
-    pub fn capabilities() iface_mod.DeviceCapabilities {
-        return .{ .max_transmission_unit = 576 };
-    }
-    pub fn receive(self: *@This()) ?[]const u8 { return self.inner.receive(); }
-    pub fn transmit(self: *@This(), frame: []const u8) void { self.inner.transmit(frame); }
-    pub fn enqueueRx(self: *@This(), frame: []const u8) void { self.inner.enqueueRx(frame); }
-    pub fn dequeueTx(self: *@This()) ?[]const u8 { return self.inner.dequeueTx(); }
-};
+const TestIpSmallMtuDevice = IpLoopbackDevice(8, .{ .max_transmission_unit = 576 });
 
 test "Medium::Ip IPv4 fragmented egress" {
     const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 1024 });
@@ -5874,14 +5820,12 @@ test "Medium::Ip IPv4 fragmented egress" {
 
     _ = stack.poll(Instant.ZERO, &device);
 
-    // First fragment should be raw IP with MF=1
     const tx1 = device.dequeueTx() orelse return error.ExpectedTxFrame;
     try testing.expectEqual(@as(u8, 0x45), tx1[0]);
     const frag1 = try ipv4.parse(tx1);
     try testing.expect(frag1.more_fragments);
     try testing.expectEqual(@as(u16, 0), frag1.fragment_offset);
 
-    // Drain remaining fragments
     _ = stack.poll(Instant.ZERO, &device);
     const tx2 = device.dequeueTx() orelse return error.ExpectedTxFrame;
     try testing.expectEqual(@as(u8, 0x45), tx2[0]);

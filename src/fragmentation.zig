@@ -481,10 +481,8 @@ test "Fragmenter emit_ethernet=false raw IP output" {
     const max_frag = maxIpv4FragmentPayload(ipv4.HEADER_LEN, ip_mtu);
     var frame_buf: [1514]u8 = undefined;
 
-    // First fragment: raw IP (no Ethernet header)
     const len1 = f.emitNext(&frame_buf, hw, ip_mtu) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(ipv4.HEADER_LEN + max_frag, len1);
-    // First byte should be IP version nibble (0x45), not Ethernet
     try testing.expectEqual(@as(u8, 0x45), frame_buf[0]);
     try testing.expect(!f.finished());
 
