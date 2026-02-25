@@ -2,7 +2,7 @@
 
 Tracks zmoltcp tests against their smoltcp reference implementations.
 
-**Total: 521 tests passing** (520 named + 1 root import test)
+**Total: 526 tests passing** (525 named + 1 root import test)
 
 ## Summary
 
@@ -11,7 +11,8 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/checksum | 5 | 5 | 0 | 5 | PASS |
 | wire/ethernet | 5 | 5 | 0 | 5 | PASS |
 | wire/arp | 4 | 5 | 0 | 5 | PASS |
-| wire/ipv4 | 15 | 15 | 0 | 15 | PASS |
+| wire/ip | 0 | 4 | 0 | 4 | PASS |
+| wire/ipv4 | 15 | 16 | 0 | 16 | PASS |
 | wire/tcp | 9 | 22 | 0 | 22 | PASS |
 | wire/udp | 8 | 8 | 0 | 8 | PASS |
 | wire/icmp | 5 | 5 | 0 | 5 | PASS |
@@ -31,7 +32,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | phy | 0 | 9 | 0 | 9 | PASS |
 | fragmentation | 3 | 8 | 0 | 8 | PASS |
 | stack | 2 | 47 | 0 | 47 | PASS |
-| **Total** | | **520** | **8** | **520** | **PASS** |
+| **Total** | | **525** | **8** | **525** | **PASS** |
 
 ## Wire Layer Tests
 
@@ -62,6 +63,14 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/arp.rs:roundtrip | "ARP roundtrip" | PASS |
 | (original) | "emit ARP reply" | PASS |
 
+### wire/ip.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| (original) | "Cidr(ipv4) basic containment" | PASS |
+| (original) | "Cidr(ipv4) prefix_len 0 contains all" | PASS |
+| (original) | "Cidr(ipv4) broadcast and networkAddr" | PASS |
+| (original) | "Endpoint and ListenEndpoint basic usage" | PASS |
+
 ### wire/ipv4.zig
 | smoltcp Reference | zmoltcp Test | Status |
 |---|---|---|
@@ -80,6 +89,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/ipv4.rs:test_cidr | "IPv4 CIDR contains" | PASS |
 | wire/ipv4.rs:test_unspecified | "IPv4 address classification: unspecified" | PASS |
 | wire/ipv4.rs:test_broadcast | "IPv4 address classification: broadcast" | PASS |
+| (original) | "IPv4 formatAddr" | PASS |
 
 ### wire/tcp.zig
 | smoltcp Reference | zmoltcp Test | Status |

@@ -14,6 +14,8 @@ pub fn assertIsIp(comptime Ip: type) void {
         if (!@hasDecl(Ip, "isBroadcast")) @compileError("Ip must have isBroadcast()");
         if (!@hasDecl(Ip, "isMulticast")) @compileError("Ip must have isMulticast()");
         if (!@hasDecl(Ip, "isLoopback")) @compileError("Ip must have isLoopback()");
+        if (!@hasDecl(Ip, "isLinkLocal")) @compileError("Ip must have isLinkLocal()");
+        if (!@hasDecl(Ip, "formatAddr")) @compileError("Ip must have formatAddr()");
         if (!@hasDecl(Ip, "Protocol")) @compileError("Ip must have Protocol type");
     }
 }

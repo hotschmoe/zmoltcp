@@ -34,33 +34,27 @@ pub const GetQueryResultError = error{
     Failed,
 };
 
-pub fn Addresses(comptime Ip: type) type {
-    return struct {
-        addrs: [MAX_RESULT_COUNT]Ip.Address = undefined,
-        len: u8 = 0,
-
-        pub fn push(self: *@This(), addr: Ip.Address) void {
-            if (self.len < MAX_RESULT_COUNT) {
-                self.addrs[self.len] = addr;
-                self.len += 1;
-            }
-        }
-
-        pub fn get(self: *const @This(), i: usize) Ip.Address {
-            return self.addrs[i];
-        }
-    };
-}
-
 pub fn Socket(comptime Ip: type) type {
     comptime ip_generic.assertIsIp(Ip);
-
-    const Addrs = Addresses(Ip);
 
     return struct {
         const Self = @This();
 
-        pub const AddressResult = Addrs;
+        pub const Addresses = struct {
+            addrs: [MAX_RESULT_COUNT]Ip.Address = undefined,
+            len: u8 = 0,
+
+            pub fn push(self: *Addresses, addr: Ip.Address) void {
+                if (self.len < MAX_RESULT_COUNT) {
+                    self.addrs[self.len] = addr;
+                    self.len += 1;
+                }
+            }
+
+            pub fn get(self: *const Addresses, i: usize) Ip.Address {
+                return self.addrs[i];
+            }
+        };
 
         const PendingQuery = struct {
             name: [MAX_NAME_SIZE]u8 = undefined,
@@ -76,7 +70,7 @@ pub fn Socket(comptime Ip: type) type {
 
         const QueryState = union(enum) {
             pending: PendingQuery,
-            completed: Addrs,
+            completed: Addresses,
             failure,
         };
 
@@ -181,7 +175,7 @@ pub fn Socket(comptime Ip: type) type {
             return handle;
         }
 
-        pub fn getQueryResult(self: *Self, handle: QueryHandle) GetQueryResultError!Addrs {
+        pub fn getQueryResult(self: *Self, handle: QueryHandle) GetQueryResultError!Addresses {
             const slot = &self.queries[handle.index];
             const state = slot.state orelse unreachable;
             switch (state) {
@@ -239,7 +233,7 @@ pub fn Socket(comptime Ip: type) type {
                 const pq_name = wire.parseName(pq.name[0..pq.name_len], 0) catch return;
                 if (!wire.eqNames(q_name, pq_name)) return;
 
-                var addresses = Addrs{};
+                var addresses = Addresses{};
                 var rest = qr.rest;
                 for (0..answer_count) |_| {
                     const ar = wire.parseRecord(rest) catch return;

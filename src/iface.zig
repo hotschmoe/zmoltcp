@@ -211,12 +211,16 @@ pub const NeighborCache = struct {
     }
 };
 
-pub const IpMeta = struct {
-    src_addr: ipv4.Address,
-    dst_addr: ipv4.Address,
-    protocol: ipv4.Protocol,
-    hop_limit: u8,
-};
+pub fn IpMetaFor(comptime Ip: type) type {
+    return struct {
+        src_addr: Ip.Address,
+        dst_addr: Ip.Address,
+        protocol: Ip.Protocol,
+        hop_limit: u8,
+    };
+}
+
+pub const IpMeta = IpMetaFor(ipv4);
 
 pub const IpPayload = union(enum) {
     icmp_echo: struct {
@@ -241,12 +245,60 @@ pub const Response = union(enum) {
     ipv4: Ipv4Response,
 };
 
+pub fn IpState(comptime Ip: type) type {
+    const Cidr = ip_generic.Cidr(Ip);
+
+    return struct {
+        const Self = @This();
+
+        ip_addrs: [MAX_ADDR_COUNT]Cidr = undefined,
+        ip_addr_count: usize = 0,
+        routes: RoutesFor(Ip) = .{},
+
+        pub fn addIpAddr(self: *Self, cidr: Cidr) void {
+            if (self.ip_addr_count < MAX_ADDR_COUNT) {
+                self.ip_addrs[self.ip_addr_count] = cidr;
+                self.ip_addr_count += 1;
+            }
+        }
+
+        pub fn ipAddrs(self: *const Self) []const Cidr {
+            return self.ip_addrs[0..self.ip_addr_count];
+        }
+
+        pub fn hasIpAddr(self: *const Self, addr: Ip.Address) bool {
+            for (self.ipAddrs()) |cidr| {
+                if (std.mem.eql(u8, &cidr.address, &addr)) return true;
+            }
+            return false;
+        }
+
+        pub fn getSourceAddress(self: *const Self, dst: Ip.Address) ?Ip.Address {
+            if (self.ip_addr_count == 0) return null;
+            for (self.ipAddrs()) |cidr| {
+                if (cidr.contains(dst)) return cidr.address;
+            }
+            return self.ip_addrs[0].address;
+        }
+
+        pub fn inSameNetwork(self: *const Self, addr: Ip.Address) bool {
+            for (self.ipAddrs()) |cidr| {
+                if (cidr.contains(addr)) return true;
+            }
+            return false;
+        }
+
+        pub fn routeLookup(self: *const Self, dst: Ip.Address, now: time.Instant) ?Ip.Address {
+            if (self.inSameNetwork(dst)) return dst;
+            return self.routes.lookup(dst, now);
+        }
+    };
+}
+
 pub const Interface = struct {
     hardware_addr: ethernet.Address,
-    ip_addrs: [MAX_ADDR_COUNT]IpCidr = undefined,
-    ip_addr_count: usize = 0,
+    v4: IpState(ipv4) = .{},
     neighbor_cache: NeighborCache = .{},
-    routes: Routes = .{},
     now: time.Instant = time.Instant.ZERO,
     any_ip: bool = false,
     multicast_groups: [MAX_MULTICAST_GROUPS]?ipv4.Address = .{null} ** MAX_MULTICAST_GROUPS,
@@ -255,36 +307,18 @@ pub const Interface = struct {
         return .{ .hardware_addr = hw_addr };
     }
 
-    pub fn addIpAddr(self: *Interface, cidr: IpCidr) void {
-        if (self.ip_addr_count < MAX_ADDR_COUNT) {
-            self.ip_addrs[self.ip_addr_count] = cidr;
-            self.ip_addr_count += 1;
-        }
-    }
-
     pub fn setIpAddrs(self: *Interface, cidrs: []const IpCidr) void {
         const count = @min(cidrs.len, MAX_ADDR_COUNT);
         for (cidrs[0..count], 0..) |c, i| {
-            self.ip_addrs[i] = c;
+            self.v4.ip_addrs[i] = c;
         }
-        self.ip_addr_count = count;
+        self.v4.ip_addr_count = count;
         self.neighbor_cache.flush();
-    }
-
-    pub fn ipAddrs(self: *const Interface) []const IpCidr {
-        return self.ip_addrs[0..self.ip_addr_count];
-    }
-
-    pub fn hasIpAddr(self: *const Interface, addr: ipv4.Address) bool {
-        for (self.ipAddrs()) |cidr| {
-            if (std.mem.eql(u8, &cidr.address, &addr)) return true;
-        }
-        return false;
     }
 
     pub fn isBroadcast(self: *const Interface, addr: ipv4.Address) bool {
         if (ipv4.isBroadcast(addr)) return true;
-        for (self.ipAddrs()) |cidr| {
+        for (self.v4.ipAddrs()) |cidr| {
             if (cidr.broadcast()) |bcast| {
                 if (std.mem.eql(u8, &addr, &bcast)) return true;
             }
@@ -293,28 +327,13 @@ pub const Interface = struct {
     }
 
     pub fn ipv4Addr(self: *const Interface) ?ipv4.Address {
-        if (self.ip_addr_count == 0) return null;
-        return self.ip_addrs[0].address;
-    }
-
-    pub fn getSourceAddress(self: *const Interface, dst: ipv4.Address) ?ipv4.Address {
-        if (self.ip_addr_count == 0) return null;
-        for (self.ipAddrs()) |cidr| {
-            if (cidr.contains(dst)) return cidr.address;
-        }
-        return self.ip_addrs[0].address;
-    }
-
-    pub fn inSameNetwork(self: *const Interface, addr: ipv4.Address) bool {
-        for (self.ipAddrs()) |cidr| {
-            if (cidr.contains(addr)) return true;
-        }
-        return false;
+        if (self.v4.ip_addr_count == 0) return null;
+        return self.v4.ip_addrs[0].address;
     }
 
     pub fn route(self: *const Interface, dst: ipv4.Address) ?ipv4.Address {
-        if (self.inSameNetwork(dst) or self.isBroadcast(dst)) return dst;
-        return self.routes.lookup(dst, self.now);
+        if (self.isBroadcast(dst)) return dst;
+        return self.v4.routeLookup(dst, self.now);
     }
 
     pub fn hasNeighbor(self: *const Interface, dst: ipv4.Address) bool {
@@ -372,7 +391,7 @@ pub const Interface = struct {
 
     pub fn processArp(self: *Interface, data: []const u8) ?Response {
         const repr = arp.parse(data) catch return null;
-        if (!self.any_ip and !self.hasIpAddr(repr.target_protocol_addr)) return null;
+        if (!self.any_ip and !self.v4.hasIpAddr(repr.target_protocol_addr)) return null;
 
         self.neighbor_cache.fill(repr.source_protocol_addr, repr.source_hardware_addr, self.now);
 
@@ -392,7 +411,7 @@ pub const Interface = struct {
         const ip_repr = ipv4.parse(data) catch return null;
         const is_broadcast = self.isBroadcast(ip_repr.dst_addr);
 
-        if (!is_broadcast and !self.hasIpAddr(ip_repr.dst_addr)) return null;
+        if (!is_broadcast and !self.v4.hasIpAddr(ip_repr.dst_addr)) return null;
 
         const ip_payload = ipv4.payloadSlice(data) catch return null;
 
@@ -445,7 +464,7 @@ pub const Interface = struct {
     }
 
     pub fn icmpProtoUnreachable(self: *const Interface, ip_repr: ipv4.Repr, ip_payload: []const u8) ?Response {
-        const src = self.getSourceAddress(ip_repr.src_addr) orelse return null;
+        const src = self.v4.getSourceAddress(ip_repr.src_addr) orelse return null;
         return .{ .ipv4 = .{
             .ip = .{
                 .src_addr = src,
@@ -464,7 +483,7 @@ pub const Interface = struct {
     pub fn processUdp(self: *const Interface, ip_repr: ipv4.Repr, udp_data: []const u8, socket_handled: bool) ?Response {
         if (socket_handled) return null;
         if (self.isBroadcast(ip_repr.dst_addr)) return null;
-        const src = self.getSourceAddress(ip_repr.src_addr) orelse return null;
+        const src = self.v4.getSourceAddress(ip_repr.src_addr) orelse return null;
         const data = udp_data[0..@min(udp_data.len, ICMP_ERROR_MAX_DATA)];
         return .{ .ipv4 = .{
             .ip = .{
@@ -518,8 +537,8 @@ const LOCAL_CIDR = IpCidr{ .address = LOCAL_IP, .prefix_len = 8 };
 
 fn testInterface() Interface {
     var iface = Interface.init(LOCAL_HW_ADDR);
-    iface.addIpAddr(.{ .address = .{ 192, 168, 1, 1 }, .prefix_len = 24 });
-    iface.addIpAddr(LOCAL_CIDR);
+    iface.v4.addIpAddr(.{ .address = .{ 192, 168, 1, 1 }, .prefix_len = 24 });
+    iface.v4.addIpAddr(LOCAL_CIDR);
     return iface;
 }
 
@@ -569,16 +588,16 @@ test "local subnet broadcasts" {
     var iface = Interface.init(LOCAL_HW_ADDR);
 
     // /24
-    iface.ip_addr_count = 0;
-    iface.addIpAddr(.{ .address = .{ 192, 168, 1, 23 }, .prefix_len = 24 });
+    iface.v4.ip_addr_count = 0;
+    iface.v4.addIpAddr(.{ .address = .{ 192, 168, 1, 23 }, .prefix_len = 24 });
     try testing.expect(iface.isBroadcast(.{ 255, 255, 255, 255 }));
     try testing.expect(!iface.isBroadcast(.{ 255, 255, 255, 254 }));
     try testing.expect(iface.isBroadcast(.{ 192, 168, 1, 255 }));
     try testing.expect(!iface.isBroadcast(.{ 192, 168, 1, 254 }));
 
     // /16
-    iface.ip_addr_count = 0;
-    iface.addIpAddr(.{ .address = .{ 192, 168, 23, 24 }, .prefix_len = 16 });
+    iface.v4.ip_addr_count = 0;
+    iface.v4.addIpAddr(.{ .address = .{ 192, 168, 23, 24 }, .prefix_len = 16 });
     try testing.expect(iface.isBroadcast(.{ 255, 255, 255, 255 }));
     try testing.expect(!iface.isBroadcast(.{ 255, 255, 255, 254 }));
     try testing.expect(!iface.isBroadcast(.{ 192, 168, 23, 255 }));
@@ -587,8 +606,8 @@ test "local subnet broadcasts" {
     try testing.expect(iface.isBroadcast(.{ 192, 168, 255, 255 }));
 
     // /8
-    iface.ip_addr_count = 0;
-    iface.addIpAddr(.{ .address = .{ 192, 168, 23, 24 }, .prefix_len = 8 });
+    iface.v4.ip_addr_count = 0;
+    iface.v4.addIpAddr(.{ .address = .{ 192, 168, 23, 24 }, .prefix_len = 8 });
     try testing.expect(iface.isBroadcast(.{ 255, 255, 255, 255 }));
     try testing.expect(!iface.isBroadcast(.{ 255, 255, 255, 254 }));
     try testing.expect(!iface.isBroadcast(.{ 192, 23, 1, 255 }));
@@ -607,27 +626,27 @@ test "get source address" {
 
     try testing.expectEqual(
         @as(?ipv4.Address, .{ 172, 18, 1, 2 }),
-        iface.getSourceAddress(.{ 172, 18, 1, 254 }),
+        iface.v4.getSourceAddress(.{ 172, 18, 1, 254 }),
     );
     try testing.expectEqual(
         @as(?ipv4.Address, .{ 172, 24, 24, 14 }),
-        iface.getSourceAddress(.{ 172, 24, 24, 12 }),
+        iface.v4.getSourceAddress(.{ 172, 24, 24, 12 }),
     );
     // Not in any subnet -> fall back to first
     try testing.expectEqual(
         @as(?ipv4.Address, .{ 172, 18, 1, 2 }),
-        iface.getSourceAddress(.{ 172, 24, 23, 254 }),
+        iface.v4.getSourceAddress(.{ 172, 24, 23, 254 }),
     );
 }
 
 // [smoltcp:iface/interface/tests/ipv4.rs:get_source_address_empty_interface]
 test "get source address empty interface" {
     var iface = Interface.init(LOCAL_HW_ADDR);
-    iface.ip_addr_count = 0;
+    iface.v4.ip_addr_count = 0;
 
-    try testing.expectEqual(@as(?ipv4.Address, null), iface.getSourceAddress(.{ 172, 18, 1, 254 }));
-    try testing.expectEqual(@as(?ipv4.Address, null), iface.getSourceAddress(.{ 172, 24, 24, 12 }));
-    try testing.expectEqual(@as(?ipv4.Address, null), iface.getSourceAddress(.{ 172, 24, 23, 254 }));
+    try testing.expectEqual(@as(?ipv4.Address, null), iface.v4.getSourceAddress(.{ 172, 18, 1, 254 }));
+    try testing.expectEqual(@as(?ipv4.Address, null), iface.v4.getSourceAddress(.{ 172, 24, 24, 12 }));
+    try testing.expectEqual(@as(?ipv4.Address, null), iface.v4.getSourceAddress(.{ 172, 24, 23, 254 }));
 }
 
 // [smoltcp:iface/interface/tests/ipv4.rs:test_handle_valid_arp_request]
@@ -1319,8 +1338,8 @@ test "route default gateway" {
 
 test "interface route direct delivery vs gateway" {
     var iface = Interface.init(LOCAL_HW_ADDR);
-    iface.addIpAddr(.{ .address = .{ 10, 0, 0, 1 }, .prefix_len = 24 });
-    _ = iface.routes.add(Route.newDefaultGateway(.{ 10, 0, 0, 254 }));
+    iface.v4.addIpAddr(.{ .address = .{ 10, 0, 0, 1 }, .prefix_len = 24 });
+    _ = iface.v4.routes.add(Route.newDefaultGateway(.{ 10, 0, 0, 254 }));
 
     // Same-subnet address: direct delivery (returns dst itself).
     try testing.expectEqual([4]u8{ 10, 0, 0, 99 }, iface.route(.{ 10, 0, 0, 99 }).?);
@@ -1332,8 +1351,8 @@ test "interface route direct delivery vs gateway" {
 
 test "interface hasNeighbor with routing" {
     var iface = Interface.init(LOCAL_HW_ADDR);
-    iface.addIpAddr(.{ .address = .{ 10, 0, 0, 1 }, .prefix_len = 24 });
-    _ = iface.routes.add(Route.newDefaultGateway(.{ 10, 0, 0, 254 }));
+    iface.v4.addIpAddr(.{ .address = .{ 10, 0, 0, 1 }, .prefix_len = 24 });
+    _ = iface.v4.routes.add(Route.newDefaultGateway(.{ 10, 0, 0, 254 }));
     iface.neighbor_cache.fill(.{ 10, 0, 0, 254 }, .{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF }, time.Instant.ZERO);
 
     // Off-subnet: gateway neighbor is cached.

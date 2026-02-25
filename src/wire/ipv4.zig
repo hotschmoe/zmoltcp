@@ -40,6 +40,27 @@ pub fn isLoopback(addr: Address) bool {
     return addr[0] == 127;
 }
 
+pub fn formatAddr(addr: Address, buf: *[15]u8) []const u8 {
+    var pos: usize = 0;
+    for (addr, 0..) |byte, i| {
+        if (i > 0) {
+            buf[pos] = '.';
+            pos += 1;
+        }
+        if (byte >= 100) {
+            buf[pos] = '0' + byte / 100;
+            pos += 1;
+        }
+        if (byte >= 10) {
+            buf[pos] = '0' + (byte / 10) % 10;
+            pos += 1;
+        }
+        buf[pos] = '0' + byte % 10;
+        pos += 1;
+    }
+    return buf[0..pos];
+}
+
 /// High-level representation of an IPv4 header.
 pub const Repr = struct {
     version: u4,
@@ -387,4 +408,13 @@ test "IPv4 address classification: broadcast" {
     try testing.expect(!isMulticast(BROADCAST));
     try testing.expect(!isLinkLocal(BROADCAST));
     try testing.expect(!isLoopback(BROADCAST));
+}
+
+test "IPv4 formatAddr" {
+    var buf: [15]u8 = undefined;
+    try testing.expectEqualSlices(u8, "0.0.0.0", formatAddr(UNSPECIFIED, &buf));
+    try testing.expectEqualSlices(u8, "255.255.255.255", formatAddr(BROADCAST, &buf));
+    try testing.expectEqualSlices(u8, "10.0.2.15", formatAddr(.{ 10, 0, 2, 15 }, &buf));
+    try testing.expectEqualSlices(u8, "192.168.1.1", formatAddr(.{ 192, 168, 1, 1 }, &buf));
+    try testing.expectEqualSlices(u8, "127.0.0.1", formatAddr(.{ 127, 0, 0, 1 }, &buf));
 }
