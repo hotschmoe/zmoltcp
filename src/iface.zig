@@ -430,8 +430,6 @@ pub const Interface = struct {
         return self.neighbor_cache.lookup(next_hop, self.now) != null;
     }
 
-    // -- Multicast group management --
-
     pub fn joinMulticastGroup(self: *Interface, addr: ipv4.Address) bool {
         for (&self.multicast_groups) |*slot| {
             if (slot.*) |existing| {
@@ -467,8 +465,6 @@ pub const Interface = struct {
         }
         return false;
     }
-
-    // -- IPv6 address management --
 
     fn removeMulticastGroupV6(self: *Interface, addr: ipv6.Address) void {
         for (&self.multicast_groups_v6) |*slot| {
@@ -519,7 +515,11 @@ pub const Interface = struct {
         return false;
     }
 
-    // -- IPv6 multicast group management --
+    fn isIpv6Destination(self: *const Interface, dst: ipv6.Address, is_multicast: bool) bool {
+        if (is_multicast)
+            return self.hasMulticastGroupV6(dst) or self.hasSolicitedNode(dst);
+        return self.v6.hasIpAddr(dst) or ipv6.isLoopback(dst);
+    }
 
     pub fn joinMulticastGroupV6(self: *Interface, addr: ipv6.Address) bool {
         return self.joinMulticastGroupV6WithState(addr, .joining);
@@ -568,7 +568,7 @@ pub const Interface = struct {
     pub fn hasPendingMldV6(self: *const Interface) bool {
         for (self.multicast_groups_v6) |slot| {
             if (slot) |entry| {
-                if (entry.state == .joining or entry.state == .leaving) return true;
+                if (entry.state != .joined) return true;
             }
         }
         return false;
@@ -607,11 +607,8 @@ pub const Interface = struct {
         }
     }
 
-    // -- SLAAC --
-
     pub fn enableSlaac(self: *Interface) void {
         self.slaac = .{ .phase = .soliciting };
-        // Configure link-local address from MAC
         const ll = linkLocalFromMac(self.hardware_addr);
         self.v6.addIpAddr(.{ .address = ll, .prefix_len = 64 });
         const sn = ipv6.solicitedNode(ll);
@@ -630,54 +627,45 @@ pub const Interface = struct {
             else => return,
         };
 
-        // Store default router if lifetime > 0
         if (ra_data.router_lifetime > 0) {
             slaac.default_router = ip_repr.src_addr;
-            const lifetime_secs: i64 = @intCast(ra_data.router_lifetime);
-            slaac.router_lifetime_until = self.now.add(time.Duration.fromSecs(lifetime_secs));
+            slaac.router_lifetime_until = self.now.add(
+                time.Duration.fromSecs(@as(i64, ra_data.router_lifetime)),
+            );
         }
 
-        // Process prefix information
         const prefix_info = ra_data.prefix_info orelse return;
-        if (!prefix_info.flags.addrconf) return; // not autonomous
-        if (prefix_info.prefix_len != 64) return; // SLAAC only for /64
+        if (!prefix_info.flags.addrconf) return;
+        if (prefix_info.prefix_len != 64) return;
 
-        // Derive address from prefix + EUI-64
         const iid = eui64InterfaceId(self.hardware_addr);
         var addr: ipv6.Address = prefix_info.prefix;
         @memcpy(addr[8..16], &iid);
 
         const cidr = IpCidrV6{ .address = addr, .prefix_len = 64 };
+        const valid_until = self.now.add(time.Duration.fromSecs(@as(i64, prefix_info.valid_lifetime)));
+        const preferred_until = self.now.add(time.Duration.fromSecs(@as(i64, prefix_info.preferred_lifetime)));
 
-        // Update or add prefix entry
-        var found = false;
         for (&slaac.prefixes) |*slot| {
             if (slot.*) |*entry| {
                 if (std.mem.eql(u8, &entry.prefix.address, &cidr.address)) {
-                    entry.valid_until = self.now.add(time.Duration.fromSecs(@as(i64, prefix_info.valid_lifetime)));
-                    entry.preferred_until = self.now.add(time.Duration.fromSecs(@as(i64, prefix_info.preferred_lifetime)));
-                    found = true;
-                    break;
+                    entry.valid_until = valid_until;
+                    entry.preferred_until = preferred_until;
+                    slaac.phase = .configured;
+                    return;
                 }
             }
         }
-        if (!found) {
-            for (&slaac.prefixes) |*slot| {
-                if (slot.* == null) {
-                    slot.* = .{
-                        .prefix = cidr,
-                        .valid_until = self.now.add(time.Duration.fromSecs(@as(i64, prefix_info.valid_lifetime))),
-                        .preferred_until = self.now.add(time.Duration.fromSecs(@as(i64, prefix_info.preferred_lifetime))),
-                    };
-                    break;
-                }
+
+        // New prefix: insert entry, add address, join solicited-node multicast
+        for (&slaac.prefixes) |*slot| {
+            if (slot.* == null) {
+                slot.* = .{ .prefix = cidr, .valid_until = valid_until, .preferred_until = preferred_until };
+                break;
             }
-            // Add address to interface
-            self.v6.addIpAddr(cidr);
-            // Join solicited-node multicast for new address
-            const sn = ipv6.solicitedNode(addr);
-            _ = self.joinMulticastGroupV6WithState(sn, .joined);
         }
+        self.v6.addIpAddr(cidr);
+        _ = self.joinMulticastGroupV6WithState(ipv6.solicitedNode(addr), .joined);
 
         slaac.phase = .configured;
     }
@@ -728,11 +716,9 @@ pub const Interface = struct {
             .configured => {
                 var earliest: ?time.Instant = slaac.router_lifetime_until;
                 for (slaac.prefixes) |slot| {
-                    if (slot) |entry| {
-                        earliest = if (earliest) |e|
-                            (if (entry.valid_until.lessThan(e)) entry.valid_until else e)
-                        else
-                            entry.valid_until;
+                    const entry = slot orelse continue;
+                    if (earliest == null or entry.valid_until.lessThan(earliest.?)) {
+                        earliest = entry.valid_until;
                     }
                 }
                 return earliest;
@@ -740,8 +726,6 @@ pub const Interface = struct {
             .idle => return null,
         }
     }
-
-    // -- EUI-64 and link-local address derivation --
 
     pub fn eui64InterfaceId(mac: ethernet.Address) [8]u8 {
         return .{
@@ -883,17 +867,18 @@ pub const Interface = struct {
         } };
     }
 
-    pub fn processTcp(self: *const Interface, ip_repr: ipv4.Repr, tcp_data: []const u8, socket_handled: bool) ?Response {
-        _ = self;
+    fn generateTcpRst(comptime Ip: type, src_addr: Ip.Address, dst_addr: Ip.Address, tcp_data: []const u8, socket_handled: bool) ?tcp_socket.TcpRepr {
         if (socket_handled) return null;
-
         const sock_repr = tcp_socket.TcpRepr.fromWireBytes(tcp_data) orelse return null;
         if (sock_repr.control == .rst) return null;
-        if (ipv4.isUnspecified(ip_repr.src_addr)) return null;
-        if (ipv4.isUnspecified(ip_repr.dst_addr)) return null;
+        if (Ip.isUnspecified(src_addr)) return null;
+        if (Ip.isUnspecified(dst_addr)) return null;
+        return tcp_socket.rstReply(sock_repr);
+    }
 
-        const rst = tcp_socket.rstReply(sock_repr);
-
+    pub fn processTcp(self: *const Interface, ip_repr: ipv4.Repr, tcp_data: []const u8, socket_handled: bool) ?Response {
+        _ = self;
+        const rst = generateTcpRst(ipv4, ip_repr.src_addr, ip_repr.dst_addr, tcp_data, socket_handled) orelse return null;
         return .{ .ipv4 = .{
             .ip = .{
                 .src_addr = ip_repr.dst_addr,
@@ -905,33 +890,15 @@ pub const Interface = struct {
         } };
     }
 
-    // -- IPv6 processing --
-
     pub fn processIpv6(self: *Interface, data: []const u8) ?Response {
         const ip_repr = ipv6.parse(data) catch return null;
-
-        // Reject multicast source (except unspecified for DAD NS)
         if (ipv6.isMulticast(ip_repr.src_addr)) return null;
 
         const ip_payload = data[ipv6.HEADER_LEN..][0..ip_repr.payload_len];
         const is_multicast = ipv6.isMulticast(ip_repr.dst_addr);
 
-        // Destination filter
-        if (!is_multicast and
-            !self.v6.hasIpAddr(ip_repr.dst_addr) and
-            !ipv6.isLoopback(ip_repr.dst_addr))
-        {
-            // Check solicited-node multicast or multicast group
-            return null;
-        }
-        if (is_multicast and
-            !self.hasMulticastGroupV6(ip_repr.dst_addr) and
-            !self.hasSolicitedNode(ip_repr.dst_addr))
-        {
-            return null;
-        }
+        if (!self.isIpv6Destination(ip_repr.dst_addr, is_multicast)) return null;
 
-        // Dispatch by next_header
         return switch (ip_repr.next_header) {
             .icmpv6 => self.processIcmpv6(ip_repr, ip_payload, is_multicast),
             .udp => null, // stack handles
@@ -980,15 +947,13 @@ pub const Interface = struct {
     pub fn processNdisc(self: *Interface, ip_repr: ipv6.Repr, ndisc_repr: ndisc.Repr) ?Response {
         switch (ndisc_repr) {
             .neighbor_solicit => |ns| {
-                // Learn source from LLAddr option
                 if (ns.lladdr) |lladdr| {
                     if (!ipv6.isUnspecified(ip_repr.src_addr)) {
                         self.neighbor_cache_v6.fill(ip_repr.src_addr, lladdr, self.now);
                     }
                 }
-                // Check target is one of our addresses
                 if (!self.v6.hasIpAddr(ns.target_addr)) return null;
-                // Check dst is solicited-node multicast for target or unicast to us
+                // Multicast dst must be solicited-node for target
                 if (ipv6.isMulticast(ip_repr.dst_addr) and
                     !self.hasSolicitedNode(ip_repr.dst_addr))
                 {
@@ -1035,11 +1000,9 @@ pub const Interface = struct {
             .query => |q| {
                 if (ip_repr.hop_limit != 1) return;
                 if (ipv6.isUnspecified(q.mcast_addr)) {
-                    // General query: mark all groups for report
-                    self.markAllGroupsForReport();
+                    self.markAllGroupsForReport(); // general query
                 } else if (self.hasMulticastGroupV6(q.mcast_addr)) {
-                    // Specific query: mark that group for report
-                    self.markGroupForReport(q.mcast_addr);
+                    self.markGroupForReport(q.mcast_addr); // group-specific query
                 }
             },
             .report => {},
@@ -1093,15 +1056,7 @@ pub const Interface = struct {
 
     pub fn processTcpV6(self: *const Interface, ip_repr: ipv6.Repr, tcp_data: []const u8, socket_handled: bool) ?Response {
         _ = self;
-        if (socket_handled) return null;
-
-        const sock_repr = tcp_socket.TcpRepr.fromWireBytes(tcp_data) orelse return null;
-        if (sock_repr.control == .rst) return null;
-        if (ipv6.isUnspecified(ip_repr.src_addr)) return null;
-        if (ipv6.isUnspecified(ip_repr.dst_addr)) return null;
-
-        const rst = tcp_socket.rstReply(sock_repr);
-
+        const rst = generateTcpRst(ipv6, ip_repr.src_addr, ip_repr.dst_addr, tcp_data, socket_handled) orelse return null;
         return .{ .ipv6 = .{
             .ip = .{
                 .src_addr = ip_repr.dst_addr,

@@ -348,8 +348,6 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             _ = timestamp;
         }
 
-        // -- Socket routing --
-
         const TcpRouteResult = struct {
             reply: ?tcp_socket.TcpRepr = null,
             handled: bool = false,
@@ -478,8 +476,6 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             }
             return handled;
         }
-
-        // -- Egress --
 
         fn processEgress(self: *Self, timestamp: Instant, device: *Device) bool {
             var dispatched = false;
@@ -789,7 +785,6 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             const src_addr = self.iface.linkLocalIpv6Addr() orelse ipv6.UNSPECIFIED;
             const dst_addr = ipv6.LINK_LOCAL_ALL_MLDV2_ROUTERS;
 
-            // Build MLD Report body: header(4) + address_record(20)
             var mld_body: [128]u8 = undefined;
             const report_hdr_len = mld.emit(.{ .report = .{ .nr_mcast_addr_rcrds = 1 } }, &mld_body) catch return;
             const record_len = mld.emitAddressRecord(.{
@@ -799,72 +794,52 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                 .mcast_addr = group_addr,
             }, mld_body[report_hdr_len..]) catch return;
             const mld_total = report_hdr_len + record_len;
-
-            // Build ICMPv6 wrapper: type(1) + code(1) + checksum(2) + mld_body
             const icmpv6_total = icmpv6.HEADER_LEN + mld_total;
 
-            // Build HBH options: RouterAlert(MLD) = 4 bytes
-            const hbh_repr = ipv6hbh.mldv2RouterAlert();
             var hbh_opt_buf: [8]u8 = undefined;
-            const hbh_opt_len = ipv6hbh.emit(hbh_repr, &hbh_opt_buf) catch return;
-
-            // HBH extension header: next_header + length + options + padding
-            // Total ext header = (length+1)*8, length field = 0 means 8 bytes total
-            // Options: RouterAlert(4 bytes) + PadN(2 bytes for padding to 6) = 6 bytes of data
-            const hbh_ext_data_len = hbh_opt_len + 2; // +2 for PadN(0) padding to reach 6 data bytes
-            _ = hbh_ext_data_len;
+            const hbh_opt_len = ipv6hbh.emit(ipv6hbh.mldv2RouterAlert(), &hbh_opt_buf) catch return;
 
             var frame_buf: [MAX_FRAME_LEN]u8 = undefined;
             var pos: usize = 0;
 
-            // Ethernet header
-            const dst_mac = multicastMacV6(dst_addr);
-            const eth_len = ethernet.emit(.{
-                .dst_addr = dst_mac,
+            pos += ethernet.emit(.{
+                .dst_addr = multicastMacV6(dst_addr),
                 .src_addr = self.iface.hardware_addr,
                 .ethertype = .ipv6,
             }, &frame_buf) catch return;
-            pos += eth_len;
 
-            // IPv6 header: payload = HBH ext(8) + ICMPv6
-            const ipv6_payload_len = 8 + icmpv6_total;
-            const ip_len = ipv6.emit(.{
-                .payload_len = @intCast(ipv6_payload_len),
+            // IPv6 payload = HBH ext header (8 bytes) + ICMPv6
+            pos += ipv6.emit(.{
+                .payload_len = @intCast(8 + icmpv6_total),
                 .next_header = .hop_by_hop,
                 .hop_limit = 1,
                 .src_addr = src_addr,
                 .dst_addr = dst_addr,
             }, frame_buf[pos..]) catch return;
-            pos += ip_len;
 
-            // HBH extension header (8 bytes): next_header=ICMPv6, length=0
-            const hbh_ext_len = ipv6ext_header.emit(.{
+            // HBH extension header: 8 bytes (length=0 means (0+1)*8)
+            const hbh_start = pos;
+            pos += ipv6ext_header.emit(.{
                 .next_header = @intFromEnum(ipv6.Protocol.icmpv6),
                 .length = 0,
                 .data = &[_]u8{},
             }, frame_buf[pos..]) catch return;
-            // Write options into the HBH data area (bytes 2..8)
-            var hbh_data_pos = pos + 2;
-            @memcpy(frame_buf[hbh_data_pos..][0..hbh_opt_len], hbh_opt_buf[0..hbh_opt_len]);
-            hbh_data_pos += hbh_opt_len;
-            // PadN(0) to fill remaining space (2 bytes: type=0x01, len=0x00)
-            frame_buf[hbh_data_pos] = 0x01; // PadN type
-            frame_buf[hbh_data_pos + 1] = 0x00; // PadN length=0
-            pos += hbh_ext_len;
+            // Write RouterAlert option + PadN(0) into HBH data area (bytes 2..8)
+            @memcpy(frame_buf[hbh_start + 2 ..][0..hbh_opt_len], hbh_opt_buf[0..hbh_opt_len]);
+            frame_buf[hbh_start + 2 + hbh_opt_len] = 0x01; // PadN type
+            frame_buf[hbh_start + 2 + hbh_opt_len + 1] = 0x00; // PadN length=0
 
-            // ICMPv6 header: type=MLD Report(0x8F), code=0
+            // ICMPv6: type=MLDv2 Report(0x8F), code=0, checksum placeholder
             const icmpv6_start = pos;
-            frame_buf[pos] = 0x8F; // MLDv2 Report
-            frame_buf[pos + 1] = 0; // code
-            frame_buf[pos + 2] = 0; // checksum (filled later)
+            frame_buf[pos] = 0x8F;
+            frame_buf[pos + 1] = 0;
+            frame_buf[pos + 2] = 0;
             frame_buf[pos + 3] = 0;
             pos += icmpv6.HEADER_LEN;
 
-            // MLD body
             @memcpy(frame_buf[pos..][0..mld_total], mld_body[0..mld_total]);
             pos += mld_total;
 
-            // Compute ICMPv6 checksum
             const icmpv6_slice = frame_buf[icmpv6_start..pos];
             const pseudo = checksum_mod.pseudoHeaderChecksumV6(
                 src_addr,
@@ -881,18 +856,15 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
 
         fn processMldEgress(self: *Self, device: *Device) void {
             for (&self.iface.multicast_groups_v6) |*slot| {
-                if (slot.*) |entry| {
-                    switch (entry.state) {
-                        .joining => {
-                            self.emitMldReport(entry.addr, .change_to_exclude, device);
-                            self.iface.markMldReported(entry.addr);
-                        },
-                        .leaving => {
-                            self.emitMldReport(entry.addr, .change_to_include, device);
-                            self.iface.markMldReported(entry.addr);
-                        },
-                        .joined => {},
-                    }
+                const entry = slot.* orelse continue;
+                const record_type: ?mld.RecordType = switch (entry.state) {
+                    .joining => .change_to_exclude,
+                    .leaving => .change_to_include,
+                    .joined => null,
+                };
+                if (record_type) |rt| {
+                    self.emitMldReport(entry.addr, rt, device);
+                    self.iface.markMldReported(entry.addr);
                 }
             }
         }
@@ -1039,8 +1011,6 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             self.emitResponse(response, device);
         }
 
-        // -- Response serialization --
-
         fn emitResponse(self: *Self, response: iface_mod.Response, device: *Device) void {
             var buf: [MAX_FRAME_LEN]u8 = undefined;
 
@@ -1130,92 +1100,30 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             var payload_buf: [IPV6_PAYLOAD_MAX]u8 = undefined;
 
             const payload_len: usize = switch (resp.payload) {
-                .icmpv6_echo => |echo| blk: {
-                    const repr = icmpv6.Repr{ .echo_reply = .{
-                        .ident = echo.ident,
-                        .seq_no = echo.seq_no,
-                        .data = echo.data,
-                    } };
-                    break :blk icmpv6.emit(
-                        repr,
-                        resp.ip.src_addr,
-                        resp.ip.dst_addr,
-                        &payload_buf,
-                    ) catch return null;
-                },
-                .icmpv6_dst_unreachable => |du| blk: {
-                    const clamped_len = @min(du.data.len, iface_mod.ICMPV6_ERROR_MAX_DATA);
-                    const dummy_hdr = ipv6.Repr{
-                        .payload_len = 0,
-                        .next_header = .no_next_header,
-                        .hop_limit = 0,
-                        .src_addr = ipv6.UNSPECIFIED,
-                        .dst_addr = ipv6.UNSPECIFIED,
-                    };
-                    const repr = icmpv6.Repr{ .dst_unreachable = .{
-                        .reason = du.reason,
-                        .header = dummy_hdr,
-                        .data = du.data[0..clamped_len],
-                    } };
-                    break :blk icmpv6.emit(
-                        repr,
-                        resp.ip.src_addr,
-                        resp.ip.dst_addr,
-                        &payload_buf,
-                    ) catch return null;
-                },
-                .icmpv6_pkt_too_big => |ptb| blk: {
-                    const clamped_len = @min(ptb.data.len, iface_mod.ICMPV6_ERROR_MAX_DATA);
-                    const dummy_hdr = ipv6.Repr{
-                        .payload_len = 0,
-                        .next_header = .no_next_header,
-                        .hop_limit = 0,
-                        .src_addr = ipv6.UNSPECIFIED,
-                        .dst_addr = ipv6.UNSPECIFIED,
-                    };
-                    const repr = icmpv6.Repr{ .pkt_too_big = .{
-                        .mtu = ptb.mtu,
-                        .header = dummy_hdr,
-                        .data = ptb.data[0..clamped_len],
-                    } };
-                    break :blk icmpv6.emit(
-                        repr,
-                        resp.ip.src_addr,
-                        resp.ip.dst_addr,
-                        &payload_buf,
-                    ) catch return null;
-                },
-                .icmpv6_param_problem => |pp| blk: {
-                    const clamped_len = @min(pp.data.len, iface_mod.ICMPV6_ERROR_MAX_DATA);
-                    const dummy_hdr = ipv6.Repr{
-                        .payload_len = 0,
-                        .next_header = .no_next_header,
-                        .hop_limit = 0,
-                        .src_addr = ipv6.UNSPECIFIED,
-                        .dst_addr = ipv6.UNSPECIFIED,
-                    };
-                    const repr = icmpv6.Repr{ .param_problem = .{
-                        .reason = pp.reason,
-                        .pointer = pp.pointer,
-                        .header = dummy_hdr,
-                        .data = pp.data[0..clamped_len],
-                    } };
-                    break :blk icmpv6.emit(
-                        repr,
-                        resp.ip.src_addr,
-                        resp.ip.dst_addr,
-                        &payload_buf,
-                    ) catch return null;
-                },
-                .ndisc => |ndisc_repr| blk: {
-                    const icmpv6_repr = icmpv6.Repr{ .ndisc = ndisc_repr };
-                    break :blk icmpv6.emit(
-                        icmpv6_repr,
-                        resp.ip.src_addr,
-                        resp.ip.dst_addr,
-                        &payload_buf,
-                    ) catch return null;
-                },
+                .icmpv6_echo => |echo| icmpv6.emit(
+                    icmpv6.Repr{ .echo_reply = .{ .ident = echo.ident, .seq_no = echo.seq_no, .data = echo.data } },
+                    resp.ip.src_addr,
+                    resp.ip.dst_addr,
+                    &payload_buf,
+                ) catch return null,
+                .icmpv6_dst_unreachable => |du| icmpv6.emit(
+                    icmpv6.Repr{ .dst_unreachable = .{ .reason = du.reason, .header = EMPTY_IPV6_HDR, .data = du.data[0..@min(du.data.len, iface_mod.ICMPV6_ERROR_MAX_DATA)] } },
+                    resp.ip.src_addr, resp.ip.dst_addr, &payload_buf,
+                ) catch return null,
+                .icmpv6_pkt_too_big => |ptb| icmpv6.emit(
+                    icmpv6.Repr{ .pkt_too_big = .{ .mtu = ptb.mtu, .header = EMPTY_IPV6_HDR, .data = ptb.data[0..@min(ptb.data.len, iface_mod.ICMPV6_ERROR_MAX_DATA)] } },
+                    resp.ip.src_addr, resp.ip.dst_addr, &payload_buf,
+                ) catch return null,
+                .icmpv6_param_problem => |pp| icmpv6.emit(
+                    icmpv6.Repr{ .param_problem = .{ .reason = pp.reason, .pointer = pp.pointer, .header = EMPTY_IPV6_HDR, .data = pp.data[0..@min(pp.data.len, iface_mod.ICMPV6_ERROR_MAX_DATA)] } },
+                    resp.ip.src_addr, resp.ip.dst_addr, &payload_buf,
+                ) catch return null,
+                .ndisc => |ndisc_repr| icmpv6.emit(
+                    icmpv6.Repr{ .ndisc = ndisc_repr },
+                    resp.ip.src_addr,
+                    resp.ip.dst_addr,
+                    &payload_buf,
+                ) catch return null,
                 .tcp => |tcp_repr| serializeTcpV6(
                     tcp_repr,
                     resp.ip.src_addr,
@@ -1274,6 +1182,15 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
         fn multicastMacV6(addr: ipv6.Address) ethernet.Address {
             return .{ 0x33, 0x33, addr[12], addr[13], addr[14], addr[15] };
         }
+
+        const EMPTY_IPV6_HDR = ipv6.Repr{
+            .payload_len = 0,
+            .next_header = .no_next_header,
+            .hop_limit = 0,
+            .src_addr = ipv6.UNSPECIFIED,
+            .dst_addr = ipv6.UNSPECIFIED,
+        };
+
     };
 }
 

@@ -1,13 +1,12 @@
-// IPv4 fragmentation support (RFC 791).
+// IP fragmentation support (RFC 791 egress, RFC 815 ingress reassembly).
 //
-// Egress: Fragmenter buffers an oversized IP payload and emits it
-//         as multiple fragments across poll cycles.
-// Ingress: Reassembler collects fragments into a single payload buffer,
-//          using the Assembler hole-tracker for out-of-order support.
+// Egress: Fragmenter buffers an oversized payload, emitting fragments
+//         across poll cycles.
+// Ingress: Reassembler collects fragments into a contiguous buffer using
+//          the Assembler hole-tracker for out-of-order support.
 //
-// Single-slot design: only one packet ID can be in-flight at a time.
-// If a new key arrives while another is in-progress, the old one is
-// evicted. Acceptable for embedded targets where fragmentation is rare.
+// Single-slot design: one packet ID in-flight at a time. New keys evict
+// in-progress reassembly. Acceptable for embedded targets.
 //
 // Reference: smoltcp src/iface/fragmentation.rs
 
@@ -29,7 +28,7 @@ pub fn maxIpv4FragmentPayload(ip_header_len: usize, ip_mtu: usize) usize {
     return payload_mtu - (payload_mtu % IPV4_FRAGMENT_ALIGNMENT);
 }
 
-/// Holds one oversized IP payload being fragmented across poll cycles.
+/// Buffers one oversized IP payload, emitting fragments across poll cycles.
 pub fn Fragmenter(comptime buffer_size: usize) type {
     return struct {
         const Self = @This();
@@ -139,10 +138,6 @@ pub fn Fragmenter(comptime buffer_size: usize) type {
     };
 }
 
-// -------------------------------------------------------------------------
-// Ingress reassembly
-// -------------------------------------------------------------------------
-
 pub const FragKey = struct {
     id: u16,
     src_addr: ipv4.Address,
@@ -198,8 +193,7 @@ pub fn Reassembler(comptime Key: type, comptime config: ReassemblerConfig) type 
         }
 
         pub fn accept(self: *Self, key: Key, expires_at: time.Instant) void {
-            const is_same = if (self.key) |current| current.eql(key) else false;
-            if (is_same) return;
+            if (self.key) |current| if (current.eql(key)) return;
             self.reset();
             self.key = key;
             self.expires_at = expires_at;
@@ -240,14 +234,9 @@ pub fn Reassembler(comptime Key: type, comptime config: ReassemblerConfig) type 
     };
 }
 
-// -------------------------------------------------------------------------
-// Tests
-// -------------------------------------------------------------------------
-
 const testing = std.testing;
 
 test "maxIpv4FragmentPayload alignment" {
-    // For each possible header len variation, result must be 8-aligned.
     var i: usize = 0;
     while (i < IPV4_FRAGMENT_ALIGNMENT) : (i += 1) {
         const result = maxIpv4FragmentPayload(ipv4.HEADER_LEN + i, 1500);
@@ -255,9 +244,7 @@ test "maxIpv4FragmentPayload alignment" {
         try testing.expect(result > 0);
     }
 
-    // Standard case: MTU=1500, header=20 -> payload_mtu=1480, already aligned.
     try testing.expectEqual(@as(usize, 1480), maxIpv4FragmentPayload(20, 1500));
-    // header=21 -> payload_mtu=1479, aligned down to 1472.
     try testing.expectEqual(@as(usize, 1472), maxIpv4FragmentPayload(21, 1500));
 }
 
@@ -266,7 +253,6 @@ test "fragmenter stage and emit" {
     var f = Frag{};
     try testing.expect(f.isEmpty());
 
-    // Stage a 3000-byte payload (exceeds IP_PAYLOAD_MAX of 1480).
     var payload: [3000]u8 = undefined;
     for (&payload, 0..) |*b, i| b.* = @truncate(i);
 
@@ -283,31 +269,23 @@ test "fragmenter stage and emit" {
     const max_frag = maxIpv4FragmentPayload(ipv4.HEADER_LEN, ip_mtu);
     var frame_buf: [1514]u8 = undefined;
 
-    // First fragment.
     const len1 = f.emitNext(&frame_buf, hw, ip_mtu) orelse return error.TestUnexpectedResult;
     try testing.expect(len1 <= 1514);
     try testing.expectEqual(ethernet.HEADER_LEN + ipv4.HEADER_LEN + max_frag, len1);
     try testing.expect(!f.finished());
 
-    // Second fragment.
     const len2 = f.emitNext(&frame_buf, hw, ip_mtu) orelse return error.TestUnexpectedResult;
     try testing.expect(len2 <= 1514);
     try testing.expect(!f.finished());
 
-    // Third (last) fragment -- remaining bytes.
     const len3 = f.emitNext(&frame_buf, hw, ip_mtu) orelse return error.TestUnexpectedResult;
     try testing.expect(len3 <= 1514);
     const expected_last = 3000 - 2 * max_frag;
     try testing.expectEqual(ethernet.HEADER_LEN + ipv4.HEADER_LEN + expected_last, len3);
     try testing.expect(f.finished());
 
-    // No more fragments.
     try testing.expect(f.emitNext(&frame_buf, hw, ip_mtu) == null);
 }
-
-// -------------------------------------------------------------------------
-// Reassembler tests
-// -------------------------------------------------------------------------
 
 const TestReassembler = Reassembler(FragKey, .{ .buffer_size = 64, .max_segments = 4 });
 
@@ -372,11 +350,9 @@ test "reassembler expiry" {
     try testing.expect(r.add("abc", 0));
     try testing.expect(!r.isFree());
 
-    // Not expired at t=30s.
     r.removeExpired(time.Instant.fromSecs(30));
     try testing.expect(!r.isFree());
 
-    // Expired at t=61s.
     r.removeExpired(time.Instant.fromSecs(61));
     try testing.expect(r.isFree());
 }
@@ -388,7 +364,6 @@ test "reassembler eviction on new key" {
     r.setTotalSize(6);
     try testing.expect(r.add("abc", 0));
 
-    // New key evicts old.
     const key2 = FragKey{
         .id = 2,
         .src_addr = .{ 10, 0, 0, 3 },
@@ -397,11 +372,9 @@ test "reassembler eviction on new key" {
     };
     r.accept(key2, time.Instant.fromSecs(120));
 
-    // Old partial assembly is gone; new slot is clean.
     try testing.expect(r.assemble() == null);
     try testing.expect(!r.isFree());
 
-    // Complete the new key's payload.
     r.setTotalSize(4);
     try testing.expect(r.add("ABCD", 0));
     const result = r.assemble() orelse return error.ExpectedAssembly;
@@ -414,15 +387,9 @@ test "reassembler buffer overflow" {
     r.accept(test_key, time.Instant.fromSecs(60));
     r.setTotalSize(16);
 
-    // First add fits.
     try testing.expect(r.add("12345678", 0));
-    // Second add exceeds buffer -- rejected.
     try testing.expect(!r.add("overflow!", 8));
 }
-
-// -------------------------------------------------------------------------
-// FragKeyV6 tests
-// -------------------------------------------------------------------------
 
 test "FragKeyV6 equality" {
     const key_a = FragKeyV6{
@@ -433,12 +400,10 @@ test "FragKeyV6 equality" {
     const key_b = key_a;
     try testing.expect(key_a.eql(key_b));
 
-    // Different ID
     var key_c = key_a;
     key_c.id = 0xDEADBEEF;
     try testing.expect(!key_a.eql(key_c));
 
-    // Different src
     var key_d = key_a;
     key_d.src_addr[15] = 0xFF;
     try testing.expect(!key_a.eql(key_d));
@@ -469,21 +434,18 @@ test "reassembler with v6 keys" {
 }
 
 test "isFragmentV6" {
-    // Non-fragment: offset=0, more_frags=false
     try testing.expect(!isFragmentV6(.{
         .next_header = 6,
         .frag_offset = 0,
         .more_frags = false,
         .ident = 0,
     }));
-    // More frags set
     try testing.expect(isFragmentV6(.{
         .next_header = 6,
         .frag_offset = 0,
         .more_frags = true,
         .ident = 0,
     }));
-    // Non-zero offset
     try testing.expect(isFragmentV6(.{
         .next_header = 6,
         .frag_offset = 100,
