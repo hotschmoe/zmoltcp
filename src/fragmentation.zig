@@ -13,6 +13,8 @@
 
 const std = @import("std");
 const ipv4 = @import("wire/ipv4.zig");
+const ipv6 = @import("wire/ipv6.zig");
+const ipv6fragment = @import("wire/ipv6fragment.zig");
 const ethernet = @import("wire/ethernet.zig");
 const time = @import("time.zig");
 const Assembler = @import("storage/assembler.zig").Assembler;
@@ -159,17 +161,33 @@ pub fn isFragment(ip_repr: ipv4.Repr) bool {
     return ip_repr.more_fragments or ip_repr.fragment_offset != 0;
 }
 
+pub const FragKeyV6 = struct {
+    id: u32,
+    src_addr: ipv6.Address,
+    dst_addr: ipv6.Address,
+
+    pub fn eql(a: FragKeyV6, b: FragKeyV6) bool {
+        return a.id == b.id and
+            std.mem.eql(u8, &a.src_addr, &b.src_addr) and
+            std.mem.eql(u8, &a.dst_addr, &b.dst_addr);
+    }
+};
+
+pub fn isFragmentV6(frag_repr: ipv6fragment.Repr) bool {
+    return frag_repr.more_frags or frag_repr.frag_offset != 0;
+}
+
 pub const ReassemblerConfig = struct {
     buffer_size: usize = 1500,
     max_segments: usize = 4,
 };
 
-pub fn Reassembler(comptime config: ReassemblerConfig) type {
+pub fn Reassembler(comptime Key: type, comptime config: ReassemblerConfig) type {
     return struct {
         const Self = @This();
         const Asm = Assembler(config.max_segments);
 
-        key: ?FragKey = null,
+        key: ?Key = null,
         buffer: [config.buffer_size]u8 = undefined,
         assembler: Asm = Asm.init(),
         total_size: ?usize = null,
@@ -179,7 +197,7 @@ pub fn Reassembler(comptime config: ReassemblerConfig) type {
             return self.key == null;
         }
 
-        pub fn accept(self: *Self, key: FragKey, expires_at: time.Instant) void {
+        pub fn accept(self: *Self, key: Key, expires_at: time.Instant) void {
             const is_same = if (self.key) |current| current.eql(key) else false;
             if (is_same) return;
             self.reset();
@@ -291,7 +309,7 @@ test "fragmenter stage and emit" {
 // Reassembler tests
 // -------------------------------------------------------------------------
 
-const TestReassembler = Reassembler(.{ .buffer_size = 64, .max_segments = 4 });
+const TestReassembler = Reassembler(FragKey, .{ .buffer_size = 64, .max_segments = 4 });
 
 const test_key = FragKey{
     .id = 1,
@@ -391,7 +409,7 @@ test "reassembler eviction on new key" {
 }
 
 test "reassembler buffer overflow" {
-    var r = Reassembler(.{ .buffer_size = 8, .max_segments = 4 }){};
+    var r = Reassembler(FragKey, .{ .buffer_size = 8, .max_segments = 4 }){};
 
     r.accept(test_key, time.Instant.fromSecs(60));
     r.setTotalSize(16);
@@ -400,4 +418,76 @@ test "reassembler buffer overflow" {
     try testing.expect(r.add("12345678", 0));
     // Second add exceeds buffer -- rejected.
     try testing.expect(!r.add("overflow!", 8));
+}
+
+// -------------------------------------------------------------------------
+// FragKeyV6 tests
+// -------------------------------------------------------------------------
+
+test "FragKeyV6 equality" {
+    const key_a = FragKeyV6{
+        .id = 0x12345678,
+        .src_addr = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
+        .dst_addr = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 },
+    };
+    const key_b = key_a;
+    try testing.expect(key_a.eql(key_b));
+
+    // Different ID
+    var key_c = key_a;
+    key_c.id = 0xDEADBEEF;
+    try testing.expect(!key_a.eql(key_c));
+
+    // Different src
+    var key_d = key_a;
+    key_d.src_addr[15] = 0xFF;
+    try testing.expect(!key_a.eql(key_d));
+}
+
+test "reassembler with v6 keys" {
+    const TestV6Reassembler = Reassembler(FragKeyV6, .{ .buffer_size = 64, .max_segments = 4 });
+    var r = TestV6Reassembler{};
+    try testing.expect(r.isFree());
+
+    const key = FragKeyV6{
+        .id = 42,
+        .src_addr = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
+        .dst_addr = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 },
+    };
+
+    r.accept(key, time.Instant.fromSecs(60));
+    try testing.expect(!r.isFree());
+
+    r.setTotalSize(12);
+    try testing.expect(r.add("Hello ", 0));
+    try testing.expect(r.assemble() == null);
+
+    try testing.expect(r.add("World!", 6));
+    const result = r.assemble() orelse return error.ExpectedAssembly;
+    try testing.expectEqualSlices(u8, "Hello World!", result);
+    try testing.expect(r.isFree());
+}
+
+test "isFragmentV6" {
+    // Non-fragment: offset=0, more_frags=false
+    try testing.expect(!isFragmentV6(.{
+        .next_header = 6,
+        .frag_offset = 0,
+        .more_frags = false,
+        .ident = 0,
+    }));
+    // More frags set
+    try testing.expect(isFragmentV6(.{
+        .next_header = 6,
+        .frag_offset = 0,
+        .more_frags = true,
+        .ident = 0,
+    }));
+    // Non-zero offset
+    try testing.expect(isFragmentV6(.{
+        .next_header = 6,
+        .frag_offset = 100,
+        .more_frags = false,
+        .ident = 0,
+    }));
 }
