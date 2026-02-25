@@ -28,6 +28,8 @@ pub fn Tracer(comptime Device: type) type {
     return struct {
         const Self = @This();
 
+        pub const medium: iface_mod.Medium = if (@hasDecl(Device, "medium")) Device.medium else .ethernet;
+
         inner: Device,
         trace_fn: *const fn (direction: Direction, frame: []const u8) void,
 
@@ -60,6 +62,8 @@ pub fn Tracer(comptime Device: type) type {
 pub fn FaultInjector(comptime Device: type) type {
     return struct {
         const Self = @This();
+
+        pub const medium: iface_mod.Medium = if (@hasDecl(Device, "medium")) Device.medium else .ethernet;
 
         inner: Device,
         config: Config,

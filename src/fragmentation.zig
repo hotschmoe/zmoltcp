@@ -29,7 +29,9 @@ pub fn maxIpv4FragmentPayload(ip_header_len: usize, ip_mtu: usize) usize {
 }
 
 /// Buffers one oversized IP payload, emitting fragments across poll cycles.
-pub fn Fragmenter(comptime buffer_size: usize) type {
+/// When `emit_ethernet` is false, fragments are emitted as raw IP packets
+/// (no Ethernet header) for Medium::Ip devices.
+pub fn Fragmenter(comptime buffer_size: usize, comptime emit_ethernet: bool) type {
     return struct {
         const Self = @This();
 
@@ -99,14 +101,18 @@ pub fn Fragmenter(comptime buffer_size: usize) type {
             const this_payload = @min(remaining, max_frag);
             const more_frags = (remaining != this_payload);
 
-            const total = ethernet.HEADER_LEN + ipv4.HEADER_LEN + this_payload;
+            const frame_overhead = if (comptime emit_ethernet) ethernet.HEADER_LEN else 0;
+            const total = frame_overhead + ipv4.HEADER_LEN + this_payload;
             if (buf.len < total) return null;
 
-            const eth_len = ethernet.emit(.{
-                .dst_addr = self.dst_mac,
-                .src_addr = hw_addr,
-                .ethertype = .ipv4,
-            }, buf) catch return null;
+            var pos: usize = 0;
+            if (comptime emit_ethernet) {
+                pos += ethernet.emit(.{
+                    .dst_addr = self.dst_mac,
+                    .src_addr = hw_addr,
+                    .ethertype = .ipv4,
+                }, buf) catch return null;
+            }
 
             const ip_repr = ipv4.Repr{
                 .version = 4,
@@ -123,10 +129,10 @@ pub fn Fragmenter(comptime buffer_size: usize) type {
                 .src_addr = self.src_addr,
                 .dst_addr = self.dst_addr,
             };
-            _ = ipv4.emit(ip_repr, buf[eth_len..]) catch return null;
+            _ = ipv4.emit(ip_repr, buf[pos..]) catch return null;
 
             @memcpy(
-                buf[eth_len + ipv4.HEADER_LEN ..][0..this_payload],
+                buf[pos + ipv4.HEADER_LEN ..][0..this_payload],
                 self.buffer[self.sent_bytes..][0..this_payload],
             );
 
@@ -249,7 +255,7 @@ test "maxIpv4FragmentPayload alignment" {
 }
 
 test "fragmenter stage and emit" {
-    const Frag = Fragmenter(4096);
+    const Frag = Fragmenter(4096, true);
     var f = Frag{};
     try testing.expect(f.isEmpty());
 
@@ -452,4 +458,44 @@ test "isFragmentV6" {
         .more_frags = false,
         .ident = 0,
     }));
+}
+
+test "Fragmenter emit_ethernet=false raw IP output" {
+    const Frag = Fragmenter(4096, false);
+    var f = Frag{};
+    try testing.expect(f.isEmpty());
+
+    var payload: [3000]u8 = undefined;
+    for (&payload, 0..) |*b, i| b.* = @truncate(i);
+
+    const hw = ethernet.Address{ 0x02, 0x02, 0x02, 0x02, 0x02, 0x02 };
+    const src = ipv4.Address{ 10, 0, 0, 1 };
+    const dst = ipv4.Address{ 10, 0, 0, 2 };
+    const dst_mac = ethernet.Address{ 0x52, 0x54, 0x00, 0x00, 0x00, 0x01 };
+
+    try testing.expect(f.stage(&payload, src, dst, .udp, 64, 42, dst_mac));
+    try testing.expect(!f.isEmpty());
+    try testing.expect(!f.finished());
+
+    const ip_mtu: usize = 1500;
+    const max_frag = maxIpv4FragmentPayload(ipv4.HEADER_LEN, ip_mtu);
+    var frame_buf: [1514]u8 = undefined;
+
+    // First fragment: raw IP (no Ethernet header)
+    const len1 = f.emitNext(&frame_buf, hw, ip_mtu) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(ipv4.HEADER_LEN + max_frag, len1);
+    // First byte should be IP version nibble (0x45), not Ethernet
+    try testing.expectEqual(@as(u8, 0x45), frame_buf[0]);
+    try testing.expect(!f.finished());
+
+    const len2 = f.emitNext(&frame_buf, hw, ip_mtu) orelse return error.TestUnexpectedResult;
+    try testing.expect(len2 <= 1514);
+    try testing.expect(!f.finished());
+
+    const len3 = f.emitNext(&frame_buf, hw, ip_mtu) orelse return error.TestUnexpectedResult;
+    const expected_last = 3000 - 2 * max_frag;
+    try testing.expectEqual(ipv4.HEADER_LEN + expected_last, len3);
+    try testing.expect(f.finished());
+
+    try testing.expect(f.emitNext(&frame_buf, hw, ip_mtu) == null);
 }

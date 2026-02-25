@@ -27,6 +27,17 @@ const tcp_socket = @import("socket/tcp.zig");
 const time = @import("time.zig");
 
 // -------------------------------------------------------------------------
+// Medium
+// -------------------------------------------------------------------------
+
+pub const Medium = enum {
+    /// Ethernet: 14-byte frame header, ARP/NDP neighbor resolution.
+    ethernet,
+    /// Raw IP: no link-layer framing, point-to-point (TUN, PPP).
+    ip,
+};
+
+// -------------------------------------------------------------------------
 // Device Capabilities
 // -------------------------------------------------------------------------
 
