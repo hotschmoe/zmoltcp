@@ -2,7 +2,7 @@
 
 Tracks zmoltcp tests against their smoltcp reference implementations.
 
-**Total: 592 tests passing** (591 named + 1 root import test)
+**Total: 676 tests passing** (675 named + 1 root import test)
 
 ## Summary
 
@@ -14,7 +14,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/ip | 0 | 7 | 0 | 7 | PASS |
 | wire/ipv4 | 15 | 16 | 0 | 16 | PASS |
 | wire/tcp | 9 | 22 | 0 | 22 | PASS |
-| wire/udp | 8 | 8 | 0 | 8 | PASS |
+| wire/udp | 8 | 11 | 0 | 11 | PASS |
 | wire/icmp | 5 | 5 | 0 | 5 | PASS |
 | storage/ring_buffer | 15 | 14 | 1 | 14 | PASS |
 | storage/assembler | 38 | 37 | 1 | 37 | PASS |
@@ -38,11 +38,11 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/ndisc | 2 | 4 | 0 | 4 | PASS |
 | wire/mld | 2 | 6 | 0 | 6 | PASS |
 | wire/icmpv6 | 6 | 9 | 0 | 9 | PASS |
-| iface | 24 | 33 | 1 | 33 | PASS |
+| iface | 24 | 59 | 1 | 59 | PASS |
 | phy | 0 | 9 | 0 | 9 | PASS |
-| fragmentation | 3 | 8 | 0 | 8 | PASS |
-| stack | 2 | 47 | 0 | 47 | PASS |
-| **Total** | | **591** | **8** | **591** | **PASS** |
+| fragmentation | 3 | 11 | 0 | 11 | PASS |
+| stack | 2 | 99 | 0 | 99 | PASS |
+| **Total** | | **675** | **8** | **675** | **PASS** |
 
 ## Wire Layer Tests
 
@@ -142,6 +142,9 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/udp.rs:test_construct | "UDP construct with checksum" | PASS |
 | wire/udp.rs:test_zero_checksum | "UDP zero checksum becomes 0xFFFF" | PASS |
 | wire/udp.rs:test_no_checksum | "UDP disabled checksum passes verify" | PASS |
+| (original) | "UDP v6 checksum roundtrip" | PASS |
+| (original) | "UDP v6 zero checksum is forbidden" | PASS |
+| (original) | "UDP v6 fillChecksum avoids zero" | PASS |
 
 ### wire/icmp.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -718,6 +721,40 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "multicast group join leave has" | PASS |
 | (original) | "multicast group full capacity" | PASS |
 
+### iface/neighbor_v6 -- IPv6 NeighborCache + NDP tests
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| (original) | "v6 neighbor cache fill and lookup" | PASS |
+| (original) | "v6 neighbor cache replace entry" | PASS |
+| (original) | "v6 neighbor cache evicts oldest entry" | PASS |
+| (original) | "v6 neighbor cache flush" | PASS |
+| (original) | "setIpv6Addrs flushes v6 neighbor cache" | PASS |
+| (original) | "ipv6Addr and linkLocalIpv6Addr" | PASS |
+| (original) | "solicitedNodeAddr computation" | PASS |
+| (original) | "hasSolicitedNode positive and negative" | PASS |
+| (original) | "setIpv6Addrs auto-joins solicited-node and all-nodes multicast" | PASS |
+| (original) | "multicast group v6 join leave has" | PASS |
+| (original) | "multicast group v6 full capacity" | PASS |
+| (original) | "eui64InterfaceId derivation" | PASS |
+| (original) | "linkLocalFromMac derivation" | PASS |
+
+### iface/ipv6 -- IPv6 ingress processing
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| (original) | "IPv6 echo request -> reply (unicast)" | PASS |
+| (original) | "IPv6 echo request -> reply (multicast, src from configured addr)" | PASS |
+| (original) | "IPv6 reject multicast source" | PASS |
+| (original) | "IPv6 drop for unknown destination" | PASS |
+| (original) | "NS -> NA reply (with solicited flag)" | PASS |
+| (original) | "NS learns neighbor from LLAddr option" | PASS |
+| (original) | "NA fills cache (override flag)" | PASS |
+| (original) | "NA does not overwrite without override" | PASS |
+| (original) | "NDP rejected when hop_limit != 255" | PASS |
+| (original) | "IPv6 param problem for unrecognized next header" | PASS |
+| (original) | "UDP port unreachable v6" | PASS |
+| (original) | "TCP RST v6" | PASS |
+| (original) | "TCP RST suppressed for RST input v6" | PASS |
+
 ## Stack Layer Tests
 
 ### stack.zig
@@ -770,6 +807,58 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "burst size limits frames per poll cycle" | PASS |
 | (original) | "DeviceCapabilities defaults enable all checksums" | PASS |
 | (original) | "ChecksumMode shouldVerifyRx and shouldComputeTx" | PASS |
+| (original) | "stack v6 echo request produces reply" | PASS |
+| (original) | "stack v6 drops multicast source" | PASS |
+| (original) | "stack v6 drops unknown destination" | PASS |
+| (original) | "stack v6 opportunistic neighbor learn" | PASS |
+| (original) | "stack v6 NDP NS produces NA" | PASS |
+| (original) | "stack v6 TCP SYN produces RST" | PASS |
+| (original) | "stack v6 UDP port unreachable" | PASS |
+| (original) | "stack v6 param problem for unknown next header" | PASS |
+| (original) | "stack void SocketConfig with v6" | PASS |
+| (original) | "stack v6 NDP solicit emitted for unknown neighbor" | PASS |
+| (original) | "stack v6 emitIpv6Frame multicast MAC derivation" | PASS |
+| (original) | "stack v6 emitIpv6Frame correct framing" | PASS |
+| (original) | "stack v6 rate-limited neighbor returns pending" | PASS |
+| (original) | "stack v6 neighborAvailableOrRequestV6" | PASS |
+| (original) | "stack v6 full echo roundtrip via poll" | PASS |
+| (original) | "MLD report emitted on group join" | PASS |
+| (original) | "MLD report destination is ff02::16, hop_limit=1" | PASS |
+| (original) | "MLD leave report on group leave" | PASS |
+| (original) | "MLD general query triggers reports for all groups" | PASS |
+| (original) | "MLD specific query triggers report for one group" | PASS |
+| (original) | "MLD report has HBH Router Alert header" | PASS |
+| (original) | "MLD report ICMPv6 checksum correct" | PASS |
+| (original) | "enableSlaac configures link-local address from MAC" | PASS |
+| (original) | "RS emitted to ff02::2 with hop_limit=255" | PASS |
+| (original) | "RS retry up to 3 times, 4s apart" | PASS |
+| (original) | "RA processing: prefix -> derived address added" | PASS |
+| (original) | "RA processing: default route added" | PASS |
+| (original) | "SLAAC-derived address uses EUI-64" | PASS |
+| (original) | "RA without addrconf flag does not add address" | PASS |
+| (original) | "prefix expiry removes SLAAC state" | PASS |
+| (original) | "router lifetime expiry removes default route" | PASS |
+| (original) | "full SLAAC flow: enable -> RS -> RA -> address configured" | PASS |
+| (original) | "SLAAC pollAt returns next_rs_at when soliciting" | PASS |
+| (original) | "SLAAC disabled by default" | PASS |
+| (original) | "dual-stack: v4 and v6 echo in same poll cycle" | PASS |
+| (original) | "dual-stack: NDP resolve then v6 echo" | PASS |
+| (original) | "v6 echo reply checksum verification" | PASS |
+| (original) | "DeviceCapabilities defaults include icmpv6 checksum" | PASS |
+| (original) | "stack v6 UDP socket receives datagram" | PASS |
+| (original) | "stack v6 TCP socket receives SYN, replies SYN-ACK" | PASS |
+| (original) | "stack v6 ICMPv6 socket receives echo reply" | PASS |
+| (original) | "stack v6 raw socket receives IP payload" | PASS |
+| (original) | "stack v6 raw socket suppresses ICMPv6 param problem" | PASS |
+| (original) | "stack v6 TCP egress dispatches SYN on connect" | PASS |
+| (original) | "stack v6 UDP egress dispatches datagram with mandatory checksum" | PASS |
+| (original) | "stack v6 ICMP egress dispatches echo request" | PASS |
+| (original) | "stack v6 TCP egress triggers NDP when neighbor unknown" | PASS |
+| (original) | "stack v6 pollAt returns ZERO for pending TCP6 SYN-SENT" | PASS |
+| (original) | "stack v6 pollAt returns ZERO for pending UDP6 data" | PASS |
+| (original) | "stack v6 pollAt returns null for idle sockets" | PASS |
+| (original) | "stack v6 two-fragment reassembly delivers to socket" | PASS |
+| (original) | "stack v6 extension header chain walking" | PASS |
 
 ### phy.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -795,6 +884,9 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "reassembler expiry" | PASS |
 | (original) | "reassembler eviction on new key" | PASS |
 | (original) | "reassembler buffer overflow" | PASS |
+| (original) | "FragKeyV6 equality" | PASS |
+| (original) | "reassembler with v6 keys" | PASS |
+| (original) | "isFragmentV6" | PASS |
 
 ## Not Applicable (N/A) Tests
 

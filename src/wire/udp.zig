@@ -61,6 +61,32 @@ pub fn fillChecksum(buf: []u8, src_ip: [4]u8, dst_ip: [4]u8) void {
     buf[7] = @truncate(cksum & 0xFF);
 }
 
+/// Compute UDP checksum with IPv6 pseudo-header (mandatory per RFC 8200 S8.1).
+pub fn computeChecksumV6(src_ip: [16]u8, dst_ip: [16]u8, udp_data: []const u8) u16 {
+    const partial = checksum.pseudoHeaderChecksumV6(src_ip, dst_ip, 17, @intCast(udp_data.len));
+    return checksum.finish(checksum.calculate(udp_data, partial));
+}
+
+/// Write the computed IPv6 UDP checksum into an already-serialized buffer.
+/// RFC 8200: UDP checksum is mandatory over IPv6; zero checksum is forbidden.
+pub fn fillChecksumV6(buf: []u8, src_ip: [16]u8, dst_ip: [16]u8) void {
+    buf[6] = 0;
+    buf[7] = 0;
+    var cksum = computeChecksumV6(src_ip, dst_ip, buf);
+    if (cksum == 0) cksum = 0xFFFF;
+    buf[6] = @truncate(cksum >> 8);
+    buf[7] = @truncate(cksum & 0xFF);
+}
+
+/// Verify UDP checksum over IPv6 pseudo-header.
+/// Unlike IPv4, zero checksum is NOT valid over IPv6 (RFC 8200 S8.1).
+pub fn verifyChecksumV6(data: []const u8, src_ip: [16]u8, dst_ip: [16]u8) bool {
+    if (data.len < HEADER_LEN) return false;
+    const stored: u16 = @as(u16, data[6]) << 8 | @as(u16, data[7]);
+    if (stored == 0) return false; // zero checksum forbidden over IPv6
+    return computeChecksumV6(src_ip, dst_ip, data) == 0;
+}
+
 /// Verify UDP checksum. Returns true if valid or if checksum is disabled (0x0000).
 pub fn verifyChecksum(data: []const u8, src_ip: [4]u8, dst_ip: [4]u8) bool {
     if (data.len < HEADER_LEN) return false;
@@ -184,4 +210,55 @@ test "UDP disabled checksum passes verify" {
         .checksum = 0,
     }, &buf);
     try testing.expect(verifyChecksum(&buf, SRC_ADDR, DST_ADDR));
+}
+
+// -------------------------------------------------------------------------
+// IPv6 checksum tests
+// -------------------------------------------------------------------------
+
+const SRC_V6: [16]u8 = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+const DST_V6: [16]u8 = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 };
+
+test "UDP v6 checksum roundtrip" {
+    var buf: [12]u8 = undefined;
+    _ = try emit(.{
+        .src_port = 48896,
+        .dst_port = 53,
+        .length = 12,
+        .checksum = 0,
+    }, &buf);
+    @memcpy(buf[HEADER_LEN..], &PAYLOAD_BYTES);
+    fillChecksumV6(&buf, SRC_V6, DST_V6);
+    // Checksum must be non-zero (mandatory for IPv6)
+    const cksum: u16 = @as(u16, buf[6]) << 8 | @as(u16, buf[7]);
+    try testing.expect(cksum != 0);
+    // Verify passes
+    try testing.expect(verifyChecksumV6(&buf, SRC_V6, DST_V6));
+}
+
+test "UDP v6 zero checksum is forbidden" {
+    // A buffer with checksum field = 0 must fail verification
+    var buf: [8]u8 = undefined;
+    _ = try emit(.{
+        .src_port = 1,
+        .dst_port = 2,
+        .length = 8,
+        .checksum = 0,
+    }, &buf);
+    try testing.expect(!verifyChecksumV6(&buf, SRC_V6, DST_V6));
+}
+
+test "UDP v6 fillChecksum avoids zero" {
+    // Same port combo that produces zero checksum over IPv4 should still
+    // produce non-zero (0xFFFF) over IPv6 if the raw sum is zero.
+    var buf: [8]u8 = [_]u8{0} ** 8;
+    _ = try emit(.{
+        .src_port = 1,
+        .dst_port = 31881,
+        .length = 8,
+        .checksum = 0,
+    }, &buf);
+    fillChecksumV6(&buf, SRC_V6, DST_V6);
+    const cksum: u16 = @as(u16, buf[6]) << 8 | @as(u16, buf[7]);
+    try testing.expect(cksum != 0);
 }

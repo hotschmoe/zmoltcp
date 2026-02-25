@@ -1525,7 +1525,7 @@ test "ICMP socket receives echo request and auto-reply" {
     const icmp_repr = icmp.parse(&icmp_buf) catch return error.ParseFailed;
     const icmp_payload = icmp_buf[icmp.HEADER_LEN..];
     try testing.expect(sock.accepts(REMOTE_IP, LOCAL_IP, icmp_repr, icmp_payload));
-    sock.process(REMOTE_IP, icmp_repr, icmp_payload);
+    sock.process(REMOTE_IP, LOCAL_IP, icmp_repr, icmp_payload);
 
     // Auto-reply still works
     const result = iface_inst.processIcmp(ip_repr, &icmp_buf, false) orelse

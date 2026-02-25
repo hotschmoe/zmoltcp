@@ -10,21 +10,31 @@
 const std = @import("std");
 const ip_generic = @import("../wire/ip.zig");
 const ipv4 = @import("../wire/ipv4.zig");
+const ipv6 = @import("../wire/ipv6.zig");
 const icmp = @import("../wire/icmp.zig");
+const icmpv6_wire = @import("../wire/icmpv6.zig");
 const ring_buffer_mod = @import("../storage/ring_buffer.zig");
 const time = @import("../time.zig");
 const iface_mod = @import("../iface.zig");
 
 const Instant = time.Instant;
 
-// Extract the transport-layer source port from an ICMP error payload.
+// Extract the transport-layer source port from an ICMPv4 error payload.
 // The payload contains: [embedded IPv4 header][transport header fragment].
-// Returns null if the payload is too short to contain a valid port.
 fn embeddedSrcPort(payload: []const u8) ?u16 {
     if (payload.len < ipv4.HEADER_LEN) return null;
     const ihl: usize = @as(usize, payload[0] & 0x0F) * 4;
     if (ihl < ipv4.HEADER_LEN or payload.len < ihl + 2) return null;
     return @as(u16, payload[ihl]) << 8 | @as(u16, payload[ihl + 1]);
+}
+
+// Extract the transport-layer source port from an ICMPv6 error payload.
+// Layout after the 4-byte ICMPv6 header:
+//   [4 bytes msg-specific][40 bytes IPv6 header][transport header fragment]
+fn embeddedSrcPortV6(payload: []const u8) ?u16 {
+    const offset = 4 + ipv6.HEADER_LEN;
+    if (payload.len < offset + 2) return null;
+    return @as(u16, payload[offset]) << 8 | @as(u16, payload[offset + 1]);
 }
 
 pub const Config = struct {
@@ -33,9 +43,11 @@ pub const Config = struct {
 
 pub fn Socket(comptime Ip: type, comptime config: Config) type {
     comptime ip_generic.assertIsIp(Ip);
+    const is_v6 = Ip.ADDRESS_LEN == 16;
     return struct {
         const Self = @This();
 
+        pub const IcmpRepr = if (is_v6) icmpv6_wire.Repr else icmp.Repr;
         pub const UdpListenEndpoint = ip_generic.ListenEndpoint(Ip);
 
         pub const Endpoint = union(enum) {
@@ -157,42 +169,68 @@ pub fn Socket(comptime Ip: type, comptime config: Config) type {
 
         // -- Protocol integration --
 
-        pub fn accepts(self: Self, src_addr: Ip.Address, dst_addr: Ip.Address, repr: icmp.Repr, payload: []const u8) bool {
+        pub fn accepts(self: Self, src_addr: Ip.Address, dst_addr: Ip.Address, repr: IcmpRepr, payload: []const u8) bool {
             _ = src_addr;
             switch (self.endpoint) {
                 .unspecified => return false,
                 .ident => |bound_ident| {
-                    return switch (repr) {
-                        .echo => |echo| echo.identifier == bound_ident,
-                        .other => false,
-                    };
+                    if (comptime is_v6) {
+                        return switch (repr) {
+                            .echo_request => |e| e.ident == bound_ident,
+                            .echo_reply => |e| e.ident == bound_ident,
+                            else => false,
+                        };
+                    } else {
+                        return switch (repr) {
+                            .echo => |echo| echo.identifier == bound_ident,
+                            .other => false,
+                        };
+                    }
                 },
                 .udp => |udp_ep| {
-                    const other = switch (repr) {
-                        .other => |o| o,
-                        .echo => return false,
-                    };
-                    switch (other.icmp_type) {
-                        .dest_unreachable, .time_exceeded => {},
-                        else => return false,
+                    if (comptime is_v6) {
+                        switch (repr) {
+                            .dst_unreachable, .pkt_too_big, .time_exceeded, .param_problem => {},
+                            else => return false,
+                        }
+                    } else {
+                        const other = switch (repr) {
+                            .other => |o| o,
+                            .echo => return false,
+                        };
+                        switch (other.icmp_type) {
+                            .dest_unreachable, .time_exceeded => {},
+                            else => return false,
+                        }
                     }
                     if (udp_ep.addr) |bound_addr| {
                         if (!std.mem.eql(u8, &bound_addr, &dst_addr)) return false;
                     }
-                    const src_port = embeddedSrcPort(payload) orelse return false;
-                    return src_port == udp_ep.port;
+                    const src_port = if (comptime is_v6)
+                        embeddedSrcPortV6(payload)
+                    else
+                        embeddedSrcPort(payload);
+                    return (src_port orelse return false) == udp_ep.port;
                 },
             }
         }
 
-        pub fn process(self: *Self, src_addr: Ip.Address, repr: icmp.Repr, payload: []const u8) void {
-            if (icmp.HEADER_LEN + payload.len > config.payload_size) return;
+        pub fn process(self: *Self, src_addr: Ip.Address, dst_addr: Ip.Address, repr: IcmpRepr, payload: []const u8) void {
+            if (comptime is_v6) {
+                if (icmpv6_wire.bufferLen(repr) > config.payload_size) return;
+            } else {
+                if (icmp.HEADER_LEN + payload.len > config.payload_size) return;
+            }
 
             const pkt = self.rx.enqueueOne() catch return;
-            pkt.payload_len = switch (repr) {
-                .echo => |echo| icmp.emitEcho(echo, payload, &pkt.payload) catch unreachable,
-                .other => |other| icmp.emitOther(other, payload, &pkt.payload) catch unreachable,
-            };
+            if (comptime is_v6) {
+                pkt.payload_len = icmpv6_wire.emit(repr, src_addr, dst_addr, &pkt.payload) catch unreachable;
+            } else {
+                pkt.payload_len = switch (repr) {
+                    .echo => |echo| icmp.emitEcho(echo, payload, &pkt.payload) catch unreachable,
+                    .other => |other| icmp.emitOther(other, payload, &pkt.payload) catch unreachable,
+                };
+            }
             pkt.addr = src_addr;
         }
 
@@ -315,12 +353,12 @@ test "process inbound and recv" {
     } };
 
     try testing.expect(s.accepts(REMOTE_ADDR, LOCAL_ADDR, echo_repr, &ECHO_DATA));
-    s.process(REMOTE_ADDR, echo_repr, &ECHO_DATA);
+    s.process(REMOTE_ADDR, LOCAL_ADDR, echo_repr, &ECHO_DATA);
     try testing.expect(s.canRecv());
 
     // Second process to full buffer (rx size 1) is accepted but dropped
     try testing.expect(s.accepts(REMOTE_ADDR, LOCAL_ADDR, echo_repr, &ECHO_DATA));
-    s.process(REMOTE_ADDR, echo_repr, &ECHO_DATA);
+    s.process(REMOTE_ADDR, LOCAL_ADDR, echo_repr, &ECHO_DATA);
 
     // Verify recv returns correctly serialized ICMP echo bytes
     var expected_buf: [24]u8 = undefined;
@@ -385,7 +423,7 @@ test "accepts ICMP error for bound UDP port" {
 
     // Verify accepts matches the bound UDP port
     try testing.expect(s.accepts(REMOTE_ADDR, LOCAL_ADDR, icmp_repr, &embedded_payload));
-    s.process(REMOTE_ADDR, icmp_repr, &embedded_payload);
+    s.process(REMOTE_ADDR, LOCAL_ADDR, icmp_repr, &embedded_payload);
     try testing.expect(s.canRecv());
 
     var expected_buf: [icmp.HEADER_LEN + embedded_payload.len]u8 = undefined;

@@ -19,8 +19,11 @@ const tcp_socket = @import("socket/tcp.zig");
 const dhcp_wire = @import("wire/dhcp.zig");
 const dhcp_socket_mod = @import("socket/dhcp.zig");
 const dns_socket_mod = @import("socket/dns.zig");
+const icmp_socket_mod = @import("socket/icmp.zig");
 const raw_socket_mod = @import("socket/raw.zig");
 const igmp_wire = @import("wire/igmp.zig");
+const ipv6ext_header = @import("wire/ipv6ext_header.zig");
+const ipv6fragment = @import("wire/ipv6fragment.zig");
 const iface_mod = @import("iface.zig");
 const frag_mod = @import("fragmentation.zig");
 const time = @import("time.zig");
@@ -64,10 +67,17 @@ fn serializeTcp(
 ///   fn transmit(self: *Device, frame: []const u8) void
 ///
 /// SocketConfig is either `void` (no sockets) or a struct with optional fields:
-///   tcp4_sockets: []*SomeTcpSocket
-///   udp4_sockets: []*SomeUdpSocket
-///   icmp4_sockets: []*SomeIcmpSocket
-///   raw4_sockets: []*SomeRawSocket
+///   tcp4_sockets:  []*SomeTcpSocket(ipv4, ...)
+///   udp4_sockets:  []*SomeUdpSocket(ipv4, ...)
+///   icmp4_sockets: []*SomeIcmpSocket(ipv4, ...)
+///   raw4_sockets:  []*SomeRawSocket(ipv4, ...)
+///   dns4_sockets:  []*SomeDnsSocket(ipv4, ...)
+///   dhcp_sockets:  []*SomeDhcpSocket
+///   tcp6_sockets:  []*SomeTcpSocket(ipv6, ...)
+///   udp6_sockets:  []*SomeUdpSocket(ipv6, ...)
+///   icmp6_sockets: []*SomeIcmpSocket(ipv6, ...)
+///   raw6_sockets:  []*SomeRawSocket(ipv6, ...)
+///   dns6_sockets:  []*SomeDnsSocket(ipv6, ...)
 pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
     comptime {
         if (!@hasDecl(Device, "receive")) @compileError("Device must have receive()");
@@ -80,6 +90,12 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
     const has_dhcp = SocketConfig != void and @hasField(SocketConfig, "dhcp_sockets");
     const has_dns4 = SocketConfig != void and @hasField(SocketConfig, "dns4_sockets");
     const has_raw4 = SocketConfig != void and @hasField(SocketConfig, "raw4_sockets");
+
+    const has_tcp6 = SocketConfig != void and @hasField(SocketConfig, "tcp6_sockets");
+    const has_udp6 = SocketConfig != void and @hasField(SocketConfig, "udp6_sockets");
+    const has_icmp6 = SocketConfig != void and @hasField(SocketConfig, "icmp6_sockets");
+    const has_dns6 = SocketConfig != void and @hasField(SocketConfig, "dns6_sockets");
+    const has_raw6 = SocketConfig != void and @hasField(SocketConfig, "raw6_sockets");
 
     const FRAG_BUFFER_SIZE = 4096;
     const REASSEMBLY_BUFFER_SIZE = 1500;
@@ -104,6 +120,10 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             .buffer_size = REASSEMBLY_BUFFER_SIZE,
             .max_segments = REASSEMBLY_MAX_SEGMENTS,
         }) = .{},
+        reassembler_v6: frag_mod.Reassembler(frag_mod.FragKeyV6, .{
+            .buffer_size = REASSEMBLY_BUFFER_SIZE,
+            .max_segments = REASSEMBLY_MAX_SEGMENTS,
+        }) = .{},
         ipv4_id: u16 = 0,
         reassembly_timeout: time.Duration = DEFAULT_REASSEMBLY_TIMEOUT,
 
@@ -117,6 +137,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
         pub fn poll(self: *Self, timestamp: Instant, device: *Device) bool {
             self.iface.now = timestamp;
             self.reassembler.removeExpired(timestamp);
+            self.reassembler_v6.removeExpired(timestamp);
             self.iface.slaacMaintenance(timestamp);
             var activity = false;
 
@@ -188,6 +209,45 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                 }
             }
 
+            // -- IPv6 socket polling --
+            if (comptime has_tcp6) {
+                for (self.sockets.tcp6_sockets) |sock| {
+                    if (sock.pollAt()) |sock_at| {
+                        const effective = self.adjustForNeighborV6(sock_at, if (sock.tuple) |t| t.remote.addr else null);
+                        result = minOptInstant(result, effective);
+                    }
+                }
+            }
+            if (comptime has_udp6) {
+                for (self.sockets.udp6_sockets) |sock| {
+                    if (sock.pollAt()) |sock_at| {
+                        const effective = self.adjustForNeighborV6(sock_at, sock.peekDstAddr());
+                        result = minOptInstant(result, effective);
+                    }
+                }
+            }
+            if (comptime has_icmp6) {
+                for (self.sockets.icmp6_sockets) |sock| {
+                    if (sock.pollAt()) |sock_at| {
+                        const effective = self.adjustForNeighborV6(sock_at, sock.peekDstAddr());
+                        result = minOptInstant(result, effective);
+                    }
+                }
+            }
+            if (comptime has_dns6) {
+                for (self.sockets.dns6_sockets) |sock| {
+                    result = minOptInstant(result, sock.pollAt());
+                }
+            }
+            if (comptime has_raw6) {
+                for (self.sockets.raw6_sockets) |sock| {
+                    if (sock.pollAt()) |sock_at| {
+                        const effective = self.adjustForNeighborV6(sock_at, sock.peekDstAddr());
+                        result = minOptInstant(result, effective);
+                    }
+                }
+            }
+
             result = minOptInstant(result, self.iface.slaacPollAt());
 
             return result;
@@ -199,6 +259,16 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             const next_hop = self.iface.route(addr) orelse return sock_at;
             return switch (self.iface.neighbor_cache.lookupFull(next_hop, sock_at)) {
                 .rate_limited => self.iface.neighbor_cache.silent_until,
+                else => sock_at,
+            };
+        }
+
+        fn adjustForNeighborV6(self: *const Self, sock_at: Instant, dst: ?ipv6.Address) Instant {
+            const addr = dst orelse return sock_at;
+            if (ipv6.isMulticast(addr)) return sock_at;
+            const next_hop = self.iface.routeV6(addr) orelse return sock_at;
+            return switch (self.iface.neighbor_cache_v6.lookupFull(next_hop, sock_at)) {
+                .rate_limited => self.iface.neighbor_cache_v6.silent_until,
                 else => sock_at,
             };
         }
@@ -308,13 +378,80 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
         }
 
         fn processIpv6Ingress(self: *Self, timestamp: Instant, ip_repr: ipv6.Repr, data: []const u8, device: *Device) void {
-            const ip_payload = ipv6.payloadSlice(data) catch return;
+            const raw_payload = ipv6.payloadSlice(data) catch return;
 
             const is_multicast = ipv6.isMulticast(ip_repr.dst_addr) and self.iface.hasMulticastGroupV6(ip_repr.dst_addr);
             if (!is_multicast and !self.iface.v6.hasIpAddr(ip_repr.dst_addr) and !ipv6.isLoopback(ip_repr.dst_addr)) return;
 
-            switch (ip_repr.next_header) {
+            // Walk extension header chain to find the final next_header and payload
+            var next_header = ip_repr.next_header;
+            var payload_offset: usize = 0;
+
+            while (true) {
+                switch (next_header) {
+                    .hop_by_hop, .routing, .destination => {
+                        const remaining = raw_payload[payload_offset..];
+                        const ext = ipv6ext_header.parse(remaining) catch return;
+                        next_header = @enumFromInt(ext.next_header);
+                        payload_offset += ipv6ext_header.headerLen(ext.length);
+                    },
+                    .fragment => {
+                        const remaining = raw_payload[payload_offset..];
+                        const frag_repr = ipv6fragment.parse(remaining) catch return;
+                        const frag_data = remaining[ipv6fragment.HEADER_LEN..];
+                        const ip_payload = self.reassembleV6(
+                            timestamp,
+                            ip_repr,
+                            frag_repr,
+                            frag_data,
+                        ) orelse return;
+                        const final_nh: ipv6.Protocol = @enumFromInt(frag_repr.next_header);
+                        self.dispatchV6Payload(ip_repr, final_nh, ip_payload, is_multicast, timestamp, device);
+                        return;
+                    },
+                    else => break,
+                }
+            }
+
+            self.dispatchV6Payload(ip_repr, next_header, raw_payload[payload_offset..], is_multicast, timestamp, device);
+        }
+
+        fn reassembleV6(
+            self: *Self,
+            timestamp: Instant,
+            ip_repr: ipv6.Repr,
+            frag_repr: ipv6fragment.Repr,
+            frag_data: []const u8,
+        ) ?[]const u8 {
+            const key = frag_mod.FragKeyV6{
+                .id = frag_repr.ident,
+                .src_addr = ip_repr.src_addr,
+                .dst_addr = ip_repr.dst_addr,
+            };
+            const byte_offset = @as(usize, frag_repr.frag_offset) * 8;
+            const expires_at = timestamp.add(self.reassembly_timeout);
+            self.reassembler_v6.accept(key, expires_at);
+            if (!frag_repr.more_frags) {
+                self.reassembler_v6.setTotalSize(byte_offset + frag_data.len);
+            }
+            if (!self.reassembler_v6.add(frag_data, byte_offset)) return null;
+            return self.reassembler_v6.assemble();
+        }
+
+        fn dispatchV6Payload(
+            self: *Self,
+            ip_repr: ipv6.Repr,
+            next_header: ipv6.Protocol,
+            ip_payload: []const u8,
+            is_multicast: bool,
+            timestamp: Instant,
+            device: *Device,
+        ) void {
+            const raw_handled = self.routeToRawV6Sockets(ip_repr, ip_payload);
+
+            switch (next_header) {
                 .icmpv6 => {
+                    self.routeToIcmpV6Sockets(ip_repr, ip_payload);
                     self.processMldFromIcmpv6(ip_repr, ip_payload);
                     self.processRaForSlaac(ip_repr, ip_payload);
                     if (self.iface.processIcmpv6(ip_repr, ip_payload, is_multicast)) |response| {
@@ -322,19 +459,24 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     }
                 },
                 .udp => {
-                    const handled = false;
+                    var handled = self.routeToUdpV6Sockets(ip_repr, ip_payload);
+                    if (!handled) handled = self.routeToDnsV6Sockets(ip_payload);
                     if (self.iface.processUdpV6(ip_repr, ip_payload, handled)) |response| {
                         self.emitResponse(response, device);
                     }
                 },
                 .tcp => {
-                    const handled = false;
-                    if (self.iface.processTcpV6(ip_repr, ip_payload, handled)) |response| {
+                    const result = self.routeToTcpV6Sockets(timestamp, ip_repr, ip_payload);
+                    if (result.reply) |reply| {
+                        self.emitTcpV6Reply(ip_repr, reply, device);
+                    }
+                    if (self.iface.processTcpV6(ip_repr, ip_payload, result.handled)) |response| {
                         self.emitResponse(response, device);
                     }
                 },
-                .hop_by_hop, .routing, .fragment, .destination, .no_next_header => {},
+                .no_next_header, .hop_by_hop, .routing, .fragment, .destination => {},
                 _ => {
+                    if (raw_handled) return;
                     if (self.iface.icmpv6ParamProblem(
                         ip_repr,
                         .unrecognized_nxt_hdr,
@@ -345,7 +487,6 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     }
                 },
             }
-            _ = timestamp;
         }
 
         const TcpRouteResult = struct {
@@ -398,7 +539,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
 
             for (self.sockets.icmp4_sockets) |sock| {
                 if (sock.accepts(ip_repr.src_addr, ip_repr.dst_addr, icmp_repr, icmp_payload)) {
-                    sock.process(ip_repr.src_addr, icmp_repr, icmp_payload);
+                    sock.process(ip_repr.src_addr, ip_repr.dst_addr, icmp_repr, icmp_payload);
                 }
             }
         }
@@ -475,6 +616,97 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                 }
             }
             return handled;
+        }
+
+        // -- IPv6 socket routing functions --
+
+        fn routeToTcpV6Sockets(self: *Self, timestamp: Instant, ip_repr: ipv6.Repr, tcp_data: []const u8) TcpRouteResult {
+            if (comptime !has_tcp6) return .{};
+
+            const sock_repr = tcp_socket.TcpRepr.fromWireBytes(tcp_data) orelse return .{};
+
+            for (self.sockets.tcp6_sockets) |sock| {
+                if (sock.accepts(ip_repr.src_addr, ip_repr.dst_addr, sock_repr)) {
+                    const reply = sock.process(timestamp, ip_repr.src_addr, ip_repr.dst_addr, sock_repr);
+                    return .{ .reply = reply, .handled = true };
+                }
+            }
+            return .{};
+        }
+
+        fn routeToUdpV6Sockets(self: *Self, ip_repr: ipv6.Repr, raw_udp: []const u8) bool {
+            if (comptime !has_udp6) return false;
+
+            const wire_repr = udp_wire.parse(raw_udp) catch return false;
+            const payload = udp_wire.payloadSlice(raw_udp) catch return false;
+            const sock_repr = udp_socket_mod.UdpRepr{
+                .src_port = wire_repr.src_port,
+                .dst_port = wire_repr.dst_port,
+            };
+
+            var handled = false;
+            for (self.sockets.udp6_sockets) |sock| {
+                if (sock.accepts(ip_repr.src_addr, ip_repr.dst_addr, sock_repr)) {
+                    sock.process(ip_repr.src_addr, ip_repr.dst_addr, sock_repr, payload);
+                    handled = true;
+                }
+            }
+            return handled;
+        }
+
+        fn routeToIcmpV6Sockets(self: *Self, ip_repr: ipv6.Repr, icmp_data: []const u8) void {
+            if (comptime !has_icmp6) return;
+
+            const icmpv6_repr = icmpv6.parse(icmp_data, ip_repr.src_addr, ip_repr.dst_addr) catch return;
+            const icmpv6_payload = if (icmp_data.len > icmpv6.HEADER_LEN)
+                icmp_data[icmpv6.HEADER_LEN..]
+            else
+                &[_]u8{};
+
+            for (self.sockets.icmp6_sockets) |sock| {
+                if (sock.accepts(ip_repr.src_addr, ip_repr.dst_addr, icmpv6_repr, icmpv6_payload)) {
+                    sock.process(ip_repr.src_addr, ip_repr.dst_addr, icmpv6_repr, icmpv6_payload);
+                }
+            }
+        }
+
+        fn routeToDnsV6Sockets(self: *Self, raw_udp: []const u8) bool {
+            if (comptime !has_dns6) return false;
+
+            const wire_repr = udp_wire.parse(raw_udp) catch return false;
+            if (wire_repr.src_port != dns_socket_mod.DNS_PORT) return false;
+            const payload = udp_wire.payloadSlice(raw_udp) catch return false;
+
+            for (self.sockets.dns6_sockets) |sock| {
+                sock.process(wire_repr.dst_port, payload);
+            }
+            return true;
+        }
+
+        fn routeToRawV6Sockets(self: *Self, ip_repr: ipv6.Repr, ip_payload: []const u8) bool {
+            if (comptime !has_raw6) return false;
+
+            var handled = false;
+            for (self.sockets.raw6_sockets) |sock| {
+                if (sock.accepts(ip_repr.next_header)) {
+                    sock.process(ip_repr.src_addr, ip_repr.next_header, ip_payload);
+                    handled = true;
+                }
+            }
+            return handled;
+        }
+
+        fn emitTcpV6Reply(self: *Self, orig_ip: ipv6.Repr, tcp_repr: tcp_socket.TcpRepr, device: *Device) void {
+            const response = iface_mod.Response{ .ipv6 = .{
+                .ip = .{
+                    .src_addr = orig_ip.dst_addr,
+                    .dst_addr = orig_ip.src_addr,
+                    .protocol = .tcp,
+                    .hop_limit = iface_mod.DEFAULT_HOP_LIMIT,
+                },
+                .payload = .{ .tcp = tcp_repr },
+            } };
+            self.emitResponse(response, device);
         }
 
         fn processEgress(self: *Self, timestamp: Instant, device: *Device) bool {
@@ -564,6 +796,87 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     }
                     while (sock.dispatch()) |result| {
                         _ = self.emitRawEgress(result, device);
+                        dispatched = true;
+                        burst_budget -= 1;
+                        if (burst_budget == 0) break;
+                    }
+                }
+            }
+
+            // -- IPv6 socket egress --
+
+            if (comptime has_tcp6) {
+                for (self.sockets.tcp6_sockets) |sock| {
+                    if (burst_budget == 0) break;
+                    if (sock.tuple) |tuple| {
+                        if (!self.neighborAvailableOrRequestV6(tuple.remote.addr, device)) continue;
+                    }
+                    while (sock.dispatch(timestamp)) |result| {
+                        _ = self.emitTcpV6Egress(
+                            result.src_addr,
+                            result.dst_addr,
+                            result.repr,
+                            result.hop_limit,
+                            device,
+                        );
+                        dispatched = true;
+                        burst_budget -= 1;
+                        if (burst_budget == 0) break;
+                    }
+                }
+            }
+
+            if (comptime has_udp6) {
+                for (self.sockets.udp6_sockets) |sock| {
+                    if (burst_budget == 0) break;
+                    if (sock.peekDstAddr()) |dst| {
+                        if (!self.neighborAvailableOrRequestV6(dst, device)) continue;
+                    }
+                    while (sock.dispatch()) |result| {
+                        _ = self.emitUdpV6Egress(result, device);
+                        dispatched = true;
+                        burst_budget -= 1;
+                        if (burst_budget == 0) break;
+                    }
+                }
+            }
+
+            if (comptime has_icmp6) {
+                for (self.sockets.icmp6_sockets) |sock| {
+                    if (burst_budget == 0) break;
+                    if (sock.peekDstAddr()) |dst| {
+                        if (!self.neighborAvailableOrRequestV6(dst, device)) continue;
+                    }
+                    while (sock.dispatch()) |result| {
+                        _ = self.emitIcmpV6Egress(result, device);
+                        dispatched = true;
+                        burst_budget -= 1;
+                        if (burst_budget == 0) break;
+                    }
+                }
+            }
+
+            if (comptime has_dns6) {
+                for (self.sockets.dns6_sockets) |sock| {
+                    if (burst_budget == 0) break;
+                    var dns_buf: [512]u8 = undefined;
+                    while (sock.dispatch(timestamp, &dns_buf)) |result| {
+                        if (self.emitDnsV6Egress(result, device) == .neighbor_pending) break;
+                        dispatched = true;
+                        burst_budget -= 1;
+                        if (burst_budget == 0) break;
+                    }
+                }
+            }
+
+            if (comptime has_raw6) {
+                for (self.sockets.raw6_sockets) |sock| {
+                    if (burst_budget == 0) break;
+                    if (sock.peekDstAddr()) |dst| {
+                        if (!self.neighborAvailableOrRequestV6(dst, device)) continue;
+                    }
+                    while (sock.dispatch()) |result| {
+                        _ = self.emitRawV6Egress(result, device);
                         dispatched = true;
                         burst_budget -= 1;
                         if (burst_budget == 0) break;
@@ -780,7 +1093,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
 
         fn emitMldReport(self: *Self, group_addr: ipv6.Address, record_type: mld.RecordType, device: *Device) void {
             const ipv6hbh = @import("wire/ipv6hbh.zig");
-            const ipv6ext_header = @import("wire/ipv6ext_header.zig");
+            const ipv6ext_hdr = @import("wire/ipv6ext_header.zig");
 
             const src_addr = self.iface.linkLocalIpv6Addr() orelse ipv6.UNSPECIFIED;
             const dst_addr = ipv6.LINK_LOCAL_ALL_MLDV2_ROUTERS;
@@ -819,7 +1132,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
 
             // HBH extension header: 8 bytes (length=0 means (0+1)*8)
             const hbh_start = pos;
-            pos += ipv6ext_header.emit(.{
+            pos += ipv6ext_hdr.emit(.{
                 .next_header = @intFromEnum(ipv6.Protocol.icmpv6),
                 .length = 0,
                 .data = &[_]u8{},
@@ -996,6 +1309,80 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                 (self.iface.ipv4Addr() orelse return .sent);
             const hop_limit = result.hop_limit orelse iface_mod.DEFAULT_HOP_LIMIT;
             return self.emitIpv4Frame(src_addr, result.dst_addr, result.ip_protocol, hop_limit, result.payload, device);
+        }
+
+        // -- IPv6 egress emit helpers --
+
+        fn emitTcpV6Egress(
+            self: *Self,
+            src_addr: ipv6.Address,
+            dst_addr: ipv6.Address,
+            repr: tcp_socket.TcpRepr,
+            hop_limit: u8,
+            device: *Device,
+        ) EmitResult {
+            const IPV6_PAYLOAD_MAX = MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv6.HEADER_LEN;
+            var payload_buf: [IPV6_PAYLOAD_MAX]u8 = undefined;
+            const total_tcp = serializeTcpV6(repr, src_addr, dst_addr, &payload_buf, device_caps.checksum.tcp.shouldComputeTx()) orelse return .sent;
+            return self.emitIpv6Frame(src_addr, dst_addr, .tcp, hop_limit, payload_buf[0..total_tcp], device);
+        }
+
+        fn emitUdpV6Egress(self: *Self, result: anytype, device: *Device) EmitResult {
+            const IPV6_PAYLOAD_MAX = MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv6.HEADER_LEN;
+            var payload_buf: [IPV6_PAYLOAD_MAX]u8 = undefined;
+            const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + result.payload.len);
+            const hdr_len = udp_wire.emit(.{
+                .src_port = result.repr.src_port,
+                .dst_port = result.repr.dst_port,
+                .length = udp_total,
+                .checksum = 0,
+            }, &payload_buf) catch return .sent;
+            if (hdr_len + result.payload.len > payload_buf.len) return .sent;
+            @memcpy(payload_buf[hdr_len..][0..result.payload.len], result.payload);
+            const total = hdr_len + result.payload.len;
+
+            const src_addr = if (!ipv6.isUnspecified(result.src_addr))
+                result.src_addr
+            else
+                (self.iface.v6.getSourceAddress(result.dst_addr) orelse return .sent);
+
+            // UDP checksum is mandatory over IPv6
+            udp_wire.fillChecksumV6(payload_buf[0..total], src_addr, result.dst_addr);
+            const hop_limit = result.hop_limit orelse iface_mod.DEFAULT_HOP_LIMIT;
+            return self.emitIpv6Frame(src_addr, result.dst_addr, .udp, hop_limit, payload_buf[0..total], device);
+        }
+
+        fn emitIcmpV6Egress(self: *Self, result: anytype, device: *Device) EmitResult {
+            const src_addr = self.iface.v6.getSourceAddress(result.dst_addr) orelse
+                (self.iface.linkLocalIpv6Addr() orelse return .sent);
+            const hop_limit = result.hop_limit orelse iface_mod.DEFAULT_HOP_LIMIT;
+            return self.emitIpv6Frame(src_addr, result.dst_addr, .icmpv6, hop_limit, result.payload, device);
+        }
+
+        fn emitDnsV6Egress(self: *Self, result: anytype, device: *Device) EmitResult {
+            const IPV6_PAYLOAD_MAX = MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv6.HEADER_LEN;
+            var payload_buf: [IPV6_PAYLOAD_MAX]u8 = undefined;
+            const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + result.payload.len);
+            const hdr_len = udp_wire.emit(.{
+                .src_port = result.src_port,
+                .dst_port = dns_socket_mod.DNS_PORT,
+                .length = udp_total,
+                .checksum = 0,
+            }, &payload_buf) catch return .sent;
+            if (hdr_len + result.payload.len > payload_buf.len) return .sent;
+            @memcpy(payload_buf[hdr_len..][0..result.payload.len], result.payload);
+            const total = hdr_len + result.payload.len;
+
+            const src_addr = self.iface.v6.getSourceAddress(result.dst_ip) orelse return .sent;
+            udp_wire.fillChecksumV6(payload_buf[0..total], src_addr, result.dst_ip);
+            return self.emitIpv6Frame(src_addr, result.dst_ip, .udp, iface_mod.DEFAULT_HOP_LIMIT, payload_buf[0..total], device);
+        }
+
+        fn emitRawV6Egress(self: *Self, result: anytype, device: *Device) EmitResult {
+            const src_addr = self.iface.v6.getSourceAddress(result.dst_addr) orelse
+                (self.iface.linkLocalIpv6Addr() orelse return .sent);
+            const hop_limit = result.hop_limit orelse iface_mod.DEFAULT_HOP_LIMIT;
+            return self.emitIpv6Frame(src_addr, result.dst_addr, result.ip_protocol, hop_limit, result.payload, device);
         }
 
         fn emitTcpReply(self: *Self, orig_ip: ipv4.Repr, tcp_repr: tcp_socket.TcpRepr, device: *Device) void {
@@ -1610,8 +1997,6 @@ test "stack ICMP echo with bound socket delivers and auto-replies" {
 // -------------------------------------------------------------------------
 // Egress tests
 // -------------------------------------------------------------------------
-
-const icmp_socket_mod = @import("socket/icmp.zig");
 
 test "stack TCP egress dispatches SYN on connect" {
     const TcpSock = tcp_socket.Socket(ipv4, 4);
@@ -4373,5 +4758,621 @@ test "DeviceCapabilities defaults include icmpv6 checksum" {
     const caps = iface_mod.DeviceCapabilities{};
     try testing.expect(caps.checksum.icmpv6.shouldComputeTx());
     try testing.expect(caps.checksum.icmpv6.shouldVerifyRx());
+}
+
+// -------------------------------------------------------------------------
+// IPv6 socket routing tests
+// -------------------------------------------------------------------------
+
+test "stack v6 UDP socket receives datagram" {
+    const UdpSock = udp_socket_mod.Socket(ipv6, .{ .payload_size = 64 });
+    const Sockets = struct { udp6_sockets: []*UdpSock };
+    const V6Stack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    var rx_buf: [1]UdpSock.Packet = undefined;
+    var tx_buf: [1]UdpSock.Packet = undefined;
+    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    try sock.bind(.{ .port = 5000 });
+
+    var sock_arr = [_]*UdpSock{&sock};
+    var stack = V6Stack.init(LOCAL_HW, .{ .udp6_sockets = &sock_arr });
+    stack.iface.setIpv6Addrs(&.{.{ .address = LOCAL_V6, .prefix_len = 64 }});
+    stack.iface.neighbor_cache_v6.fill(REMOTE_V6, REMOTE_HW, Instant.ZERO);
+
+    const udp_payload = [_]u8{ 0x48, 0x65, 0x6c, 0x6c, 0x6f };
+    var raw_udp: [udp_wire.HEADER_LEN + 5]u8 = undefined;
+    _ = udp_wire.emit(.{
+        .src_port = 4000,
+        .dst_port = 5000,
+        .length = @intCast(udp_wire.HEADER_LEN + udp_payload.len),
+        .checksum = 0,
+    }, &raw_udp) catch unreachable;
+    @memcpy(raw_udp[udp_wire.HEADER_LEN..], &udp_payload);
+    udp_wire.fillChecksumV6(&raw_udp, REMOTE_V6, LOCAL_V6);
+
+    var frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv6Frame(&frame_buf, .udp, &raw_udp));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    try testing.expect(sock.canRecv());
+    var recv_buf: [64]u8 = undefined;
+    const recv = try sock.recvSlice(&recv_buf);
+    try testing.expectEqualSlices(u8, &udp_payload, recv_buf[0..recv.data_len]);
+
+    // No ICMPv6 port unreachable emitted
+    try testing.expectEqual(@as(?[]const u8, null), device.dequeueTx());
+}
+
+test "stack v6 TCP socket receives SYN, replies SYN-ACK" {
+    const TcpSock = tcp_socket.Socket(ipv6, 4);
+    const Sockets = struct { tcp6_sockets: []*TcpSock };
+    const V6Stack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    const S = struct {
+        var rx_buf: [256]u8 = .{0} ** 256;
+        var tx_buf: [256]u8 = .{0} ** 256;
+    };
+    @memset(&S.rx_buf, 0);
+    @memset(&S.tx_buf, 0);
+    var sock = TcpSock.init(&S.rx_buf, &S.tx_buf);
+    sock.ack_delay = null;
+    try sock.listen(.{ .port = 8080 });
+
+    var sock_arr = [_]*TcpSock{&sock};
+    var stack = V6Stack.init(LOCAL_HW, .{ .tcp6_sockets = &sock_arr });
+    stack.iface.setIpv6Addrs(&.{.{ .address = LOCAL_V6, .prefix_len = 64 }});
+    stack.iface.neighbor_cache_v6.fill(REMOTE_V6, REMOTE_HW, Instant.ZERO);
+
+    // Build a SYN packet
+    var tcp_buf: [tcp_wire.HEADER_LEN]u8 = undefined;
+    _ = tcp_wire.emit(.{
+        .src_port = 9999,
+        .dst_port = 8080,
+        .seq_number = 1000,
+        .ack_number = 0,
+        .data_offset = 5,
+        .flags = .{ .syn = true },
+        .window_size = 65535,
+        .checksum = 0,
+        .urgent_pointer = 0,
+    }, &tcp_buf) catch unreachable;
+    // Fill TCP checksum with v6 pseudo-header
+    const partial = checksum_mod.pseudoHeaderChecksumV6(REMOTE_V6, LOCAL_V6, 6, tcp_buf.len);
+    const cksum = checksum_mod.finish(checksum_mod.calculate(&tcp_buf, partial));
+    tcp_buf[16] = @truncate(cksum >> 8);
+    tcp_buf[17] = @truncate(cksum & 0xFF);
+
+    var frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv6Frame(&frame_buf, .tcp, &tcp_buf));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    // Should produce SYN-ACK
+    const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
+    const ip_data = try ethernet.payload(tx_frame);
+    const ip_repr = try ipv6.parse(ip_data);
+    try testing.expectEqual(ipv6.Protocol.tcp, ip_repr.next_header);
+
+    const tcp_data = try ipv6.payloadSlice(ip_data);
+    const tcp_repr = try tcp_wire.parse(tcp_data);
+    try testing.expect(tcp_repr.flags.syn);
+    try testing.expect(tcp_repr.flags.ack);
+    try testing.expectEqual(@as(u16, 8080), tcp_repr.src_port);
+    try testing.expectEqual(@as(u16, 9999), tcp_repr.dst_port);
+}
+
+test "stack v6 ICMPv6 socket receives echo reply" {
+    const IcmpSock = icmp_socket_mod.Socket(ipv6, .{ .payload_size = 128 });
+    const Sockets = struct { icmp6_sockets: []*IcmpSock };
+    const V6Stack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    var rx_buf: [1]IcmpSock.Packet = undefined;
+    var tx_buf: [1]IcmpSock.Packet = undefined;
+    var sock = IcmpSock.init(&rx_buf, &tx_buf);
+    try sock.bind(.{ .ident = 0xABCD });
+
+    var sock_arr = [_]*IcmpSock{&sock};
+    var stack = V6Stack.init(LOCAL_HW, .{ .icmp6_sockets = &sock_arr });
+    stack.iface.setIpv6Addrs(&.{.{ .address = LOCAL_V6, .prefix_len = 64 }});
+    stack.iface.neighbor_cache_v6.fill(REMOTE_V6, REMOTE_HW, Instant.ZERO);
+
+    // Build ICMPv6 echo reply with matching ident
+    const echo_data = [_]u8{ 0xCA, 0xFE };
+    const reply_repr = icmpv6.Repr{ .echo_reply = .{
+        .ident = 0xABCD,
+        .seq_no = 1,
+        .data = &echo_data,
+    } };
+    var icmp_buf: [128]u8 = undefined;
+    const icmp_len = icmpv6.emit(reply_repr, REMOTE_V6, LOCAL_V6, &icmp_buf) catch unreachable;
+
+    var frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv6FrameFrom(&frame_buf, REMOTE_V6, LOCAL_V6, .icmpv6, 64, icmp_buf[0..icmp_len]));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    try testing.expect(sock.canRecv());
+    var recv_buf: [128]u8 = undefined;
+    const recv = try sock.recvSlice(&recv_buf);
+    try testing.expect(recv.data_len > 0);
+}
+
+test "stack v6 raw socket receives IP payload" {
+    const RawSock = raw_socket_mod.Socket(ipv6, .{ .payload_size = 128 });
+    const Sockets = struct { raw6_sockets: []*RawSock };
+    const V6Stack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    var rx_buf: [2]RawSock.Packet = undefined;
+    var tx_buf: [2]RawSock.Packet = undefined;
+    var sock = RawSock.init(&rx_buf, &tx_buf);
+    try sock.bind(.udp);
+
+    var sock_arr = [_]*RawSock{&sock};
+    var stack = V6Stack.init(LOCAL_HW, .{ .raw6_sockets = &sock_arr });
+    stack.iface.setIpv6Addrs(&.{.{ .address = LOCAL_V6, .prefix_len = 64 }});
+
+    // Build a UDP-protocol IPv6 frame
+    const udp_data = [_]u8{ 0x00, 0x43, 0x00, 0x44, 0x00, 0x0D, 0x00, 0x00, 0x48, 0x65, 0x6c, 0x6c, 0x6f };
+    var frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv6Frame(&frame_buf, .udp, &udp_data));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    try testing.expect(sock.canRecv());
+    var recv_buf: [128]u8 = undefined;
+    const result = try sock.recvSlice(&recv_buf);
+    try testing.expectEqualSlices(u8, &udp_data, recv_buf[0..result.data_len]);
+}
+
+test "stack v6 raw socket suppresses ICMPv6 param problem" {
+    const RawSock = raw_socket_mod.Socket(ipv6, .{ .payload_size = 128 });
+    const Sockets = struct { raw6_sockets: []*RawSock };
+    const V6Stack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    var rx_buf: [2]RawSock.Packet = undefined;
+    var tx_buf: [2]RawSock.Packet = undefined;
+    var sock = RawSock.init(&rx_buf, &tx_buf);
+    try sock.bind(@enumFromInt(253));
+
+    var sock_arr = [_]*RawSock{&sock};
+    var stack = V6Stack.init(LOCAL_HW, .{ .raw6_sockets = &sock_arr });
+    stack.iface.setIpv6Addrs(&.{.{ .address = LOCAL_V6, .prefix_len = 64 }});
+    stack.iface.neighbor_cache_v6.fill(REMOTE_V6, REMOTE_HW, Instant.ZERO);
+
+    // Send unknown protocol 253 -- raw socket handles it
+    const payload = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    var frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv6FrameFrom(&frame_buf, REMOTE_V6, LOCAL_V6, @enumFromInt(253), 64, &payload));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    // Raw socket received the payload
+    try testing.expect(sock.canRecv());
+    // No ICMPv6 param problem emitted since raw socket handled it
+    try testing.expectEqual(@as(?[]const u8, null), device.dequeueTx());
+}
+
+// -------------------------------------------------------------------------
+// IPv6 socket egress tests
+// -------------------------------------------------------------------------
+
+test "stack v6 TCP egress dispatches SYN on connect" {
+    const TcpSock = tcp_socket.Socket(ipv6, 4);
+    const Sockets = struct { tcp6_sockets: []*TcpSock };
+    const V6Stack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    const S = struct {
+        var rx_buf: [64]u8 = .{0} ** 64;
+        var tx_buf: [64]u8 = .{0} ** 64;
+    };
+    @memset(&S.rx_buf, 0);
+    @memset(&S.tx_buf, 0);
+    var sock = TcpSock.init(&S.rx_buf, &S.tx_buf);
+    sock.ack_delay = null;
+    try sock.connect(REMOTE_V6, 4242, LOCAL_V6, 4243);
+
+    var sock_arr = [_]*TcpSock{&sock};
+    var stack = V6Stack.init(LOCAL_HW, .{ .tcp6_sockets = &sock_arr });
+    stack.iface.setIpv6Addrs(&.{.{ .address = LOCAL_V6, .prefix_len = 64 }});
+    stack.iface.neighbor_cache_v6.fill(REMOTE_V6, REMOTE_HW, Instant.ZERO);
+
+    const activity = stack.poll(Instant.ZERO, &device);
+    try testing.expect(activity);
+
+    const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
+    const eth = try ethernet.parse(tx_frame);
+    try testing.expectEqual(ethernet.EtherType.ipv6, eth.ethertype);
+
+    const ip_data = try ethernet.payload(tx_frame);
+    const ip_repr = try ipv6.parse(ip_data);
+    try testing.expectEqual(ipv6.Protocol.tcp, ip_repr.next_header);
+    try testing.expectEqual(LOCAL_V6, ip_repr.src_addr);
+    try testing.expectEqual(REMOTE_V6, ip_repr.dst_addr);
+
+    const tcp_data = try ipv6.payloadSlice(ip_data);
+    const tcp_repr = try tcp_wire.parse(tcp_data);
+    try testing.expect(tcp_repr.flags.syn);
+    try testing.expectEqual(@as(u16, 4243), tcp_repr.src_port);
+    try testing.expectEqual(@as(u16, 4242), tcp_repr.dst_port);
+
+    // Verify TCP checksum with v6 pseudo-header
+    const partial = checksum_mod.pseudoHeaderChecksumV6(
+        ip_repr.src_addr,
+        ip_repr.dst_addr,
+        6,
+        @intCast(tcp_data.len),
+    );
+    try testing.expectEqual(@as(u16, 0), checksum_mod.finish(checksum_mod.calculate(tcp_data, partial)));
+}
+
+test "stack v6 UDP egress dispatches datagram with mandatory checksum" {
+    const UdpSock = udp_socket_mod.Socket(ipv6, .{ .payload_size = 64 });
+    const Sockets = struct { udp6_sockets: []*UdpSock };
+    const V6Stack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    var rx_buf: [1]UdpSock.Packet = undefined;
+    var tx_buf: [1]UdpSock.Packet = undefined;
+    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    try sock.bind(.{ .port = 12345 });
+    try sock.sendSlice("Hello", .{
+        .endpoint = .{ .addr = REMOTE_V6, .port = 54321 },
+    });
+
+    var sock_arr = [_]*UdpSock{&sock};
+    var stack = V6Stack.init(LOCAL_HW, .{ .udp6_sockets = &sock_arr });
+    stack.iface.setIpv6Addrs(&.{.{ .address = LOCAL_V6, .prefix_len = 64 }});
+    stack.iface.neighbor_cache_v6.fill(REMOTE_V6, REMOTE_HW, Instant.ZERO);
+
+    const activity = stack.poll(Instant.ZERO, &device);
+    try testing.expect(activity);
+
+    const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
+    const ip_data = try ethernet.payload(tx_frame);
+    const ip_repr = try ipv6.parse(ip_data);
+    try testing.expectEqual(ipv6.Protocol.udp, ip_repr.next_header);
+
+    const udp_data = try ipv6.payloadSlice(ip_data);
+    const udp_repr = try udp_wire.parse(udp_data);
+    try testing.expectEqual(@as(u16, 12345), udp_repr.src_port);
+    try testing.expectEqual(@as(u16, 54321), udp_repr.dst_port);
+
+    const payload = try udp_wire.payloadSlice(udp_data);
+    try testing.expectEqualSlices(u8, "Hello", payload);
+
+    // Verify mandatory IPv6 UDP checksum (must be non-zero and valid)
+    const stored_cksum: u16 = @as(u16, udp_data[6]) << 8 | @as(u16, udp_data[7]);
+    try testing.expect(stored_cksum != 0);
+    try testing.expect(udp_wire.verifyChecksumV6(udp_data, ip_repr.src_addr, ip_repr.dst_addr));
+}
+
+test "stack v6 ICMP egress dispatches echo request" {
+    const IcmpSock = icmp_socket_mod.Socket(ipv6, .{ .payload_size = 128 });
+    const Sockets = struct { icmp6_sockets: []*IcmpSock };
+    const V6Stack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    var rx_buf: [1]IcmpSock.Packet = undefined;
+    var tx_buf: [1]IcmpSock.Packet = undefined;
+    var sock = IcmpSock.init(&rx_buf, &tx_buf);
+    try sock.bind(.{ .ident = 0xBEEF });
+
+    // Build serialized ICMPv6 echo request
+    const echo_data = [_]u8{ 0xCA, 0xFE };
+    const echo_repr = icmpv6.Repr{ .echo_request = .{
+        .ident = 0xBEEF,
+        .seq_no = 1,
+        .data = &echo_data,
+    } };
+    var icmp_buf: [128]u8 = undefined;
+    const icmp_len = icmpv6.emit(echo_repr, LOCAL_V6, REMOTE_V6, &icmp_buf) catch unreachable;
+    try sock.sendSlice(icmp_buf[0..icmp_len], REMOTE_V6);
+
+    var sock_arr = [_]*IcmpSock{&sock};
+    var stack = V6Stack.init(LOCAL_HW, .{ .icmp6_sockets = &sock_arr });
+    stack.iface.setIpv6Addrs(&.{.{ .address = LOCAL_V6, .prefix_len = 64 }});
+    stack.iface.neighbor_cache_v6.fill(REMOTE_V6, REMOTE_HW, Instant.ZERO);
+
+    const activity = stack.poll(Instant.ZERO, &device);
+    try testing.expect(activity);
+
+    const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
+    const eth = try ethernet.parse(tx_frame);
+    try testing.expectEqual(ethernet.EtherType.ipv6, eth.ethertype);
+
+    const ip_data = try ethernet.payload(tx_frame);
+    const ip_repr = try ipv6.parse(ip_data);
+    try testing.expectEqual(ipv6.Protocol.icmpv6, ip_repr.next_header);
+    try testing.expectEqual(LOCAL_V6, ip_repr.src_addr);
+    try testing.expectEqual(REMOTE_V6, ip_repr.dst_addr);
+}
+
+test "stack v6 TCP egress triggers NDP when neighbor unknown" {
+    const TcpSock = tcp_socket.Socket(ipv6, 4);
+    const Sockets = struct { tcp6_sockets: []*TcpSock };
+    const V6Stack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    const S = struct {
+        var rx_buf: [64]u8 = .{0} ** 64;
+        var tx_buf: [64]u8 = .{0} ** 64;
+    };
+    @memset(&S.rx_buf, 0);
+    @memset(&S.tx_buf, 0);
+    var sock = TcpSock.init(&S.rx_buf, &S.tx_buf);
+    sock.ack_delay = null;
+    try sock.connect(REMOTE_V6, 4242, LOCAL_V6, 4243);
+
+    var sock_arr = [_]*TcpSock{&sock};
+    var stack = V6Stack.init(LOCAL_HW, .{ .tcp6_sockets = &sock_arr });
+    stack.iface.setIpv6Addrs(&.{.{ .address = LOCAL_V6, .prefix_len = 64 }});
+    // Do NOT populate neighbor cache -- should trigger NDP
+
+    _ = stack.poll(Instant.ZERO, &device);
+
+    // Should emit NDP NS, not a TCP SYN
+    const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
+    const ip_data = try ethernet.payload(tx_frame);
+    const ip_repr = try ipv6.parse(ip_data);
+    try testing.expectEqual(ipv6.Protocol.icmpv6, ip_repr.next_header);
+
+    const icmp_data = try ipv6.payloadSlice(ip_data);
+    const icmp_repr = try icmpv6.parse(icmp_data, ip_repr.src_addr, ip_repr.dst_addr);
+    switch (icmp_repr) {
+        .ndisc => |nd| switch (nd) {
+            .neighbor_solicit => {},
+            else => return error.ExpectedNdpNs,
+        },
+        else => return error.ExpectedNdpNs,
+    }
+}
+
+// -------------------------------------------------------------------------
+// IPv6 pollAt tests
+// -------------------------------------------------------------------------
+
+test "stack v6 pollAt returns ZERO for pending TCP6 SYN-SENT" {
+    const TcpSock = tcp_socket.Socket(ipv6, 4);
+    const Sockets = struct { tcp6_sockets: []*TcpSock };
+    const V6Stack = Stack(TestDevice, Sockets);
+
+    const S = struct {
+        var rx_buf: [64]u8 = .{0} ** 64;
+        var tx_buf: [64]u8 = .{0} ** 64;
+    };
+    @memset(&S.rx_buf, 0);
+    @memset(&S.tx_buf, 0);
+    var sock = TcpSock.init(&S.rx_buf, &S.tx_buf);
+    sock.ack_delay = null;
+    try sock.connect(REMOTE_V6, 80, LOCAL_V6, 12345);
+
+    var sock_arr = [_]*TcpSock{&sock};
+    var stack = V6Stack.init(LOCAL_HW, .{ .tcp6_sockets = &sock_arr });
+    stack.iface.setIpv6Addrs(&.{.{ .address = LOCAL_V6, .prefix_len = 64 }});
+
+    // SYN-SENT has pending data -> pollAt returns ZERO
+    const at = stack.pollAt();
+    try testing.expectEqual(@as(?Instant, Instant.ZERO), at);
+}
+
+test "stack v6 pollAt returns ZERO for pending UDP6 data" {
+    const UdpSock = udp_socket_mod.Socket(ipv6, .{ .payload_size = 64 });
+    const Sockets = struct { udp6_sockets: []*UdpSock };
+    const V6Stack = Stack(TestDevice, Sockets);
+
+    var rx_buf: [1]UdpSock.Packet = undefined;
+    var tx_buf: [1]UdpSock.Packet = undefined;
+    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    try sock.bind(.{ .port = 5000 });
+    try sock.sendSlice("test", .{
+        .endpoint = .{ .addr = REMOTE_V6, .port = 6000 },
+    });
+
+    var sock_arr = [_]*UdpSock{&sock};
+    var stack = V6Stack.init(LOCAL_HW, .{ .udp6_sockets = &sock_arr });
+    stack.iface.setIpv6Addrs(&.{.{ .address = LOCAL_V6, .prefix_len = 64 }});
+
+    const at = stack.pollAt();
+    try testing.expectEqual(@as(?Instant, Instant.ZERO), at);
+}
+
+test "stack v6 pollAt returns null for idle sockets" {
+    const UdpSock = udp_socket_mod.Socket(ipv6, .{ .payload_size = 64 });
+    const Sockets = struct { udp6_sockets: []*UdpSock };
+    const V6Stack = Stack(TestDevice, Sockets);
+
+    var rx_buf: [1]UdpSock.Packet = undefined;
+    var tx_buf: [1]UdpSock.Packet = undefined;
+    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    try sock.bind(.{ .port = 5000 });
+    // No pending data
+
+    var sock_arr = [_]*UdpSock{&sock};
+    var stack = V6Stack.init(LOCAL_HW, .{ .udp6_sockets = &sock_arr });
+    stack.iface.setIpv6Addrs(&.{.{ .address = LOCAL_V6, .prefix_len = 64 }});
+
+    const at = stack.pollAt();
+    try testing.expectEqual(@as(?Instant, null), at);
+}
+
+// -------------------------------------------------------------------------
+// IPv6 fragment reassembly tests
+// -------------------------------------------------------------------------
+
+test "stack v6 two-fragment reassembly delivers to socket" {
+    const UdpSock = udp_socket_mod.Socket(ipv6, .{ .payload_size = 256 });
+    const Sockets = struct { udp6_sockets: []*UdpSock };
+    const V6Stack = Stack(TestDevice, Sockets);
+
+    var device = TestDevice.init();
+
+    var rx_buf: [1]UdpSock.Packet = undefined;
+    var tx_buf: [1]UdpSock.Packet = undefined;
+    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    try sock.bind(.{ .port = 5000 });
+
+    var sock_arr = [_]*UdpSock{&sock};
+    var stack = V6Stack.init(LOCAL_HW, .{ .udp6_sockets = &sock_arr });
+    stack.iface.setIpv6Addrs(&.{.{ .address = LOCAL_V6, .prefix_len = 64 }});
+    stack.iface.neighbor_cache_v6.fill(REMOTE_V6, REMOTE_HW, Instant.ZERO);
+
+    // Build a UDP datagram split across 2 fragments.
+    // Fragment 1: UDP header (8 bytes) + first 8 bytes of payload
+    // Fragment 2: remaining 5 bytes of payload
+    const udp_payload = [_]u8{ 0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x57, 0x6f, 0x72, 0x6c, 0x64, 0x21, 0x41, 0x42 };
+    var raw_udp: [udp_wire.HEADER_LEN + 13]u8 = undefined;
+    _ = udp_wire.emit(.{
+        .src_port = 4000,
+        .dst_port = 5000,
+        .length = @intCast(udp_wire.HEADER_LEN + udp_payload.len),
+        .checksum = 0,
+    }, &raw_udp) catch unreachable;
+    @memcpy(raw_udp[udp_wire.HEADER_LEN..], &udp_payload);
+    udp_wire.fillChecksumV6(&raw_udp, REMOTE_V6, LOCAL_V6);
+
+    // Fragment 1: offset=0, M=1, 16 bytes (first 16 of 21 total)
+    const frag1_data = raw_udp[0..16];
+    // Fragment 2: offset=16, M=0, remaining 5 bytes
+    const frag2_data = raw_udp[16..];
+
+    const frag_id: u32 = 0x12345678;
+
+    // Build fragment 1 frame: IPv6 header + Fragment header (8 bytes) + data
+    var frag1_buf: [512]u8 = undefined;
+    const eth_len = ethernet.emit(.{
+        .dst_addr = LOCAL_HW,
+        .src_addr = REMOTE_HW,
+        .ethertype = .ipv6,
+    }, &frag1_buf) catch unreachable;
+    const ip_len = ipv6.emit(.{
+        .payload_len = @intCast(8 + frag1_data.len),
+        .next_header = .fragment,
+        .hop_limit = 64,
+        .src_addr = REMOTE_V6,
+        .dst_addr = LOCAL_V6,
+    }, frag1_buf[eth_len..]) catch unreachable;
+    // Fragment header: next_header=UDP, reserved=0, offset=0|M=1, ident
+    const fh1_start = eth_len + ip_len;
+    frag1_buf[fh1_start + 0] = @intFromEnum(ipv6.Protocol.udp);
+    frag1_buf[fh1_start + 1] = 0; // reserved
+    // offset_and_flags: offset=0 (in 8-octet units) << 3, M=1
+    frag1_buf[fh1_start + 2] = 0;
+    frag1_buf[fh1_start + 3] = 1; // M=1
+    frag1_buf[fh1_start + 4] = @truncate(frag_id >> 24);
+    frag1_buf[fh1_start + 5] = @truncate(frag_id >> 16);
+    frag1_buf[fh1_start + 6] = @truncate(frag_id >> 8);
+    frag1_buf[fh1_start + 7] = @truncate(frag_id);
+    @memcpy(frag1_buf[fh1_start + 8 ..][0..frag1_data.len], frag1_data);
+    const frag1_frame = frag1_buf[0 .. fh1_start + 8 + frag1_data.len];
+
+    // Build fragment 2 frame
+    var frag2_frame_buf: [512]u8 = undefined;
+    const eth_len2 = ethernet.emit(.{
+        .dst_addr = LOCAL_HW,
+        .src_addr = REMOTE_HW,
+        .ethertype = .ipv6,
+    }, &frag2_frame_buf) catch unreachable;
+    const ip_len2 = ipv6.emit(.{
+        .payload_len = @intCast(8 + frag2_data.len),
+        .next_header = .fragment,
+        .hop_limit = 64,
+        .src_addr = REMOTE_V6,
+        .dst_addr = LOCAL_V6,
+    }, frag2_frame_buf[eth_len2..]) catch unreachable;
+    const fh2_start = eth_len2 + ip_len2;
+    frag2_frame_buf[fh2_start + 0] = @intFromEnum(ipv6.Protocol.udp);
+    frag2_frame_buf[fh2_start + 1] = 0;
+    // offset = 16 / 8 = 2 -> bits [15:3], M=0
+    const offset_val: u16 = 2 << 3; // offset in 8-byte units, shifted left 3
+    frag2_frame_buf[fh2_start + 2] = @truncate(offset_val >> 8);
+    frag2_frame_buf[fh2_start + 3] = @truncate(offset_val);
+    frag2_frame_buf[fh2_start + 4] = @truncate(frag_id >> 24);
+    frag2_frame_buf[fh2_start + 5] = @truncate(frag_id >> 16);
+    frag2_frame_buf[fh2_start + 6] = @truncate(frag_id >> 8);
+    frag2_frame_buf[fh2_start + 7] = @truncate(frag_id);
+    @memcpy(frag2_frame_buf[fh2_start + 8 ..][0..frag2_data.len], frag2_data);
+    const frag2_frame = frag2_frame_buf[0 .. fh2_start + 8 + frag2_data.len];
+
+    // Feed both fragments
+    device.enqueueRx(frag1_frame);
+    _ = stack.poll(Instant.ZERO, &device);
+    // Not yet complete -- socket should not have data
+    try testing.expect(!sock.canRecv());
+
+    device.enqueueRx(frag2_frame);
+    _ = stack.poll(Instant.ZERO, &device);
+
+    // Now socket should have the reassembled datagram
+    try testing.expect(sock.canRecv());
+    var recv_buf: [256]u8 = undefined;
+    const recv = try sock.recvSlice(&recv_buf);
+    try testing.expectEqualSlices(u8, &udp_payload, recv_buf[0..recv.data_len]);
+}
+
+test "stack v6 extension header chain walking" {
+    // Test that a packet with HBH -> TCP is correctly dispatched.
+    // This verifies the extension header walking loop handles HBH before TCP.
+    var device = TestDevice.init();
+    var stack = testStackV6();
+    stack.iface.neighbor_cache_v6.fill(REMOTE_V6, REMOTE_HW, Instant.ZERO);
+
+    // Build: IPv6(next=HBH) + HBH(next=TCP, len=0 -> 8 bytes) + TCP SYN
+    var tcp_buf: [tcp_wire.HEADER_LEN]u8 = undefined;
+    _ = tcp_wire.emit(.{
+        .src_port = 9999,
+        .dst_port = 80,
+        .seq_number = 1000,
+        .ack_number = 0,
+        .data_offset = 5,
+        .flags = .{ .syn = true },
+        .window_size = 65535,
+        .checksum = 0,
+        .urgent_pointer = 0,
+    }, &tcp_buf) catch unreachable;
+    // Fill TCP checksum
+    const partial = checksum_mod.pseudoHeaderChecksumV6(REMOTE_V6, LOCAL_V6, 6, tcp_buf.len);
+    const cksum = checksum_mod.finish(checksum_mod.calculate(&tcp_buf, partial));
+    tcp_buf[16] = @truncate(cksum >> 8);
+    tcp_buf[17] = @truncate(cksum & 0xFF);
+
+    // HBH extension header: next_header=TCP(6), length=0 (means 8 bytes total)
+    // Bytes 2-7: PadN(4) padding
+    var hbh_buf: [8]u8 = .{0} ** 8;
+    hbh_buf[0] = @intFromEnum(ipv6.Protocol.tcp);
+    hbh_buf[1] = 0; // length = (0+1)*8 = 8 bytes
+    hbh_buf[2] = 1; // PadN type
+    hbh_buf[3] = 4; // PadN length = 4 bytes
+    // hbh_buf[4..8] already zero (padding)
+
+    // Combine HBH + TCP
+    var payload: [8 + tcp_wire.HEADER_LEN]u8 = undefined;
+    @memcpy(payload[0..8], &hbh_buf);
+    @memcpy(payload[8..], &tcp_buf);
+
+    var frame_buf: [512]u8 = undefined;
+    const frame = buildIpv6FrameFrom(&frame_buf, REMOTE_V6, LOCAL_V6, .hop_by_hop, 64, &payload);
+    device.enqueueRx(frame);
+    _ = stack.poll(Instant.ZERO, &device);
+
+    // Unhandled TCP SYN to port 80 should produce a RST
+    const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
+    const ip_data = try ethernet.payload(tx_frame);
+    const ip_repr = try ipv6.parse(ip_data);
+    try testing.expectEqual(ipv6.Protocol.tcp, ip_repr.next_header);
+
+    const tcp_data = try ipv6.payloadSlice(ip_data);
+    const tcp_repr = try tcp_wire.parse(tcp_data);
+    try testing.expect(tcp_repr.flags.rst);
 }
 
