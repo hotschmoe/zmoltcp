@@ -17,24 +17,24 @@ const ring_buffer_mod = @import("../storage/ring_buffer.zig");
 const time = @import("../time.zig");
 const iface_mod = @import("../iface.zig");
 
+const readU16 = @import("../wire/checksum.zig").readU16;
 const Instant = time.Instant;
 
-// Extract the transport-layer source port from an ICMPv4 error payload.
-// The payload contains: [embedded IPv4 header][transport header fragment].
+// Extract transport-layer source port from an ICMPv4 error payload.
+// Payload: [embedded IPv4 header (variable IHL)][transport header fragment].
 fn embeddedSrcPort(payload: []const u8) ?u16 {
     if (payload.len < ipv4.HEADER_LEN) return null;
     const ihl: usize = @as(usize, payload[0] & 0x0F) * 4;
     if (ihl < ipv4.HEADER_LEN or payload.len < ihl + 2) return null;
-    return @as(u16, payload[ihl]) << 8 | @as(u16, payload[ihl + 1]);
+    return readU16(payload[ihl..][0..2]);
 }
 
-// Extract the transport-layer source port from an ICMPv6 error payload.
-// Layout after the 4-byte ICMPv6 header:
-//   [4 bytes msg-specific][40 bytes IPv6 header][transport header fragment]
+// Extract transport-layer source port from an ICMPv6 error payload.
+// Payload: [4 msg-specific][40 IPv6 header][transport header fragment].
 fn embeddedSrcPortV6(payload: []const u8) ?u16 {
     const offset = 4 + ipv6.HEADER_LEN;
     if (payload.len < offset + 2) return null;
-    return @as(u16, payload[offset]) << 8 | @as(u16, payload[offset + 1]);
+    return readU16(payload[offset..][0..2]);
 }
 
 pub const Config = struct {

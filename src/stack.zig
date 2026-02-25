@@ -36,6 +36,9 @@ pub const MAX_FRAME_LEN = 1514; // Ethernet MTU 1500 + 14-byte header
 /// Maximum IP payload size (frame minus Ethernet + IPv4 headers).
 const IP_PAYLOAD_MAX = MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv4.HEADER_LEN;
 
+/// Maximum IP payload size (frame minus Ethernet + IPv6 headers).
+const IPV6_PAYLOAD_MAX = MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv6.HEADER_LEN;
+
 /// Serialize a TCP repr (header + payload + checksum) into buf.
 /// Returns total byte length on success, or null if buf is too small.
 /// When `fill_checksum` is false, the checksum field is left zeroed
@@ -209,7 +212,6 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                 }
             }
 
-            // -- IPv6 socket polling --
             if (comptime has_tcp6) {
                 for (self.sockets.tcp6_sockets) |sock| {
                     if (sock.pollAt()) |sock_at| {
@@ -618,8 +620,6 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             return handled;
         }
 
-        // -- IPv6 socket routing functions --
-
         fn routeToTcpV6Sockets(self: *Self, timestamp: Instant, ip_repr: ipv6.Repr, tcp_data: []const u8) TcpRouteResult {
             if (comptime !has_tcp6) return .{};
 
@@ -802,8 +802,6 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     }
                 }
             }
-
-            // -- IPv6 socket egress --
 
             if (comptime has_tcp6) {
                 for (self.sockets.tcp6_sockets) |sock| {
@@ -1093,7 +1091,6 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
 
         fn emitMldReport(self: *Self, group_addr: ipv6.Address, record_type: mld.RecordType, device: *Device) void {
             const ipv6hbh = @import("wire/ipv6hbh.zig");
-            const ipv6ext_hdr = @import("wire/ipv6ext_header.zig");
 
             const src_addr = self.iface.linkLocalIpv6Addr() orelse ipv6.UNSPECIFIED;
             const dst_addr = ipv6.LINK_LOCAL_ALL_MLDV2_ROUTERS;
@@ -1132,7 +1129,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
 
             // HBH extension header: 8 bytes (length=0 means (0+1)*8)
             const hbh_start = pos;
-            pos += ipv6ext_hdr.emit(.{
+            pos += ipv6ext_header.emit(.{
                 .next_header = @intFromEnum(ipv6.Protocol.icmpv6),
                 .length = 0,
                 .data = &[_]u8{},
@@ -1311,8 +1308,6 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             return self.emitIpv4Frame(src_addr, result.dst_addr, result.ip_protocol, hop_limit, result.payload, device);
         }
 
-        // -- IPv6 egress emit helpers --
-
         fn emitTcpV6Egress(
             self: *Self,
             src_addr: ipv6.Address,
@@ -1321,14 +1316,12 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             hop_limit: u8,
             device: *Device,
         ) EmitResult {
-            const IPV6_PAYLOAD_MAX = MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv6.HEADER_LEN;
             var payload_buf: [IPV6_PAYLOAD_MAX]u8 = undefined;
             const total_tcp = serializeTcpV6(repr, src_addr, dst_addr, &payload_buf, device_caps.checksum.tcp.shouldComputeTx()) orelse return .sent;
             return self.emitIpv6Frame(src_addr, dst_addr, .tcp, hop_limit, payload_buf[0..total_tcp], device);
         }
 
         fn emitUdpV6Egress(self: *Self, result: anytype, device: *Device) EmitResult {
-            const IPV6_PAYLOAD_MAX = MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv6.HEADER_LEN;
             var payload_buf: [IPV6_PAYLOAD_MAX]u8 = undefined;
             const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + result.payload.len);
             const hdr_len = udp_wire.emit(.{
@@ -1360,7 +1353,6 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
         }
 
         fn emitDnsV6Egress(self: *Self, result: anytype, device: *Device) EmitResult {
-            const IPV6_PAYLOAD_MAX = MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv6.HEADER_LEN;
             var payload_buf: [IPV6_PAYLOAD_MAX]u8 = undefined;
             const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + result.payload.len);
             const hdr_len = udp_wire.emit(.{
@@ -1483,7 +1475,6 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
         }
 
         fn serializeIpv6Response(self: *const Self, resp: iface_mod.Ipv6Response, buf: []u8) ?[]const u8 {
-            const IPV6_PAYLOAD_MAX = MAX_FRAME_LEN - ethernet.HEADER_LEN - ipv6.HEADER_LEN;
             var payload_buf: [IPV6_PAYLOAD_MAX]u8 = undefined;
 
             const payload_len: usize = switch (resp.payload) {

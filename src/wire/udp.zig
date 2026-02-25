@@ -50,49 +50,47 @@ pub fn computeChecksum(src_ip: [4]u8, dst_ip: [4]u8, udp_data: []const u8) u16 {
     return checksum.finish(sum);
 }
 
-/// Write the computed UDP checksum into an already-serialized buffer.
-/// RFC 768: if the computed checksum is zero, it is transmitted as 0xFFFF.
-pub fn fillChecksum(buf: []u8, src_ip: [4]u8, dst_ip: [4]u8) void {
-    buf[6] = 0;
-    buf[7] = 0;
-    var cksum = computeChecksum(src_ip, dst_ip, buf);
-    if (cksum == 0) cksum = 0xFFFF;
-    buf[6] = @truncate(cksum >> 8);
-    buf[7] = @truncate(cksum & 0xFF);
-}
-
 /// Compute UDP checksum with IPv6 pseudo-header (mandatory per RFC 8200 S8.1).
 pub fn computeChecksumV6(src_ip: [16]u8, dst_ip: [16]u8, udp_data: []const u8) u16 {
     const partial = checksum.pseudoHeaderChecksumV6(src_ip, dst_ip, 17, @intCast(udp_data.len));
     return checksum.finish(checksum.calculate(udp_data, partial));
 }
 
+/// Write the computed UDP checksum into an already-serialized buffer.
+/// RFC 768: if the computed checksum is zero, it is transmitted as 0xFFFF.
+pub fn fillChecksum(buf: []u8, src_ip: [4]u8, dst_ip: [4]u8) void {
+    checksum.writeU16(buf[6..8], 0);
+    writeChecksumField(buf, computeChecksum(src_ip, dst_ip, buf));
+}
+
 /// Write the computed IPv6 UDP checksum into an already-serialized buffer.
 /// RFC 8200: UDP checksum is mandatory over IPv6; zero checksum is forbidden.
 pub fn fillChecksumV6(buf: []u8, src_ip: [16]u8, dst_ip: [16]u8) void {
-    buf[6] = 0;
-    buf[7] = 0;
-    var cksum = computeChecksumV6(src_ip, dst_ip, buf);
-    if (cksum == 0) cksum = 0xFFFF;
-    buf[6] = @truncate(cksum >> 8);
-    buf[7] = @truncate(cksum & 0xFF);
+    checksum.writeU16(buf[6..8], 0);
+    writeChecksumField(buf, computeChecksumV6(src_ip, dst_ip, buf));
+}
+
+/// Verify UDP checksum. Returns true if valid or if checksum is disabled (0x0000).
+pub fn verifyChecksum(data: []const u8, src_ip: [4]u8, dst_ip: [4]u8) bool {
+    if (data.len < HEADER_LEN) return false;
+    if (readChecksumField(data) == 0) return true; // checksum disabled per RFC 768
+    return computeChecksum(src_ip, dst_ip, data) == 0;
 }
 
 /// Verify UDP checksum over IPv6 pseudo-header.
 /// Unlike IPv4, zero checksum is NOT valid over IPv6 (RFC 8200 S8.1).
 pub fn verifyChecksumV6(data: []const u8, src_ip: [16]u8, dst_ip: [16]u8) bool {
     if (data.len < HEADER_LEN) return false;
-    const stored: u16 = @as(u16, data[6]) << 8 | @as(u16, data[7]);
-    if (stored == 0) return false; // zero checksum forbidden over IPv6
+    if (readChecksumField(data) == 0) return false; // zero checksum forbidden over IPv6
     return computeChecksumV6(src_ip, dst_ip, data) == 0;
 }
 
-/// Verify UDP checksum. Returns true if valid or if checksum is disabled (0x0000).
-pub fn verifyChecksum(data: []const u8, src_ip: [4]u8, dst_ip: [4]u8) bool {
-    if (data.len < HEADER_LEN) return false;
-    const stored: u16 = @as(u16, data[6]) << 8 | @as(u16, data[7]);
-    if (stored == 0) return true; // checksum disabled per RFC 768
-    return computeChecksum(src_ip, dst_ip, data) == 0;
+fn readChecksumField(data: []const u8) u16 {
+    return checksum.readU16(data[6..8]);
+}
+
+fn writeChecksumField(buf: []u8, raw: u16) void {
+    checksum.writeU16(buf[6..8], if (raw == 0) 0xFFFF else raw);
 }
 
 /// Returns the payload portion of a UDP datagram.
@@ -196,7 +194,7 @@ test "UDP zero checksum becomes 0xFFFF" {
         .checksum = 0,
     }, &buf);
     fillChecksum(&buf, SRC_ADDR, DST_ADDR);
-    const cksum: u16 = @as(u16, buf[6]) << 8 | @as(u16, buf[7]);
+    const cksum = readChecksumField(&buf);
     try testing.expectEqual(@as(u16, 0xFFFF), cksum);
 }
 
@@ -230,7 +228,7 @@ test "UDP v6 checksum roundtrip" {
     @memcpy(buf[HEADER_LEN..], &PAYLOAD_BYTES);
     fillChecksumV6(&buf, SRC_V6, DST_V6);
     // Checksum must be non-zero (mandatory for IPv6)
-    const cksum: u16 = @as(u16, buf[6]) << 8 | @as(u16, buf[7]);
+    const cksum = readChecksumField(&buf);
     try testing.expect(cksum != 0);
     // Verify passes
     try testing.expect(verifyChecksumV6(&buf, SRC_V6, DST_V6));
@@ -259,6 +257,6 @@ test "UDP v6 fillChecksum avoids zero" {
         .checksum = 0,
     }, &buf);
     fillChecksumV6(&buf, SRC_V6, DST_V6);
-    const cksum: u16 = @as(u16, buf[6]) << 8 | @as(u16, buf[7]);
+    const cksum = readChecksumField(&buf);
     try testing.expect(cksum != 0);
 }
