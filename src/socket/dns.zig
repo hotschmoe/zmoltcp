@@ -101,9 +101,7 @@ pub fn Socket(comptime Ip: type) type {
 
         pub fn updateServers(self: *Self, servers: []const Ip.Address) void {
             const count = @min(servers.len, MAX_SERVER_COUNT);
-            for (0..count) |i| {
-                self.servers[i] = servers[i];
-            }
+            @memcpy(self.servers[0..count], servers[0..count]);
             self.server_count = count;
         }
 
@@ -327,10 +325,9 @@ pub fn Socket(comptime Ip: type) type {
                     .pending => |p| p,
                     else => continue,
                 };
-                earliest = if (earliest) |e|
-                    if (pq.retransmit_at.lessThan(e)) pq.retransmit_at else e
-                else
-                    pq.retransmit_at;
+                if (earliest == null or pq.retransmit_at.lessThan(earliest.?)) {
+                    earliest = pq.retransmit_at;
+                }
             }
             return earliest;
         }

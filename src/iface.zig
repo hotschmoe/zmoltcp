@@ -262,6 +262,14 @@ pub fn IpState(comptime Ip: type) type {
             }
         }
 
+        pub fn setAddrs(self: *Self, cidrs: []const Cidr) void {
+            const count = @min(cidrs.len, MAX_ADDR_COUNT);
+            for (cidrs[0..count], 0..) |c, i| {
+                self.ip_addrs[i] = c;
+            }
+            self.ip_addr_count = count;
+        }
+
         pub fn ipAddrs(self: *const Self) []const Cidr {
             return self.ip_addrs[0..self.ip_addr_count];
         }
@@ -308,11 +316,7 @@ pub const Interface = struct {
     }
 
     pub fn setIpAddrs(self: *Interface, cidrs: []const IpCidr) void {
-        const count = @min(cidrs.len, MAX_ADDR_COUNT);
-        for (cidrs[0..count], 0..) |c, i| {
-            self.v4.ip_addrs[i] = c;
-        }
-        self.v4.ip_addr_count = count;
+        self.v4.setAddrs(cidrs);
         self.neighbor_cache.flush();
     }
 
@@ -327,8 +331,9 @@ pub const Interface = struct {
     }
 
     pub fn ipv4Addr(self: *const Interface) ?ipv4.Address {
-        if (self.v4.ip_addr_count == 0) return null;
-        return self.v4.ip_addrs[0].address;
+        const addrs = self.v4.ipAddrs();
+        if (addrs.len == 0) return null;
+        return addrs[0].address;
     }
 
     pub fn route(self: *const Interface, dst: ipv4.Address) ?ipv4.Address {

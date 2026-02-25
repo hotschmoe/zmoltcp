@@ -263,13 +263,9 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     }
                 },
                 .udp => {
-                    if (comptime has_dhcp) {
-                        if (self.routeToDhcpSockets(timestamp, ip_repr, ip_payload)) return;
-                    }
+                    if (self.routeToDhcpSockets(timestamp, ip_repr, ip_payload)) return;
                     var handled = self.routeToUdpSockets(ip_repr, ip_payload);
-                    if (comptime has_dns4) {
-                        if (!handled) handled = self.routeToDnsSockets(ip_payload);
-                    }
+                    if (!handled) handled = self.routeToDnsSockets(ip_payload);
                     if (self.iface.processUdp(ip_repr, ip_payload, handled)) |response| {
                         self.emitResponse(response, device);
                     }

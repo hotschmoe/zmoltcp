@@ -27,17 +27,9 @@ fn embeddedSrcPort(payload: []const u8) ?u16 {
     return @as(u16, payload[ihl]) << 8 | @as(u16, payload[ihl + 1]);
 }
 
-// -------------------------------------------------------------------------
-// Config
-// -------------------------------------------------------------------------
-
 pub const Config = struct {
     payload_size: comptime_int,
 };
-
-// -------------------------------------------------------------------------
-// Socket
-// -------------------------------------------------------------------------
 
 pub fn Socket(comptime Ip: type, comptime config: Config) type {
     comptime ip_generic.assertIsIp(Ip);

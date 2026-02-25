@@ -6,17 +6,13 @@
 const std = @import("std");
 
 pub fn assertIsIp(comptime Ip: type) void {
-    comptime {
-        if (!@hasDecl(Ip, "Address")) @compileError("Ip must have Address type");
-        if (!@hasDecl(Ip, "ADDRESS_LEN")) @compileError("Ip must have ADDRESS_LEN");
-        if (!@hasDecl(Ip, "UNSPECIFIED")) @compileError("Ip must have UNSPECIFIED");
-        if (!@hasDecl(Ip, "isUnspecified")) @compileError("Ip must have isUnspecified()");
-        if (!@hasDecl(Ip, "isBroadcast")) @compileError("Ip must have isBroadcast()");
-        if (!@hasDecl(Ip, "isMulticast")) @compileError("Ip must have isMulticast()");
-        if (!@hasDecl(Ip, "isLoopback")) @compileError("Ip must have isLoopback()");
-        if (!@hasDecl(Ip, "isLinkLocal")) @compileError("Ip must have isLinkLocal()");
-        if (!@hasDecl(Ip, "formatAddr")) @compileError("Ip must have formatAddr()");
-        if (!@hasDecl(Ip, "Protocol")) @compileError("Ip must have Protocol type");
+    const required = .{
+        "Address",     "ADDRESS_LEN", "UNSPECIFIED", "Protocol",
+        "isUnspecified", "isBroadcast", "isMulticast", "isLoopback",
+        "isLinkLocal",   "formatAddr",
+    };
+    inline for (required) |name| {
+        if (!@hasDecl(Ip, name)) @compileError("Ip must have " ++ name);
     }
 }
 

@@ -1010,10 +1010,8 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
                 .syn_sent => {
                     switch (repr.control) {
                         .rst => {
-                            if (repr.ack_number == null) return null;
-                            if (repr.ack_number) |ack| {
-                                if (!ack.eql(self.local_seq_no.add(1))) return null;
-                            }
+                            const ack = repr.ack_number orelse return null;
+                            if (!ack.eql(self.local_seq_no.add(1))) return null;
                         },
                         .syn => {
                             if (repr.ack_number) |ack| {
@@ -1040,24 +1038,22 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
                 },
                 else => {
                     if (repr.control != .rst) {
-                        if (repr.ack_number == null) return null;
+                        const ack_number = repr.ack_number orelse return null;
 
-                        if (repr.ack_number) |ack_number| {
-                            if (self.state == .syn_received) {
-                                if (!ack_number.eql(self.local_seq_no.add(1))) {
-                                    return rstReply(repr);
-                                }
-                            } else {
-                                const unacknowledged = self.tx_buffer.len() + control_len;
-                                var ack_min = self.local_seq_no;
-                                const ack_max = self.local_seq_no.add(unacknowledged);
+                        if (self.state == .syn_received) {
+                            if (!ack_number.eql(self.local_seq_no.add(1))) {
+                                return rstReply(repr);
+                            }
+                        } else {
+                            const unacknowledged = self.tx_buffer.len() + control_len;
+                            var ack_min = self.local_seq_no;
+                            const ack_max = self.local_seq_no.add(unacknowledged);
 
-                                if (sent_syn) ack_min = ack_min.add(1);
+                            if (sent_syn) ack_min = ack_min.add(1);
 
-                                if (ack_number.lessThan(ack_min)) return null;
-                                if (ack_number.greaterThan(ack_max)) {
-                                    return self.challengeAckReply(timestamp, repr);
-                                }
+                            if (ack_number.lessThan(ack_min)) return null;
+                            if (ack_number.greaterThan(ack_max)) {
+                                return self.challengeAckReply(timestamp, repr);
                             }
                         }
                     }
