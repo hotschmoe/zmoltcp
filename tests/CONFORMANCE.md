@@ -2,6 +2,8 @@
 
 Tracks zmoltcp tests against their smoltcp reference implementations.
 
+**Total: 521 tests passing** (520 named + 1 root import test)
+
 ## Summary
 
 | Module | smoltcp Tests | zmoltcp Tests | N/A | Passing | Status |
@@ -16,7 +18,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | storage/ring_buffer | 15 | 14 | 1 | 14 | PASS |
 | storage/assembler | 38 | 37 | 1 | 37 | PASS |
 | time | 10 | 8 | 2 | 8 | PASS |
-| socket/tcp | 175 | 217 | ~3 | 217 | PASS |
+| socket/tcp | 175 | 217 | 3 | 217 | PASS |
 | socket/udp | 16 | 17 | 0 | 17 | PASS |
 | wire/dhcp | 9 | 9 | 0 | 9 | PASS |
 | socket/dhcp | 11 | 11 | 0 | 11 | PASS |
@@ -29,6 +31,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | phy | 0 | 9 | 0 | 9 | PASS |
 | fragmentation | 3 | 8 | 0 | 8 | PASS |
 | stack | 2 | 47 | 0 | 47 | PASS |
+| **Total** | | **520** | **8** | **520** | **PASS** |
 
 ## Wire Layer Tests
 
