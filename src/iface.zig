@@ -119,13 +119,10 @@ pub const NeighborCache = struct {
     }
 
     pub fn lookup(self: *const NeighborCache, ip: ipv4.Address, now: time.Instant) ?ethernet.Address {
-        for (self.entries) |entry| {
-            if (std.mem.eql(u8, &entry.protocol_addr, &ip)) {
-                if (entry.expires_at.greaterThanOrEqual(now)) return entry.hardware_addr;
-                return null;
-            }
-        }
-        return null;
+        return switch (self.lookupFull(ip, now)) {
+            .found => |mac| mac,
+            .not_found, .rate_limited => null,
+        };
     }
 
     pub fn lookupFull(self: *const NeighborCache, ip: ipv4.Address, now: time.Instant) LookupResult {

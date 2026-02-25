@@ -11,6 +11,7 @@
 //
 // Reference: smoltcp src/iface/fragmentation.rs
 
+const std = @import("std");
 const ipv4 = @import("wire/ipv4.zig");
 const ethernet = @import("wire/ethernet.zig");
 const time = @import("time.zig");
@@ -179,11 +180,8 @@ pub fn Reassembler(comptime config: ReassemblerConfig) type {
         }
 
         pub fn accept(self: *Self, key: FragKey, expires_at: time.Instant) void {
-            if (self.key) |current| {
-                if (current.eql(key)) {
-                    return;
-                }
-            }
+            const is_same = if (self.key) |current| current.eql(key) else false;
+            if (is_same) return;
             self.reset();
             self.key = key;
             self.expires_at = expires_at;
@@ -228,7 +226,6 @@ pub fn Reassembler(comptime config: ReassemblerConfig) type {
 // Tests
 // -------------------------------------------------------------------------
 
-const std = @import("std");
 const testing = std.testing;
 
 test "maxIpv4FragmentPayload alignment" {
@@ -294,6 +291,8 @@ test "fragmenter stage and emit" {
 // Reassembler tests
 // -------------------------------------------------------------------------
 
+const TestReassembler = Reassembler(.{ .buffer_size = 64, .max_segments = 4 });
+
 const test_key = FragKey{
     .id = 1,
     .src_addr = .{ 10, 0, 0, 2 },
@@ -303,8 +302,7 @@ const test_key = FragKey{
 
 test "reassembler two-part assembly" {
     // [smoltcp:iface/fragmentation.rs:packet_assembler_assemble]
-    const R = Reassembler(.{ .buffer_size = 64, .max_segments = 4 });
-    var r = R{};
+    var r = TestReassembler{};
     try testing.expect(r.isFree());
 
     r.accept(test_key, time.Instant.fromSecs(60));
@@ -322,8 +320,7 @@ test "reassembler two-part assembly" {
 
 test "reassembler out-of-order assembly" {
     // [smoltcp:iface/fragmentation.rs:packet_assembler_out_of_order_assemble]
-    const R = Reassembler(.{ .buffer_size = 64, .max_segments = 4 });
-    var r = R{};
+    var r = TestReassembler{};
 
     r.accept(test_key, time.Instant.fromSecs(60));
     r.setTotalSize(12);
@@ -338,8 +335,7 @@ test "reassembler out-of-order assembly" {
 
 test "reassembler overlapping fragments" {
     // [smoltcp:iface/fragmentation.rs:packet_assembler_overlap]
-    const R = Reassembler(.{ .buffer_size = 64, .max_segments = 4 });
-    var r = R{};
+    var r = TestReassembler{};
 
     r.accept(test_key, time.Instant.fromSecs(60));
     r.setTotalSize(5);
@@ -351,8 +347,7 @@ test "reassembler overlapping fragments" {
 }
 
 test "reassembler expiry" {
-    const R = Reassembler(.{ .buffer_size = 64, .max_segments = 4 });
-    var r = R{};
+    var r = TestReassembler{};
 
     r.accept(test_key, time.Instant.fromSecs(60));
     r.setTotalSize(6);
@@ -369,8 +364,7 @@ test "reassembler expiry" {
 }
 
 test "reassembler eviction on new key" {
-    const R = Reassembler(.{ .buffer_size = 64, .max_segments = 4 });
-    var r = R{};
+    var r = TestReassembler{};
 
     r.accept(test_key, time.Instant.fromSecs(60));
     r.setTotalSize(6);
@@ -397,8 +391,7 @@ test "reassembler eviction on new key" {
 }
 
 test "reassembler buffer overflow" {
-    const R = Reassembler(.{ .buffer_size = 8, .max_segments = 4 });
-    var r = R{};
+    var r = Reassembler(.{ .buffer_size = 8, .max_segments = 4 }){};
 
     r.accept(test_key, time.Instant.fromSecs(60));
     r.setTotalSize(16);

@@ -161,14 +161,13 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             return result;
         }
 
-        fn adjustForNeighbor(self: *const Self, sock_at: Instant, dst: ?ipv4.Address) ?Instant {
+        fn adjustForNeighbor(self: *const Self, sock_at: Instant, dst: ?ipv4.Address) Instant {
             const addr = dst orelse return sock_at;
             if (self.iface.isBroadcast(addr) or ipv4.isBroadcast(addr)) return sock_at;
-            switch (self.iface.neighbor_cache.lookupFull(addr, sock_at)) {
-                .found => return sock_at,
-                .not_found => return sock_at,
-                .rate_limited => return self.iface.neighbor_cache.silent_until,
-            }
+            return switch (self.iface.neighbor_cache.lookupFull(addr, sock_at)) {
+                .rate_limited => self.iface.neighbor_cache.silent_until,
+                else => sock_at,
+            };
         }
 
         fn minOptInstant(a: ?Instant, b: ?Instant) ?Instant {
@@ -188,23 +187,20 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     }
                 },
                 .ipv4 => {
+                    const ip_repr = ipv4.parse(payload_data) catch return;
                     // Opportunistic neighbor caching: learn source MAC from
                     // incoming IPv4 frames so response packets can find
                     // the neighbor without a separate ARP exchange.
-                    const ip_repr = ipv4.parse(payload_data) catch {
-                        return;
-                    };
                     if (!ipv4.isUnspecified(ip_repr.src_addr)) {
                         self.iface.neighbor_cache.fill(ip_repr.src_addr, eth_repr.src_addr, self.iface.now);
                     }
-                    self.processIpv4Ingress(timestamp, payload_data, device);
+                    self.processIpv4Ingress(timestamp, ip_repr, payload_data, device);
                 },
                 else => {},
             }
         }
 
-        fn processIpv4Ingress(self: *Self, timestamp: Instant, data: []const u8, device: *Device) void {
-            const ip_repr = ipv4.parse(data) catch return;
+        fn processIpv4Ingress(self: *Self, timestamp: Instant, ip_repr: ipv4.Repr, data: []const u8, device: *Device) void {
             const is_broadcast = self.iface.isBroadcast(ip_repr.dst_addr);
             if (!is_broadcast and !self.iface.hasIpAddr(ip_repr.dst_addr)) return;
 
@@ -917,6 +913,36 @@ test "stack loopback device round-trip" {
 test "stack pollAt returns null with no sockets" {
     var stack = testStack();
     try testing.expectEqual(@as(?Instant, null), stack.pollAt());
+}
+
+fn emitTestFrame(buf: []u8, ip_repr: ipv4.Repr, payload_data: []const u8) []const u8 {
+    const eth_repr = ethernet.Repr{
+        .dst_addr = LOCAL_HW,
+        .src_addr = REMOTE_HW,
+        .ethertype = .ipv4,
+    };
+    const eth_len = ethernet.emit(eth_repr, buf) catch unreachable;
+    const ip_len = ipv4.emit(ip_repr, buf[eth_len..]) catch unreachable;
+    @memcpy(buf[eth_len + ip_len ..][0..payload_data.len], payload_data);
+    return buf[0 .. eth_len + ip_len + payload_data.len];
+}
+
+fn buildIpv4FrameFrom(buf: []u8, src: ipv4.Address, dst: ipv4.Address, protocol: ipv4.Protocol, payload_data: []const u8) []const u8 {
+    return emitTestFrame(buf, .{
+        .version = 4,
+        .ihl = 5,
+        .dscp_ecn = 0,
+        .total_length = @intCast(ipv4.HEADER_LEN + payload_data.len),
+        .identification = 0,
+        .dont_fragment = false,
+        .more_fragments = false,
+        .fragment_offset = 0,
+        .ttl = 64,
+        .protocol = protocol,
+        .checksum = 0,
+        .src_addr = src,
+        .dst_addr = dst,
+    }, payload_data);
 }
 
 fn buildIpv4Frame(buf: []u8, protocol: ipv4.Protocol, payload_data: []const u8) []const u8 {
@@ -2151,7 +2177,7 @@ fn buildFragment(
     more_frags: bool,
     payload_data: []const u8,
 ) []const u8 {
-    const ip_repr = ipv4.Repr{
+    return emitTestFrame(buf, .{
         .version = 4,
         .ihl = 5,
         .dscp_ecn = 0,
@@ -2165,16 +2191,7 @@ fn buildFragment(
         .checksum = 0,
         .src_addr = REMOTE_IP,
         .dst_addr = LOCAL_IP,
-    };
-    const eth_repr = ethernet.Repr{
-        .dst_addr = LOCAL_HW,
-        .src_addr = REMOTE_HW,
-        .ethertype = .ipv4,
-    };
-    const eth_len = ethernet.emit(eth_repr, buf) catch unreachable;
-    const ip_len = ipv4.emit(ip_repr, buf[eth_len..]) catch unreachable;
-    @memcpy(buf[eth_len + ip_len ..][0..payload_data.len], payload_data);
-    return buf[0 .. eth_len + ip_len + payload_data.len];
+    }, payload_data);
 }
 
 test "stack reassembles two-fragment ICMP echo" {
@@ -2303,29 +2320,3 @@ test "stack non-fragmented packets bypass reassembly" {
     try testing.expect(stack.reassembler.isFree());
 }
 
-fn buildIpv4FrameFrom(buf: []u8, src: ipv4.Address, dst: ipv4.Address, protocol: ipv4.Protocol, payload_data: []const u8) []const u8 {
-    const ip_repr = ipv4.Repr{
-        .version = 4,
-        .ihl = 5,
-        .dscp_ecn = 0,
-        .total_length = @intCast(ipv4.HEADER_LEN + payload_data.len),
-        .identification = 0,
-        .dont_fragment = false,
-        .more_fragments = false,
-        .fragment_offset = 0,
-        .ttl = 64,
-        .protocol = protocol,
-        .checksum = 0,
-        .src_addr = src,
-        .dst_addr = dst,
-    };
-    const eth_repr = ethernet.Repr{
-        .dst_addr = LOCAL_HW,
-        .src_addr = REMOTE_HW,
-        .ethertype = .ipv4,
-    };
-    const eth_len = ethernet.emit(eth_repr, buf) catch unreachable;
-    const ip_len = ipv4.emit(ip_repr, buf[eth_len..]) catch unreachable;
-    @memcpy(buf[eth_len + ip_len ..][0..payload_data.len], payload_data);
-    return buf[0 .. eth_len + ip_len + payload_data.len];
-}
