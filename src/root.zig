@@ -15,6 +15,16 @@ pub const wire = struct {
     pub const dhcp = @import("wire/dhcp.zig");
     pub const dns = @import("wire/dns.zig");
     pub const igmp = @import("wire/igmp.zig");
+    pub const ipv6 = @import("wire/ipv6.zig");
+    pub const ipv6option = @import("wire/ipv6option.zig");
+    pub const ipv6ext_header = @import("wire/ipv6ext_header.zig");
+    pub const ipv6fragment = @import("wire/ipv6fragment.zig");
+    pub const ipv6routing = @import("wire/ipv6routing.zig");
+    pub const ipv6hbh = @import("wire/ipv6hbh.zig");
+    pub const icmpv6 = @import("wire/icmpv6.zig");
+    pub const ndiscoption = @import("wire/ndiscoption.zig");
+    pub const ndisc = @import("wire/ndisc.zig");
+    pub const mld = @import("wire/mld.zig");
 };
 
 pub const storage = struct {
@@ -63,6 +73,16 @@ test {
     _ = @import("socket/dns.zig");
     _ = @import("socket/raw.zig");
     _ = @import("wire/igmp.zig");
+    _ = @import("wire/ipv6.zig");
+    _ = @import("wire/ipv6option.zig");
+    _ = @import("wire/ipv6ext_header.zig");
+    _ = @import("wire/ipv6fragment.zig");
+    _ = @import("wire/ipv6routing.zig");
+    _ = @import("wire/ipv6hbh.zig");
+    _ = @import("wire/icmpv6.zig");
+    _ = @import("wire/ndiscoption.zig");
+    _ = @import("wire/ndisc.zig");
+    _ = @import("wire/mld.zig");
     _ = @import("iface.zig");
     _ = @import("fragmentation.zig");
     _ = @import("stack.zig");

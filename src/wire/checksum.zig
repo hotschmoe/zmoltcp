@@ -37,6 +37,29 @@ pub fn finish(sum: u32) u16 {
     return @truncate(~s);
 }
 
+/// Build the IPv6 pseudo-header checksum accumulator per RFC 8200 S8.1.
+/// Returns a raw u32 accumulator -- callers chain with calculate() for the
+/// upper-layer payload, then finish() to get the final 16-bit checksum.
+pub fn pseudoHeaderChecksumV6(
+    src: [16]u8,
+    dst: [16]u8,
+    next_header: u8,
+    upper_layer_len: u32,
+) u32 {
+    var pseudo: [40]u8 = undefined;
+    @memcpy(pseudo[0..16], &src);
+    @memcpy(pseudo[16..32], &dst);
+    pseudo[32] = @truncate(upper_layer_len >> 24);
+    pseudo[33] = @truncate(upper_layer_len >> 16);
+    pseudo[34] = @truncate(upper_layer_len >> 8);
+    pseudo[35] = @truncate(upper_layer_len);
+    pseudo[36] = 0;
+    pseudo[37] = 0;
+    pseudo[38] = 0;
+    pseudo[39] = next_header;
+    return calculate(&pseudo, 0);
+}
+
 // -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------
@@ -74,6 +97,25 @@ test "checksum accumulate non-contiguous" {
     const sum_whole = calculate(&combined, 0);
 
     try testing.expectEqual(finish(sum_whole), finish(sum_parts));
+}
+
+test "IPv6 pseudo-header checksum" {
+    // ICMPv6 echo from fe80::1 to ff02::1, payload len = 12
+    const src = [_]u8{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    const dst = [_]u8{ 0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    const sum = pseudoHeaderChecksumV6(src, dst, 58, 12);
+    // Chain with a dummy payload and finish -- result should be a valid u16
+    const payload = [_]u8{ 0x80, 0x00, 0x00, 0x00, 0x12, 0x34, 0xab, 0xcd, 0xaa, 0x00, 0x00, 0xff };
+    const total = calculate(&payload, sum);
+    const cksum = finish(total);
+    // Verify the checksum is non-zero (valid for this input)
+    try testing.expect(cksum != 0);
+    // Verify round-trip: inserting the checksum into bytes 2-3 should yield 0
+    var with_cksum = payload;
+    with_cksum[2] = @truncate(cksum >> 8);
+    with_cksum[3] = @truncate(cksum & 0xFF);
+    const verify = calculate(&with_cksum, sum);
+    try testing.expectEqual(@as(u16, 0), finish(verify));
 }
 
 test "IPv4 header checksum known value" {

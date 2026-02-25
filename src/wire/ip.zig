@@ -96,6 +96,7 @@ pub fn ListenEndpoint(comptime Ip: type) type {
 
 const testing = std.testing;
 const ipv4 = @import("ipv4.zig");
+const ipv6 = @import("ipv6.zig");
 
 test "Cidr(ipv4) basic containment" {
     const IpCidr = Cidr(ipv4);
@@ -128,4 +129,34 @@ test "Endpoint and ListenEndpoint basic usage" {
     const LEp = ListenEndpoint(ipv4);
     const lep = LEp{ .port = 443 };
     try testing.expectEqual(@as(?ipv4.Address, null), lep.addr);
+}
+
+test "Cidr(ipv6) basic containment" {
+    const IpCidr = Cidr(ipv6);
+    // fe80::1/64
+    const cidr = IpCidr{
+        .address = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
+        .prefix_len = 64,
+    };
+    try testing.expect(cidr.contains(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 }));
+    try testing.expect(cidr.contains(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }));
+    try testing.expect(!cidr.contains(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1 }));
+    try testing.expect(!cidr.contains(ipv6.LOOPBACK));
+}
+
+test "Cidr(ipv6) prefix_len 0 contains all" {
+    const IpCidr = Cidr(ipv6);
+    const cidr = IpCidr{ .address = ipv6.UNSPECIFIED, .prefix_len = 0 };
+    try testing.expect(cidr.contains(ipv6.LOOPBACK));
+    try testing.expect(cidr.contains(ipv6.LINK_LOCAL_ALL_NODES));
+}
+
+test "Endpoint(ipv6) and ListenEndpoint(ipv6)" {
+    const Ep = Endpoint(ipv6);
+    const ep = Ep{ .addr = ipv6.LOOPBACK, .port = 8080 };
+    try testing.expectEqual(@as(u16, 8080), ep.port);
+
+    const LEp = ListenEndpoint(ipv6);
+    const lep = LEp{ .port = 443 };
+    try testing.expectEqual(@as(?ipv6.Address, null), lep.addr);
 }

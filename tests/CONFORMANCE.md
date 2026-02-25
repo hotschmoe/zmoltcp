@@ -2,16 +2,16 @@
 
 Tracks zmoltcp tests against their smoltcp reference implementations.
 
-**Total: 526 tests passing** (525 named + 1 root import test)
+**Total: 592 tests passing** (591 named + 1 root import test)
 
 ## Summary
 
 | Module | smoltcp Tests | zmoltcp Tests | N/A | Passing | Status |
 |--------|--------------|---------------|-----|---------|--------|
-| wire/checksum | 5 | 5 | 0 | 5 | PASS |
+| wire/checksum | 5 | 6 | 0 | 6 | PASS |
 | wire/ethernet | 5 | 5 | 0 | 5 | PASS |
 | wire/arp | 4 | 5 | 0 | 5 | PASS |
-| wire/ip | 0 | 4 | 0 | 4 | PASS |
+| wire/ip | 0 | 7 | 0 | 7 | PASS |
 | wire/ipv4 | 15 | 16 | 0 | 16 | PASS |
 | wire/tcp | 9 | 22 | 0 | 22 | PASS |
 | wire/udp | 8 | 8 | 0 | 8 | PASS |
@@ -28,11 +28,21 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | socket/icmp | 6 | 7 | 0 | 7 | PASS |
 | socket/raw | 5 | 11 | 0 | 11 | PASS |
 | wire/igmp | 4 | 8 | 0 | 8 | PASS |
+| wire/ipv6 | 12 | 12 | 0 | 12 | PASS |
+| wire/ipv6option | 7 | 7 | 0 | 7 | PASS |
+| wire/ipv6ext_header | 3 | 5 | 0 | 5 | PASS |
+| wire/ipv6fragment | 3 | 4 | 0 | 4 | PASS |
+| wire/ipv6routing | 3 | 4 | 0 | 4 | PASS |
+| wire/ipv6hbh | 2 | 3 | 0 | 3 | PASS |
+| wire/ndiscoption | 5 | 8 | 0 | 8 | PASS |
+| wire/ndisc | 2 | 4 | 0 | 4 | PASS |
+| wire/mld | 2 | 6 | 0 | 6 | PASS |
+| wire/icmpv6 | 6 | 9 | 0 | 9 | PASS |
 | iface | 24 | 33 | 1 | 33 | PASS |
 | phy | 0 | 9 | 0 | 9 | PASS |
 | fragmentation | 3 | 8 | 0 | 8 | PASS |
 | stack | 2 | 47 | 0 | 47 | PASS |
-| **Total** | | **525** | **8** | **525** | **PASS** |
+| **Total** | | **591** | **8** | **591** | **PASS** |
 
 ## Wire Layer Tests
 
@@ -43,6 +53,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/mod.rs (checksum) | "checksum of 0xFF bytes" | PASS |
 | wire/mod.rs (checksum) | "checksum odd length" | PASS |
 | wire/mod.rs (checksum) | "checksum accumulate non-contiguous" | PASS |
+| (RFC 8200 vector) | "IPv6 pseudo-header checksum" | PASS |
 | (RFC 1071 vector) | "IPv4 header checksum known value" | PASS |
 
 ### wire/ethernet.zig
@@ -70,6 +81,9 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | (original) | "Cidr(ipv4) prefix_len 0 contains all" | PASS |
 | (original) | "Cidr(ipv4) broadcast and networkAddr" | PASS |
 | (original) | "Endpoint and ListenEndpoint basic usage" | PASS |
+| (original) | "Cidr(ipv6) basic containment" | PASS |
+| (original) | "Cidr(ipv6) prefix_len 0 contains all" | PASS |
+| (original) | "Endpoint(ipv6) and ListenEndpoint(ipv6)" | PASS |
 
 ### wire/ipv4.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -173,6 +187,108 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | (original) | "IGMP parse rejects non-multicast group" | PASS |
 | (original) | "IGMP emit roundtrip" | PASS |
 | (original) | "IGMP v1 query detected by zero max_resp_code" | PASS |
+
+### wire/ipv6.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| wire/ipv6.rs:test_repr_parse | "parse IPv6 header" | PASS |
+| (original) | "parse IPv6 truncated" | PASS |
+| (original) | "parse IPv6 bad version" | PASS |
+| wire/ipv6.rs:test_repr_emit | "IPv6 roundtrip" | PASS |
+| (original) | "IPv6 emit buffer too small" | PASS |
+| (original) | "IPv6 payload extraction" | PASS |
+| (original) | "IPv6 payload clamped" | PASS |
+| (original) | "IPv6 checkLen valid" | PASS |
+| (original) | "IPv6 checkLen truncated payload" | PASS |
+| wire/ipv6.rs:test_address | "IPv6 address classification" | PASS |
+| wire/ipv6.rs:test_solicited_node | "IPv6 solicited-node multicast" | PASS |
+| (original) | "IPv6 formatAddr compressed" | PASS |
+
+### wire/ipv6option.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| wire/ipv6option.rs:test_check_len | "parse Pad1" | PASS |
+| wire/ipv6option.rs:test_option_deconstruct | "parse PadN" | PASS |
+| wire/ipv6option.rs:test_option_deconstruct | "parse RouterAlert MLD" | PASS |
+| wire/ipv6option.rs:test_option_deconstruct | "parse RouterAlert RSVP" | PASS |
+| wire/ipv6option.rs:test_option_deconstruct | "parse unknown option" | PASS |
+| wire/ipv6option.rs:test_option_construct | "option roundtrip" | PASS |
+| wire/ipv6option.rs:test_option_iterator | "iterator with mixed options" | PASS |
+
+### wire/ipv6ext_header.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| (original) | "headerLen encoding" | PASS |
+| wire/ipv6ext_header.rs:test_ext_header_deconstruct | "parse extension header with PadN(4)" | PASS |
+| wire/ipv6ext_header.rs:test_ext_header_deconstruct | "parse extension header with PadN(12)" | PASS |
+| wire/ipv6ext_header.rs:test_ext_header_construct | "extension header roundtrip" | PASS |
+| (original) | "parse truncated" | PASS |
+
+### wire/ipv6fragment.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| wire/ipv6fragment.rs:test_frag_header_deconstruct | "parse fragment header more_frags" | PASS |
+| wire/ipv6fragment.rs:test_frag_header_deconstruct | "parse fragment header last frag" | PASS |
+| wire/ipv6fragment.rs:test_frag_header_construct | "fragment header roundtrip" | PASS |
+| (original) | "parse fragment truncated" | PASS |
+
+### wire/ipv6routing.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| wire/ipv6routing.rs:test_deconstruct_type2 | "parse Type2 routing header" | PASS |
+| wire/ipv6routing.rs:test_construct_type2 | "Type2 roundtrip" | PASS |
+| wire/ipv6routing.rs:test_deconstruct_rpl_elided | "parse RPL elided" | PASS |
+| (original) | "unrecognized routing type" | PASS |
+
+### wire/ipv6hbh.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| wire/ipv6hopbyhop.rs:test_hbh_deconstruct | "parse HBH with PadN(4)" | PASS |
+| (original) | "parse HBH with multiple options" | PASS |
+| (original) | "mldv2RouterAlert preset" | PASS |
+
+### wire/ndiscoption.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| wire/ndiscoption.rs:test_parse_source_lladdr | "parse source link-layer address" | PASS |
+| (original) | "parse target link-layer address" | PASS |
+| wire/ndiscoption.rs:test_parse_prefix_info | "parse prefix information" | PASS |
+| wire/ndiscoption.rs:test_parse_mtu | "parse MTU option" | PASS |
+| (original) | "parse unknown option" | PASS |
+| (original) | "parse length zero is error" | PASS |
+| (original) | "optionLen basic" | PASS |
+| wire/ndiscoption.rs:test_construct_prefix_info | "prefix information roundtrip" | PASS |
+
+### wire/ndisc.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| wire/ndisc.rs:test_router_advert_parse | "parse router advertisement" | PASS |
+| (original) | "parse neighbor solicit" | PASS |
+| wire/ndisc.rs:test_router_advert_emit | "router advertisement roundtrip" | PASS |
+| (original) | "parse unrecognized NDP type" | PASS |
+
+### wire/mld.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| wire/mld.rs:test_query_deconstruct | "parse MLD query" | PASS |
+| wire/mld.rs:test_report_deconstruct | "parse MLD report" | PASS |
+| (original) | "parse MLD unrecognized type" | PASS |
+| wire/mld.rs:test_query_construct | "MLD query roundtrip" | PASS |
+| wire/mld.rs:test_record_deconstruct | "parse address record" | PASS |
+| (original) | "address record roundtrip" | PASS |
+
+### wire/icmpv6.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| wire/icmpv6.rs:test_echo_parse | "echo request parse" | PASS |
+| wire/icmpv6.rs:test_echo_emit | "echo reply roundtrip" | PASS |
+| (original) | "bad checksum rejected" | PASS |
+| wire/icmpv6.rs:test_pkt_too_big | "pkt_too_big roundtrip" | PASS |
+| wire/icmpv6.rs:test_dst_unreachable | "dst_unreachable roundtrip" | PASS |
+| (original) | "ndisc via icmpv6" | PASS |
+| (original) | "mld query via icmpv6" | PASS |
+| (original) | "truncated message" | PASS |
+| (original) | "verifyChecksum" | PASS |
 
 ## Storage Layer Tests
 
@@ -720,15 +836,11 @@ language differences, API design choices, or out-of-scope features.
 
 ### Out-of-scope protocol families
 
-The following smoltcp modules are IPv6-only or 802.15.4 link layers, which
-are outside zmoltcp's IPv4/Ethernet scope:
+The following smoltcp modules are 802.15.4 link layers or split-file patterns
+outside zmoltcp's scope:
 
 | smoltcp Module | Reason |
 |---|---|
-| wire/ipv6.rs, wire/icmpv6.rs | IPv6 not in scope |
-| wire/ipv6hbh.rs, wire/ipv6hopbyhop.rs | IPv6 extension headers |
-| wire/ipv6routing.rs, wire/ipv6fragment.rs | IPv6 extension headers |
-| wire/ndiscover.rs, wire/mld.rs | IPv6 neighbor discovery / multicast |
 | wire/sixlowpan.rs, wire/ieee802154.rs | 802.15.4 / 6LoWPAN link layer |
 | wire/rpl.rs | RPL routing (6LoWPAN) |
 | iface/interface/sixlowpan.rs | 6LoWPAN interface |
