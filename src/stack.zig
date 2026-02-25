@@ -699,7 +699,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             _ = self.emitIpv4Frame(result.src_ip, result.dst_ip, .udp, iface_mod.DEFAULT_HOP_LIMIT, payload_buf[0..total], device);
         }
 
-        fn emitDnsEgress(self: *Self, result: dns_socket_mod.DispatchResult, device: *Device) EmitResult {
+        fn emitDnsEgress(self: *Self, result: anytype, device: *Device) EmitResult {
             var payload_buf: [IP_PAYLOAD_MAX]u8 = undefined;
             const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + result.payload.len);
             const hdr_len = udp_wire.emit(.{
@@ -1134,7 +1134,7 @@ test "stack TCP SYN no listener produces RST" {
 }
 
 test "stack UDP to bound socket delivers data" {
-    const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
     const Sockets = struct { udp_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
@@ -1175,7 +1175,7 @@ test "stack UDP to bound socket delivers data" {
 }
 
 test "stack ICMP echo with bound socket delivers and auto-replies" {
-    const IcmpSock = icmp_socket_mod.Socket(.{ .payload_size = 128 });
+    const IcmpSock = icmp_socket_mod.Socket(ipv4, .{ .payload_size = 128 });
     const Sockets = struct { icmp_sockets: []*IcmpSock };
     const IcmpStack = Stack(TestDevice, Sockets);
 
@@ -1242,7 +1242,7 @@ test "stack ICMP echo with bound socket delivers and auto-replies" {
 const icmp_socket_mod = @import("socket/icmp.zig");
 
 test "stack TCP egress dispatches SYN on connect" {
-    const TcpSock = tcp_socket.Socket(4);
+    const TcpSock = tcp_socket.Socket(ipv4, 4);
     const Sockets = struct { tcp_sockets: []*TcpSock };
     const TcpStack = Stack(TestDevice, Sockets);
 
@@ -1291,7 +1291,7 @@ test "stack TCP egress dispatches SYN on connect" {
 }
 
 test "stack TCP handshake completes via listen" {
-    const TcpSock = tcp_socket.Socket(4);
+    const TcpSock = tcp_socket.Socket(ipv4, 4);
     const Sockets = struct { tcp_sockets: []*TcpSock };
     const TcpStack = Stack(TestDevice, Sockets);
 
@@ -1393,7 +1393,7 @@ test "stack TCP handshake completes via listen" {
 }
 
 test "stack UDP egress dispatches datagram" {
-    const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
     const Sockets = struct { udp_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
@@ -1436,7 +1436,7 @@ test "stack UDP egress dispatches datagram" {
 }
 
 test "stack ICMP egress dispatches echo request" {
-    const IcmpSock = icmp_socket_mod.Socket(.{ .payload_size = 128 });
+    const IcmpSock = icmp_socket_mod.Socket(ipv4, .{ .payload_size = 128 });
     const Sockets = struct { icmp_sockets: []*IcmpSock };
     const IcmpStack = Stack(TestDevice, Sockets);
 
@@ -1479,7 +1479,7 @@ test "stack ICMP egress dispatches echo request" {
 }
 
 test "stack poll returns true for egress-only activity" {
-    const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
     const Sockets = struct { udp_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
@@ -1505,7 +1505,7 @@ test "stack poll returns true for egress-only activity" {
 }
 
 test "stack pollAt returns ZERO for pending TCP SYN-SENT" {
-    const TcpSock = tcp_socket.Socket(4);
+    const TcpSock = tcp_socket.Socket(ipv4, 4);
     const Sockets = struct { tcp_sockets: []*TcpSock };
     const TcpStack = Stack(TestDevice, Sockets);
 
@@ -1527,7 +1527,7 @@ test "stack pollAt returns ZERO for pending TCP SYN-SENT" {
 }
 
 test "stack pollAt returns null for idle sockets" {
-    const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
     const Sockets = struct { udp_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
@@ -1545,7 +1545,7 @@ test "stack pollAt returns null for idle sockets" {
 }
 
 test "stack egress uses cached neighbor MAC" {
-    const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
     const Sockets = struct { udp_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
@@ -1578,7 +1578,7 @@ test "stack egress uses cached neighbor MAC" {
 }
 
 test "stack pollAt returns retransmit deadline after SYN dispatch" {
-    const TcpSock = tcp_socket.Socket(4);
+    const TcpSock = tcp_socket.Socket(ipv4, 4);
     const Sockets = struct { tcp_sockets: []*TcpSock };
     const TcpStack = Stack(TestDevice, Sockets);
 
@@ -1782,14 +1782,14 @@ test "stack DHCP pollAt returns socket deadline" {
 // -------------------------------------------------------------------------
 
 test "stack DNS query dispatches via UDP" {
-    const DnsSock = dns_socket_mod.Socket;
+    const DnsSock = dns_socket_mod.Socket(ipv4);
     const Sockets = struct { dns_sockets: []*DnsSock };
     const DnsStack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
     const S = struct {
-        var slots: [4]dns_socket_mod.QuerySlot = [_]dns_socket_mod.QuerySlot{.{}} ** 4;
+        var slots: [4]DnsSock.QuerySlot = [_]DnsSock.QuerySlot{.{}} ** 4;
     };
     @memset(@as([*]u8, @ptrCast(&S.slots))[0..@sizeOf(@TypeOf(S.slots))], 0);
     const servers = [_][4]u8{.{ 8, 8, 8, 8 }};
@@ -1822,14 +1822,14 @@ test "stack DNS query dispatches via UDP" {
 
 test "stack DNS ingress delivers response" {
     const dns_wire = @import("wire/dns.zig");
-    const DnsSock = dns_socket_mod.Socket;
+    const DnsSock = dns_socket_mod.Socket(ipv4);
     const Sockets = struct { dns_sockets: []*DnsSock };
     const DnsStack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
     const S = struct {
-        var slots: [4]dns_socket_mod.QuerySlot = [_]dns_socket_mod.QuerySlot{.{}} ** 4;
+        var slots: [4]DnsSock.QuerySlot = [_]DnsSock.QuerySlot{.{}} ** 4;
     };
     @memset(@as([*]u8, @ptrCast(&S.slots))[0..@sizeOf(@TypeOf(S.slots))], 0);
     const servers = [_][4]u8{.{ 8, 8, 8, 8 }};
@@ -1909,14 +1909,14 @@ test "stack DNS ingress delivers response" {
 }
 
 test "stack DNS pollAt returns retransmit deadline" {
-    const DnsSock = dns_socket_mod.Socket;
+    const DnsSock = dns_socket_mod.Socket(ipv4);
     const Sockets = struct { dns_sockets: []*DnsSock };
     const DnsStack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
     const S = struct {
-        var slots: [4]dns_socket_mod.QuerySlot = [_]dns_socket_mod.QuerySlot{.{}} ** 4;
+        var slots: [4]DnsSock.QuerySlot = [_]DnsSock.QuerySlot{.{}} ** 4;
     };
     @memset(@as([*]u8, @ptrCast(&S.slots))[0..@sizeOf(@TypeOf(S.slots))], 0);
     const servers = [_][4]u8{.{ 8, 8, 8, 8 }};
@@ -2037,7 +2037,7 @@ test "stack IPv4 fragment payload is 8-byte aligned" {
 // -------------------------------------------------------------------------
 
 test "stack emits ARP request for unknown neighbor on TCP egress" {
-    const TcpSock = tcp_socket.Socket(4);
+    const TcpSock = tcp_socket.Socket(ipv4, 4);
     const Sockets = struct { tcp_sockets: []*TcpSock };
     const TcpStack = Stack(TestDevice, Sockets);
 
@@ -2076,7 +2076,7 @@ test "stack emits ARP request for unknown neighbor on TCP egress" {
 }
 
 test "stack TCP SYN sent after ARP resolution" {
-    const TcpSock = tcp_socket.Socket(4);
+    const TcpSock = tcp_socket.Socket(ipv4, 4);
     const Sockets = struct { tcp_sockets: []*TcpSock };
     const TcpStack = Stack(TestDevice, Sockets);
 
@@ -2121,7 +2121,7 @@ test "stack TCP SYN sent after ARP resolution" {
 }
 
 test "stack ARP request rate limited" {
-    const TcpSock = tcp_socket.Socket(4);
+    const TcpSock = tcp_socket.Socket(ipv4, 4);
     const Sockets = struct { tcp_sockets: []*TcpSock };
     const TcpStack = Stack(TestDevice, Sockets);
 
@@ -2158,7 +2158,7 @@ test "stack ARP request rate limited" {
 }
 
 test "stack UDP does not lose packet during ARP resolution" {
-    const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
     const Sockets = struct { udp_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
@@ -2236,7 +2236,7 @@ test "stack ICMP echo reply uses cached neighbor from ingress" {
 }
 
 test "stack pollAt accounts for neighbor resolution delay" {
-    const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
     const Sockets = struct { udp_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
@@ -2266,7 +2266,7 @@ test "stack pollAt accounts for neighbor resolution delay" {
 }
 
 test "stack broadcast destination skips ARP resolution" {
-    const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
     const Sockets = struct { udp_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
@@ -2383,7 +2383,7 @@ test "stack reassembles two-fragment ICMP echo" {
 }
 
 test "stack reassembles out-of-order UDP fragments" {
-    const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 128 });
+    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 128 });
     const Sockets = struct { udp_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
@@ -2558,7 +2558,7 @@ test "stack neighbor cache refresh gated by same network" {
 }
 
 test "stack egress routes via gateway for off-subnet destination" {
-    const TcpSock = tcp_socket.Socket(4);
+    const TcpSock = tcp_socket.Socket(ipv4, 4);
     const Sockets = struct { tcp_sockets: []*TcpSock };
     const TcpStack = Stack(TestDevice, Sockets);
 
@@ -2602,7 +2602,7 @@ test "stack egress routes via gateway for off-subnet destination" {
 }
 
 test "stack raw socket receives IP payload" {
-    const RawSock = raw_socket_mod.Socket(.{ .payload_size = 128 });
+    const RawSock = raw_socket_mod.Socket(ipv4, .{ .payload_size = 128 });
     const Sockets = struct { raw_sockets: []*RawSock };
     const RawStack = Stack(TestDevice, Sockets);
 
@@ -2630,7 +2630,7 @@ test "stack raw socket receives IP payload" {
 }
 
 test "stack raw socket suppresses ICMP proto unreachable" {
-    const RawSock = raw_socket_mod.Socket(.{ .payload_size = 128 });
+    const RawSock = raw_socket_mod.Socket(ipv4, .{ .payload_size = 128 });
     const Sockets = struct { raw_sockets: []*RawSock };
     const RawStack = Stack(TestDevice, Sockets);
 
@@ -2693,7 +2693,7 @@ test "stack IGMP query triggers report for joined group" {
 }
 
 test "stack multicast destination accepted for joined group" {
-    const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
     const Sockets = struct { udp_sockets: []*UdpSock };
     const McastStack = Stack(TestDevice, Sockets);
 
@@ -2752,7 +2752,7 @@ fn TestDeviceWithCaps(comptime caps: iface_mod.DeviceCapabilities) type {
 
 test "TCP checksum offload skips computation" {
     const OffloadDevice = TestDeviceWithCaps(.{ .checksum = .{ .tcp = .rx_only } });
-    const TcpSock = tcp_socket.Socket(4);
+    const TcpSock = tcp_socket.Socket(ipv4, 4);
     const Sockets = struct { tcp_sockets: []*TcpSock };
     const OffloadStack = Stack(OffloadDevice, Sockets);
 
@@ -2789,7 +2789,7 @@ test "TCP checksum offload skips computation" {
 test "burst size limits frames per poll cycle" {
     const BurstDevice = TestDeviceWithCaps(.{ .max_burst_size = 1 });
 
-    const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
     const Sockets = struct { udp_sockets: []*UdpSock };
     const BurstStack = Stack(BurstDevice, Sockets);
 
@@ -2801,7 +2801,7 @@ test "burst size limits frames per poll cycle" {
     try sock.bind(.{ .port = 3000 });
 
     // Enqueue 3 outgoing UDP packets.
-    const meta = udp_socket_mod.Metadata{ .endpoint = .{ .addr = REMOTE_IP, .port = 4000 } };
+    const meta = UdpSock.Metadata{ .endpoint = .{ .addr = REMOTE_IP, .port = 4000 } };
     try sock.sendSlice("aaa", meta);
     try sock.sendSlice("bbb", meta);
     try sock.sendSlice("ccc", meta);

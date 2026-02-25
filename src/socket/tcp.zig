@@ -8,6 +8,7 @@
 const std = @import("std");
 const time = @import("../time.zig");
 const wire_tcp = @import("../wire/tcp.zig");
+const ip_generic = @import("../wire/ip.zig");
 const ipv4 = @import("../wire/ipv4.zig");
 const assembler_mod = @import("../storage/assembler.zig");
 const ring_buffer_mod = @import("../storage/ring_buffer.zig");
@@ -24,23 +25,8 @@ const BASE_MSS: u16 = 1460;
 const DEFAULT_HOP_LIMIT: u8 = 64;
 
 // -------------------------------------------------------------------------
-// Endpoint types
+// Endpoint types (parameterized in Socket, aliased here for module-level use)
 // -------------------------------------------------------------------------
-
-pub const Endpoint = struct {
-    addr: ipv4.Address,
-    port: u16,
-};
-
-pub const ListenEndpoint = struct {
-    addr: ?ipv4.Address = null,
-    port: u16 = 0,
-};
-
-const Tuple = struct {
-    local: Endpoint,
-    remote: Endpoint,
-};
 
 // -------------------------------------------------------------------------
 // Socket-level TCP Repr
@@ -597,11 +583,20 @@ pub const CongestionController = union(enum) {
 // Socket
 // -------------------------------------------------------------------------
 
-pub fn Socket(comptime max_asm_segs: usize) type {
+pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
+    comptime ip_generic.assertIsIp(Ip);
     return struct {
         const Self = @This();
         const Assembler = assembler_mod.Assembler(max_asm_segs);
         const RingBuffer = ring_buffer_mod.RingBuffer(u8);
+
+        pub const Endpoint = ip_generic.Endpoint(Ip);
+        pub const ListenEndpoint = ip_generic.ListenEndpoint(Ip);
+
+        const Tuple = struct {
+            local: Endpoint,
+            remote: Endpoint,
+        };
 
         state: State,
         timer: Timer,
@@ -869,9 +864,9 @@ pub fn Socket(comptime max_asm_segs: usize) type {
 
         pub fn connect(
             self: *Self,
-            remote_addr: ipv4.Address,
+            remote_addr: Ip.Address,
             remote_port: u16,
-            local_addr: ipv4.Address,
+            local_addr: Ip.Address,
             local_port: u16,
         ) ConnectError!void {
             if (self.isOpen()) return error.InvalidState;
@@ -978,8 +973,8 @@ pub fn Socket(comptime max_asm_segs: usize) type {
 
         pub fn accepts(
             self: Self,
-            src_addr: ipv4.Address,
-            dst_addr: ipv4.Address,
+            src_addr: Ip.Address,
+            dst_addr: Ip.Address,
             repr: TcpRepr,
         ) bool {
             if (self.state == .closed) return false;
@@ -1005,8 +1000,8 @@ pub fn Socket(comptime max_asm_segs: usize) type {
         pub fn process(
             self: *Self,
             timestamp: Instant,
-            src_addr: ipv4.Address,
-            dst_addr: ipv4.Address,
+            src_addr: Ip.Address,
+            dst_addr: Ip.Address,
             repr: TcpRepr,
         ) ?TcpRepr {
             // Consider SYN/FIN in sequence space for ACK validation.
@@ -1425,8 +1420,8 @@ pub fn Socket(comptime max_asm_segs: usize) type {
 
         pub const DispatchResult = struct {
             repr: TcpRepr,
-            src_addr: ipv4.Address,
-            dst_addr: ipv4.Address,
+            src_addr: Ip.Address,
+            dst_addr: Ip.Address,
             hop_limit: u8,
             meta: iface_mod.PacketMeta = .{},
         };
@@ -1764,7 +1759,7 @@ pub fn Socket(comptime max_asm_segs: usize) type {
 // =========================================================================
 
 const testing = std.testing;
-const TestSocket = Socket(4);
+const TestSocket = Socket(ipv4, 4);
 
 const LOCAL_PORT: u16 = 80;
 const REMOTE_PORT: u16 = 49500;
@@ -1773,7 +1768,7 @@ const REMOTE_SEQ = SeqNumber{ .value = -10001 };
 const LOCAL_ADDR = ipv4.Address{ 192, 168, 1, 1 };
 const REMOTE_ADDR = ipv4.Address{ 192, 168, 1, 2 };
 
-const LISTEN_END = ListenEndpoint{ .port = LOCAL_PORT };
+const LISTEN_END = TestSocket.ListenEndpoint{ .port = LOCAL_PORT };
 
 const SEND_TEMPL = TcpRepr{
     .src_port = REMOTE_PORT,
@@ -1960,7 +1955,7 @@ fn expectSanity(a: TestSocket, b: TestSocket) !void {
         try testing.expect(std.mem.eql(u8, &at.remote.addr, &bt.remote.addr));
         try testing.expectEqual(at.remote.port, bt.remote.port);
     } else {
-        try testing.expectEqual(@as(?Tuple, null), b.tuple);
+        try testing.expectEqual(@as(?TestSocket.Tuple, null), b.tuple);
     }
     try testing.expect(a.local_seq_no.eql(b.local_seq_no));
     try testing.expect(a.remote_seq_no.eql(b.remote_seq_no));
@@ -2050,7 +2045,7 @@ test "closed rejects SYN" {
 // [smoltcp:socket/tcp.rs:test_closed_reject_after_listen]
 test "closed rejects after listen+close" {
     var s = socketNew();
-    try s.listen(ListenEndpoint{ .port = LOCAL_PORT });
+    try s.listen(TestSocket.ListenEndpoint{ .port = LOCAL_PORT });
     s.close();
 
     const syn = TcpRepr{
@@ -2075,23 +2070,23 @@ test "close on closed is noop" {
 // [smoltcp:socket/tcp.rs:test_listen_sanity]
 test "listen sanity" {
     var s = socketNew();
-    try s.listen(ListenEndpoint{ .port = LOCAL_PORT });
+    try s.listen(TestSocket.ListenEndpoint{ .port = LOCAL_PORT });
     try expectSanity(s, socketListen());
 }
 
 // [smoltcp:socket/tcp.rs:test_listen_validation]
 test "listen validation rejects port 0" {
     var s = socketNew();
-    try testing.expectError(error.Unaddressable, s.listen(ListenEndpoint{ .port = 0 }));
+    try testing.expectError(error.Unaddressable, s.listen(TestSocket.ListenEndpoint{ .port = 0 }));
 }
 
 // [smoltcp:socket/tcp.rs:test_listen_twice]
 test "listen twice on same port is ok" {
     var s = socketNew();
-    try s.listen(ListenEndpoint{ .port = 80 });
-    try s.listen(ListenEndpoint{ .port = 80 });
+    try s.listen(TestSocket.ListenEndpoint{ .port = 80 });
+    try s.listen(TestSocket.ListenEndpoint{ .port = 80 });
     s.state = .syn_received;
-    try testing.expectError(error.InvalidState, s.listen(ListenEndpoint{ .port = 80 }));
+    try testing.expectError(error.InvalidState, s.listen(TestSocket.ListenEndpoint{ .port = 80 }));
 }
 
 // [smoltcp:socket/tcp.rs:test_listen_syn]
@@ -2569,7 +2564,7 @@ test "keep alive sends probes" {
 
 test "full three-way handshake via listen" {
     var s = socketNew();
-    try s.listen(ListenEndpoint{ .port = 80 });
+    try s.listen(TestSocket.ListenEndpoint{ .port = 80 });
     try testing.expectEqual(State.listen, s.state);
 
     // Remote sends SYN.

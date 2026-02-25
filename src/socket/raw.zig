@@ -7,6 +7,7 @@
 // [smoltcp:socket/raw.rs]
 
 const std = @import("std");
+const ip_generic = @import("../wire/ip.zig");
 const ipv4 = @import("../wire/ipv4.zig");
 const ring_buffer_mod = @import("../storage/ring_buffer.zig");
 const time = @import("../time.zig");
@@ -26,21 +27,22 @@ pub const Config = struct {
 // Socket
 // -------------------------------------------------------------------------
 
-pub fn Socket(comptime config: Config) type {
+pub fn Socket(comptime Ip: type, comptime config: Config) type {
+    comptime ip_generic.assertIsIp(Ip);
     return struct {
         const Self = @This();
 
         pub const Packet = struct {
             payload: [config.payload_size]u8 = undefined,
             payload_len: usize = 0,
-            addr: ipv4.Address = ipv4.UNSPECIFIED,
+            addr: Ip.Address = Ip.UNSPECIFIED,
         };
 
         const RingBuffer = ring_buffer_mod.RingBuffer(Packet);
 
         rx: RingBuffer,
         tx: RingBuffer,
-        ip_protocol: ?ipv4.Protocol,
+        ip_protocol: ?Ip.Protocol,
         hop_limit: ?u8,
 
         pub const BindError = error{InvalidProtocol};
@@ -50,17 +52,17 @@ pub fn Socket(comptime config: Config) type {
 
         pub const RecvResult = struct {
             data_len: usize,
-            src_addr: ipv4.Address,
+            src_addr: Ip.Address,
         };
 
         pub const PeekResult = struct {
             payload: []const u8,
-            src_addr: ipv4.Address,
+            src_addr: Ip.Address,
         };
 
         pub const DispatchResult = struct {
-            ip_protocol: ipv4.Protocol,
-            dst_addr: ipv4.Address,
+            ip_protocol: Ip.Protocol,
+            dst_addr: Ip.Address,
             hop_limit: ?u8,
             payload: []const u8,
             meta: iface_mod.PacketMeta = .{},
@@ -77,7 +79,7 @@ pub fn Socket(comptime config: Config) type {
             };
         }
 
-        pub fn bind(self: *Self, protocol: ipv4.Protocol) BindError!void {
+        pub fn bind(self: *Self, protocol: Ip.Protocol) BindError!void {
             self.ip_protocol = protocol;
         }
 
@@ -108,7 +110,7 @@ pub fn Socket(comptime config: Config) type {
 
         // -- Send --
 
-        pub fn sendSlice(self: *Self, data: []const u8, dst_addr: ipv4.Address) SendError!void {
+        pub fn sendSlice(self: *Self, data: []const u8, dst_addr: Ip.Address) SendError!void {
             if (self.ip_protocol == null) return error.Unbound;
             if (data.len > config.payload_size) return error.BufferFull;
 
@@ -149,12 +151,12 @@ pub fn Socket(comptime config: Config) type {
 
         // -- Protocol integration --
 
-        pub fn accepts(self: Self, protocol: ipv4.Protocol) bool {
+        pub fn accepts(self: Self, protocol: Ip.Protocol) bool {
             const bound = self.ip_protocol orelse return false;
             return bound == protocol;
         }
 
-        pub fn process(self: *Self, src_addr: ipv4.Address, protocol: ipv4.Protocol, payload: []const u8) void {
+        pub fn process(self: *Self, src_addr: Ip.Address, protocol: Ip.Protocol, payload: []const u8) void {
             _ = protocol;
             const pkt = self.rx.enqueueOne() catch return;
             const copy_len = @min(payload.len, config.payload_size);
@@ -163,7 +165,7 @@ pub fn Socket(comptime config: Config) type {
             pkt.addr = src_addr;
         }
 
-        pub fn peekDstAddr(self: *const Self) ?ipv4.Address {
+        pub fn peekDstAddr(self: *const Self) ?Ip.Address {
             const slice = self.tx.getAllocated(0, 1);
             if (slice.len == 0) return null;
             return slice[0].addr;
@@ -188,7 +190,7 @@ pub fn Socket(comptime config: Config) type {
 const testing = std.testing;
 
 const TestConfig = Config{ .payload_size = 64 };
-const TestSocket = Socket(TestConfig);
+const TestSocket = Socket(ipv4, TestConfig);
 
 const LOCAL_ADDR: ipv4.Address = .{ 192, 168, 1, 1 };
 const REMOTE_ADDR: ipv4.Address = .{ 192, 168, 1, 2 };

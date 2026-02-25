@@ -15,7 +15,8 @@ pub const Protocol = enum(u8) {
     _,
 };
 
-pub const Address = [4]u8;
+pub const ADDRESS_LEN: usize = 4;
+pub const Address = [ADDRESS_LEN]u8;
 pub const UNSPECIFIED: Address = .{ 0, 0, 0, 0 };
 pub const BROADCAST: Address = .{ 255, 255, 255, 255 };
 

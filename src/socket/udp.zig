@@ -7,6 +7,7 @@
 // [smoltcp:socket/udp.rs]
 
 const std = @import("std");
+const ip_generic = @import("../wire/ip.zig");
 const ipv4 = @import("../wire/ipv4.zig");
 const ring_buffer_mod = @import("../storage/ring_buffer.zig");
 const time = @import("../time.zig");
@@ -15,35 +16,12 @@ const iface_mod = @import("../iface.zig");
 const Instant = time.Instant;
 
 // -------------------------------------------------------------------------
-// Endpoint types
-// -------------------------------------------------------------------------
-
-pub const Endpoint = struct {
-    addr: ipv4.Address,
-    port: u16,
-};
-
-pub const ListenEndpoint = struct {
-    addr: ?ipv4.Address = null,
-    port: u16 = 0,
-};
-
-// -------------------------------------------------------------------------
 // Repr (socket-level, mirrors wire/udp.zig Repr minus length/checksum)
 // -------------------------------------------------------------------------
 
 pub const UdpRepr = struct {
     src_port: u16,
     dst_port: u16,
-};
-
-// -------------------------------------------------------------------------
-// Metadata carried with each buffered packet
-// -------------------------------------------------------------------------
-
-pub const Metadata = struct {
-    endpoint: Endpoint = .{ .addr = ipv4.UNSPECIFIED, .port = 0 },
-    local_addr: ?ipv4.Address = null,
 };
 
 // -------------------------------------------------------------------------
@@ -58,9 +36,18 @@ pub const Config = struct {
 // Socket
 // -------------------------------------------------------------------------
 
-pub fn Socket(comptime config: Config) type {
+pub fn Socket(comptime Ip: type, comptime config: Config) type {
+    comptime ip_generic.assertIsIp(Ip);
     return struct {
         const Self = @This();
+
+        pub const Endpoint = ip_generic.Endpoint(Ip);
+        pub const ListenEndpoint = ip_generic.ListenEndpoint(Ip);
+
+        pub const Metadata = struct {
+            endpoint: Endpoint = .{ .addr = Ip.UNSPECIFIED, .port = 0 },
+            local_addr: ?Ip.Address = null,
+        };
 
         pub const Packet = struct {
             payload: [config.payload_size]u8 = undefined,
@@ -92,8 +79,8 @@ pub fn Socket(comptime config: Config) type {
 
         pub const DispatchResult = struct {
             repr: UdpRepr,
-            src_addr: ipv4.Address,
-            dst_addr: ipv4.Address,
+            src_addr: Ip.Address,
+            dst_addr: Ip.Address,
             hop_limit: ?u8,
             payload: []const u8,
             meta: iface_mod.PacketMeta = .{},
@@ -145,7 +132,7 @@ pub fn Socket(comptime config: Config) type {
 
         pub fn sendSlice(self: *Self, data: []const u8, meta: Metadata) SendError!void {
             if (self.local_endpoint.port == 0) return error.Unaddressable;
-            if (ipv4.isUnspecified(meta.endpoint.addr)) return error.Unaddressable;
+            if (Ip.isUnspecified(meta.endpoint.addr)) return error.Unaddressable;
             if (meta.endpoint.port == 0) return error.Unaddressable;
             if (data.len > config.payload_size) return error.BufferFull;
 
@@ -199,7 +186,7 @@ pub fn Socket(comptime config: Config) type {
 
         // -- Protocol integration --
 
-        pub fn accepts(self: Self, src_addr: ipv4.Address, dst_addr: ipv4.Address, repr: UdpRepr) bool {
+        pub fn accepts(self: Self, src_addr: Ip.Address, dst_addr: Ip.Address, repr: UdpRepr) bool {
             _ = src_addr;
             if (self.local_endpoint.port != repr.dst_port) return false;
             if (self.local_endpoint.addr) |bound_addr| {
@@ -208,7 +195,7 @@ pub fn Socket(comptime config: Config) type {
             return true;
         }
 
-        pub fn process(self: *Self, src_addr: ipv4.Address, dst_addr: ipv4.Address, repr: UdpRepr, payload: []const u8) void {
+        pub fn process(self: *Self, src_addr: Ip.Address, dst_addr: Ip.Address, repr: UdpRepr, payload: []const u8) void {
             const pkt = self.rx.enqueueOne() catch return;
             const copy_len = @min(payload.len, config.payload_size);
             @memcpy(pkt.payload[0..copy_len], payload[0..copy_len]);
@@ -219,7 +206,7 @@ pub fn Socket(comptime config: Config) type {
             };
         }
 
-        pub fn peekDstAddr(self: *const Self) ?ipv4.Address {
+        pub fn peekDstAddr(self: *const Self) ?Ip.Address {
             const slice = self.tx.getAllocated(0, 1);
             if (slice.len == 0) return null;
             return slice[0].meta.endpoint.addr;
@@ -228,7 +215,7 @@ pub fn Socket(comptime config: Config) type {
         pub fn dispatch(self: *Self) ?DispatchResult {
             const pkt = self.tx.dequeueOne() catch return null;
             const src_addr = pkt.meta.local_addr orelse
-                (self.local_endpoint.addr orelse ipv4.UNSPECIFIED);
+                (self.local_endpoint.addr orelse Ip.UNSPECIFIED);
             return .{
                 .repr = .{
                     .src_port = self.local_endpoint.port,
@@ -250,7 +237,7 @@ pub fn Socket(comptime config: Config) type {
 const testing = std.testing;
 
 const TestConfig = Config{ .payload_size = 16 };
-const TestSocket = Socket(TestConfig);
+const TestSocket = Socket(ipv4, TestConfig);
 
 const LOCAL_PORT: u16 = 53;
 const REMOTE_PORT: u16 = 49500;
@@ -258,8 +245,8 @@ const LOCAL_ADDR: ipv4.Address = .{ 192, 168, 1, 1 };
 const REMOTE_ADDR: ipv4.Address = .{ 192, 168, 1, 2 };
 const OTHER_ADDR: ipv4.Address = .{ 192, 168, 1, 3 };
 
-const LOCAL_END = ListenEndpoint{ .addr = LOCAL_ADDR, .port = LOCAL_PORT };
-const REMOTE_END = Endpoint{ .addr = REMOTE_ADDR, .port = REMOTE_PORT };
+const LOCAL_END = TestSocket.ListenEndpoint{ .addr = LOCAL_ADDR, .port = LOCAL_PORT };
+const REMOTE_END = TestSocket.Endpoint{ .addr = REMOTE_ADDR, .port = REMOTE_PORT };
 
 const PAYLOAD = "abcdef";
 

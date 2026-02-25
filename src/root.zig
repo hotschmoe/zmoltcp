@@ -7,6 +7,7 @@ pub const wire = struct {
     pub const checksum = @import("wire/checksum.zig");
     pub const ethernet = @import("wire/ethernet.zig");
     pub const arp = @import("wire/arp.zig");
+    pub const ip = @import("wire/ip.zig");
     pub const ipv4 = @import("wire/ipv4.zig");
     pub const tcp = @import("wire/tcp.zig");
     pub const udp = @import("wire/udp.zig");
@@ -46,6 +47,7 @@ test {
     _ = @import("wire/checksum.zig");
     _ = @import("wire/ethernet.zig");
     _ = @import("wire/arp.zig");
+    _ = @import("wire/ip.zig");
     _ = @import("wire/ipv4.zig");
     _ = @import("wire/udp.zig");
     _ = @import("wire/icmp.zig");

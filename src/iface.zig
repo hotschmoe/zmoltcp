@@ -10,6 +10,7 @@
 const std = @import("std");
 const ethernet = @import("wire/ethernet.zig");
 const arp = @import("wire/arp.zig");
+const ip_generic = @import("wire/ip.zig");
 const ipv4 = @import("wire/ipv4.zig");
 const icmp = @import("wire/icmp.zig");
 const udp = @import("wire/udp.zig");
@@ -65,47 +66,7 @@ const NEIGHBOR_LIFETIME = time.Duration.fromSecs(60);
 // Max ICMP error payload: IPV4_MIN_MTU minus outer IP + ICMP + invoking IP headers
 const ICMP_ERROR_MAX_DATA = IPV4_MIN_MTU - ipv4.HEADER_LEN - icmp.HEADER_LEN - ipv4.HEADER_LEN;
 
-pub const IpCidr = struct {
-    address: ipv4.Address,
-    prefix_len: u6,
-
-    fn addrToU32(addr: ipv4.Address) u32 {
-        return @as(u32, addr[0]) << 24 | @as(u32, addr[1]) << 16 |
-            @as(u32, addr[2]) << 8 | @as(u32, addr[3]);
-    }
-
-    fn u32ToAddr(val: u32) ipv4.Address {
-        return .{
-            @truncate(val >> 24),
-            @truncate(val >> 16),
-            @truncate(val >> 8),
-            @truncate(val),
-        };
-    }
-
-    fn hostMask(self: IpCidr) u32 {
-        if (self.prefix_len == 0) return 0xFFFFFFFF;
-        if (self.prefix_len >= 32) return 0;
-        return (@as(u32, 1) << @intCast(32 - @as(u6, self.prefix_len))) -% 1;
-    }
-
-    pub fn networkMask(self: IpCidr) u32 {
-        return ~self.hostMask();
-    }
-
-    pub fn networkAddr(self: IpCidr) ipv4.Address {
-        return u32ToAddr(addrToU32(self.address) & self.networkMask());
-    }
-
-    pub fn broadcast(self: IpCidr) ?ipv4.Address {
-        if (self.prefix_len >= 31) return null;
-        return u32ToAddr(addrToU32(self.address) | self.hostMask());
-    }
-
-    pub fn contains(self: IpCidr, addr: ipv4.Address) bool {
-        return (addrToU32(addr) & self.networkMask()) == (addrToU32(self.address) & self.networkMask());
-    }
-};
+pub const IpCidr = ip_generic.Cidr(ipv4);
 
 // -------------------------------------------------------------------------
 // Routing table
@@ -113,49 +74,58 @@ pub const IpCidr = struct {
 
 pub const MAX_ROUTE_COUNT = 4;
 
-pub const Route = struct {
-    cidr: IpCidr,
-    via_router: ipv4.Address,
-    expires_at: ?time.Instant = null,
+pub fn RouteFor(comptime Ip: type) type {
+    return struct {
+        cidr: ip_generic.Cidr(Ip),
+        via_router: Ip.Address,
+        expires_at: ?time.Instant = null,
 
-    pub fn newDefaultGateway(gateway: ipv4.Address) Route {
-        return .{
-            .cidr = .{ .address = .{ 0, 0, 0, 0 }, .prefix_len = 0 },
-            .via_router = gateway,
-        };
-    }
-};
-
-pub const Routes = struct {
-    entries: [MAX_ROUTE_COUNT]?Route = .{null} ** MAX_ROUTE_COUNT,
-
-    pub fn add(self: *Routes, route: Route) bool {
-        for (&self.entries) |*slot| {
-            if (slot.* == null) {
-                slot.* = route;
-                return true;
-            }
+        pub fn newDefaultGateway(gateway: Ip.Address) @This() {
+            return .{
+                .cidr = .{ .address = Ip.UNSPECIFIED, .prefix_len = 0 },
+                .via_router = gateway,
+            };
         }
-        return false;
-    }
+    };
+}
 
-    pub fn lookup(self: *const Routes, addr: ipv4.Address, now: time.Instant) ?ipv4.Address {
-        var best_prefix: ?u6 = null;
-        var best_router: ?ipv4.Address = null;
-        for (self.entries) |maybe_route| {
-            const route = maybe_route orelse continue;
-            if (route.expires_at) |exp| {
-                if (exp.lessThan(now)) continue;
+pub const Route = RouteFor(ipv4);
+
+pub fn RoutesFor(comptime Ip: type) type {
+    return struct {
+        const R = RouteFor(Ip);
+        entries: [MAX_ROUTE_COUNT]?R = .{null} ** MAX_ROUTE_COUNT,
+
+        pub fn add(self: *@This(), route: R) bool {
+            for (&self.entries) |*slot| {
+                if (slot.* == null) {
+                    slot.* = route;
+                    return true;
+                }
             }
-            if (!route.cidr.contains(addr)) continue;
-            if (best_prefix == null or route.cidr.prefix_len > best_prefix.?) {
-                best_prefix = route.cidr.prefix_len;
-                best_router = route.via_router;
-            }
+            return false;
         }
-        return best_router;
-    }
-};
+
+        pub fn lookup(self: *const @This(), addr: Ip.Address, now: time.Instant) ?Ip.Address {
+            var best_prefix: ?u8 = null;
+            var best_router: ?Ip.Address = null;
+            for (self.entries) |maybe_route| {
+                const route = maybe_route orelse continue;
+                if (route.expires_at) |exp| {
+                    if (exp.lessThan(now)) continue;
+                }
+                if (!route.cidr.contains(addr)) continue;
+                if (best_prefix == null or route.cidr.prefix_len > best_prefix.?) {
+                    best_prefix = route.cidr.prefix_len;
+                    best_router = route.via_router;
+                }
+            }
+            return best_router;
+        }
+    };
+}
+
+pub const Routes = RoutesFor(ipv4);
 
 pub const NeighborCache = struct {
     pub const SILENT_TIME = time.Duration.fromMillis(1000);
@@ -853,7 +823,7 @@ test "ICMP error port unreachable" {
 
 // [smoltcp:iface/interface/tests/mod.rs:test_handle_udp_broadcast]
 test "handle UDP broadcast" {
-    const UdpSocket = @import("socket/udp.zig").Socket(.{ .payload_size = 64 });
+    const UdpSocket = @import("socket/udp.zig").Socket(ipv4, .{ .payload_size = 64 });
     const UdpRepr = @import("socket/udp.zig").UdpRepr;
 
     var iface = testInterface();
@@ -964,7 +934,7 @@ test "any_ip accepts ARP for unknown address" {
 
 // [smoltcp:iface/interface/tests/ipv4.rs:test_icmpv4_socket]
 test "ICMP socket receives echo request and auto-reply" {
-    const IcmpSocket = @import("socket/icmp.zig").Socket(.{ .payload_size = 128 });
+    const IcmpSocket = @import("socket/icmp.zig").Socket(ipv4, .{ .payload_size = 128 });
 
     var iface_inst = testInterface();
 
@@ -1339,7 +1309,7 @@ test "route lookup expiry" {
 
 test "route default gateway" {
     const gw = Route.newDefaultGateway(.{ 10, 0, 0, 1 });
-    try testing.expectEqual(@as(u6, 0), gw.cidr.prefix_len);
+    try testing.expectEqual(@as(u8, 0), gw.cidr.prefix_len);
     var routes = Routes{};
     _ = routes.add(gw);
     // Default gateway matches any address.

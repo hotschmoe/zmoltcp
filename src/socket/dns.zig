@@ -3,6 +3,8 @@
 // Reference: RFC 1035, smoltcp src/socket/dns.rs
 
 const std = @import("std");
+const ip_generic = @import("../wire/ip.zig");
+const ipv4 = @import("../wire/ipv4.zig");
 const wire = @import("../wire/dns.zig");
 const time = @import("../time.zig");
 const Instant = time.Instant;
@@ -32,314 +34,322 @@ pub const GetQueryResultError = error{
     Failed,
 };
 
-pub const Addresses = struct {
-    addrs: [MAX_RESULT_COUNT][4]u8 = undefined,
-    len: u8 = 0,
+pub fn Addresses(comptime Ip: type) type {
+    return struct {
+        addrs: [MAX_RESULT_COUNT]Ip.Address = undefined,
+        len: u8 = 0,
 
-    pub fn push(self: *Addresses, addr: [4]u8) void {
-        if (self.len < MAX_RESULT_COUNT) {
-            self.addrs[self.len] = addr;
-            self.len += 1;
-        }
-    }
-
-    pub fn get(self: *const Addresses, i: usize) [4]u8 {
-        return self.addrs[i];
-    }
-};
-
-const PendingQuery = struct {
-    name: [MAX_NAME_SIZE]u8 = undefined,
-    name_len: usize,
-    type_: wire.Type,
-    port: u16,
-    txid: u16,
-    timeout_at: ?Instant,
-    retransmit_at: Instant,
-    delay: Duration,
-    server_idx: usize,
-};
-
-const QueryState = union(enum) {
-    pending: PendingQuery,
-    completed: Addresses,
-    failure,
-};
-
-pub const QuerySlot = struct {
-    state: ?QueryState = null,
-};
-
-pub const DispatchResult = struct {
-    payload: []const u8,
-    src_port: u16,
-    dst_ip: [4]u8,
-};
-
-pub const Socket = struct {
-    queries: []QuerySlot,
-    servers: [MAX_SERVER_COUNT][4]u8 = undefined,
-    server_count: usize = 0,
-
-    pub fn init(queries: []QuerySlot, servers: []const [4]u8) Socket {
-        var s = Socket{
-            .queries = queries,
-        };
-        s.updateServers(servers);
-        for (queries) |*q| {
-            q.state = null;
-        }
-        return s;
-    }
-
-    pub fn updateServers(self: *Socket, servers: []const [4]u8) void {
-        const count = @min(servers.len, MAX_SERVER_COUNT);
-        for (0..count) |i| {
-            self.servers[i] = servers[i];
-        }
-        self.server_count = count;
-    }
-
-    fn findFreeSlot(self: *Socket) ?QueryHandle {
-        for (self.queries, 0..) |*q, i| {
-            if (q.state == null) {
-                return .{ .index = i };
-            }
-        }
-        return null;
-    }
-
-    /// Start a query with a human-readable dotted name (e.g. "rust-lang.org").
-    pub fn startQuery(self: *Socket, name: []const u8, type_: wire.Type) StartQueryError!QueryHandle {
-        var raw_name: [MAX_NAME_SIZE]u8 = undefined;
-        var pos: usize = 0;
-
-        var work_name = name;
-        if (work_name.len == 0) return error.InvalidName;
-
-        if (work_name[work_name.len - 1] == '.') {
-            work_name = work_name[0 .. work_name.len - 1];
-        }
-
-        var remaining = work_name;
-        while (remaining.len > 0) {
-            var dot_pos: usize = 0;
-            while (dot_pos < remaining.len and remaining[dot_pos] != '.') : (dot_pos += 1) {}
-
-            const label = remaining[0..dot_pos];
-            if (label.len == 0) return error.InvalidName;
-            if (label.len > 63) return error.InvalidName;
-            if (pos + 1 + label.len >= MAX_NAME_SIZE) return error.NameTooLong;
-
-            raw_name[pos] = @truncate(label.len);
-            @memcpy(raw_name[pos + 1 ..][0..label.len], label);
-            pos += 1 + label.len;
-
-            if (dot_pos < remaining.len) {
-                remaining = remaining[dot_pos + 1 ..];
-            } else {
-                break;
+        pub fn push(self: *@This(), addr: Ip.Address) void {
+            if (self.len < MAX_RESULT_COUNT) {
+                self.addrs[self.len] = addr;
+                self.len += 1;
             }
         }
 
-        if (pos >= MAX_NAME_SIZE) return error.NameTooLong;
-        raw_name[pos] = 0x00;
-        pos += 1;
-
-        return self.startQueryRaw(raw_name[0..pos], type_);
-    }
-
-    /// Start a query with a pre-encoded wire-format name.
-    pub fn startQueryRaw(self: *Socket, raw_name: []const u8, type_: wire.Type) StartQueryError!QueryHandle {
-        const handle = self.findFreeSlot() orelse return error.NoFreeSlot;
-        if (raw_name.len > MAX_NAME_SIZE) return error.NameTooLong;
-
-        var pq = PendingQuery{
-            .name_len = raw_name.len,
-            .type_ = type_,
-            .txid = testTransactionId(),
-            .port = testSourcePort(),
-            .delay = RETRANSMIT_DELAY,
-            .timeout_at = null,
-            .retransmit_at = Instant.ZERO,
-            .server_idx = 0,
-        };
-        @memcpy(pq.name[0..raw_name.len], raw_name);
-
-        self.queries[handle.index].state = .{ .pending = pq };
-        return handle;
-    }
-
-    /// Get the result of a completed query. Frees the slot on success or failure.
-    pub fn getQueryResult(self: *Socket, handle: QueryHandle) GetQueryResultError!Addresses {
-        const slot = &self.queries[handle.index];
-        const state = slot.state orelse unreachable;
-        switch (state) {
-            .pending => return error.Pending,
-            .completed => |addrs| {
-                slot.state = null;
-                return addrs;
-            },
-            .failure => {
-                slot.state = null;
-                return error.Failed;
-            },
+        pub fn get(self: *const @This(), i: usize) Ip.Address {
+            return self.addrs[i];
         }
-    }
+    };
+}
 
-    /// Cancel a pending query, freeing its slot.
-    pub fn cancelQuery(self: *Socket, handle: QueryHandle) void {
-        self.queries[handle.index].state = null;
-    }
+pub fn Socket(comptime Ip: type) type {
+    comptime ip_generic.assertIsIp(Ip);
 
-    pub fn process(self: *Socket, dst_port: u16, pkt_data: []const u8) void {
-        if (pkt_data.len < wire.HEADER_LEN) return;
+    const Addrs = Addresses(Ip);
 
-        const pkt_opcode = wire.opcode(pkt_data) catch return;
-        if (pkt_opcode != .query) return;
+    return struct {
+        const Self = @This();
 
-        const pkt_flags = wire.flags(pkt_data) catch return;
-        if (pkt_flags & wire.Flags.RESPONSE == 0) return;
+        pub const AddressResult = Addrs;
 
-        const qcount = wire.questionCount(pkt_data) catch return;
-        if (qcount != 1) return;
+        const PendingQuery = struct {
+            name: [MAX_NAME_SIZE]u8 = undefined,
+            name_len: usize,
+            type_: wire.Type,
+            port: u16,
+            txid: u16,
+            timeout_at: ?Instant,
+            retransmit_at: Instant,
+            delay: Duration,
+            server_idx: usize,
+        };
 
-        const pkt_txid = wire.transactionId(pkt_data) catch return;
-        const pkt_rcode = wire.rcode(pkt_data) catch return;
-        const answer_count = wire.answerCount(pkt_data) catch return;
+        const QueryState = union(enum) {
+            pending: PendingQuery,
+            completed: Addrs,
+            failure,
+        };
 
-        for (self.queries) |*slot| {
-            const state = slot.state orelse continue;
-            var pq = switch (state) {
-                .pending => |p| p,
-                else => continue,
+        pub const QuerySlot = struct {
+            state: ?QueryState = null,
+        };
+
+        pub const DispatchResult = struct {
+            payload: []const u8,
+            src_port: u16,
+            dst_ip: Ip.Address,
+        };
+
+        queries: []QuerySlot,
+        servers: [MAX_SERVER_COUNT]Ip.Address = undefined,
+        server_count: usize = 0,
+
+        pub fn init(queries: []QuerySlot, servers: []const Ip.Address) Self {
+            var s = Self{
+                .queries = queries,
             };
+            s.updateServers(servers);
+            for (queries) |*q| {
+                q.state = null;
+            }
+            return s;
+        }
 
-            if (dst_port != pq.port or pkt_txid != pq.txid) continue;
+        pub fn updateServers(self: *Self, servers: []const Ip.Address) void {
+            const count = @min(servers.len, MAX_SERVER_COUNT);
+            for (0..count) |i| {
+                self.servers[i] = servers[i];
+            }
+            self.server_count = count;
+        }
 
-            if (pkt_rcode == .nx_domain) {
-                slot.state = .failure;
-                continue;
+        fn findFreeSlot(self: *Self) ?QueryHandle {
+            for (self.queries, 0..) |*q, i| {
+                if (q.state == null) {
+                    return .{ .index = i };
+                }
+            }
+            return null;
+        }
+
+        pub fn startQuery(self: *Self, name: []const u8, type_: wire.Type) StartQueryError!QueryHandle {
+            var raw_name: [MAX_NAME_SIZE]u8 = undefined;
+            var pos: usize = 0;
+
+            var work_name = name;
+            if (work_name.len == 0) return error.InvalidName;
+
+            if (work_name[work_name.len - 1] == '.') {
+                work_name = work_name[0 .. work_name.len - 1];
             }
 
-            const pld = wire.payload(pkt_data) catch return;
-            const qr = wire.parseQuestion(pld) catch return;
-            if (qr.question.type_ != pq.type_) return;
+            var remaining = work_name;
+            while (remaining.len > 0) {
+                var dot_pos: usize = 0;
+                while (dot_pos < remaining.len and remaining[dot_pos] != '.') : (dot_pos += 1) {}
 
-            const q_name = wire.parseName(pkt_data, headerOffset(pkt_data, qr.question.name)) catch return;
-            const pq_name = wire.parseName(pq.name[0..pq.name_len], 0) catch return;
-            if (!wire.eqNames(q_name, pq_name)) return;
+                const label = remaining[0..dot_pos];
+                if (label.len == 0) return error.InvalidName;
+                if (label.len > 63) return error.InvalidName;
+                if (pos + 1 + label.len >= MAX_NAME_SIZE) return error.NameTooLong;
 
-            var addresses = Addresses{};
-            var rest = qr.rest;
-            for (0..answer_count) |_| {
-                const ar = wire.parseRecord(rest) catch return;
-                rest = ar.rest;
+                raw_name[pos] = @truncate(label.len);
+                @memcpy(raw_name[pos + 1 ..][0..label.len], label);
+                pos += 1 + label.len;
 
-                const rec_name = wire.parseName(pkt_data, headerOffset(pkt_data, ar.record.name)) catch return;
-                const cur_name = wire.parseName(pq.name[0..pq.name_len], 0) catch return;
-                if (!wire.eqNames(rec_name, cur_name)) continue;
-
-                switch (ar.record.data) {
-                    .a => |addr| addresses.push(addr),
-                    .cname => |cname_data| {
-                        const cname_labels = wire.parseName(pkt_data, headerOffset(pkt_data, cname_data)) catch return;
-                        pq.name_len = wire.copyName(&pq.name, cname_labels) catch return;
-                        slot.state = .{ .pending = pq };
-                    },
-                    .other => {},
+                if (dot_pos < remaining.len) {
+                    remaining = remaining[dot_pos + 1 ..];
+                } else {
+                    break;
                 }
             }
 
-            if (addresses.len > 0) {
-                slot.state = .{ .completed = addresses };
-            } else {
-                slot.state = .failure;
-            }
-            return;
+            if (pos >= MAX_NAME_SIZE) return error.NameTooLong;
+            raw_name[pos] = 0x00;
+            pos += 1;
+
+            return self.startQueryRaw(raw_name[0..pos], type_);
         }
-    }
 
-    pub fn dispatch(self: *Socket, now: Instant, buf: []u8) ?DispatchResult {
-        for (self.queries) |*slot| {
-            const state = slot.state orelse continue;
-            var pq = switch (state) {
-                .pending => |p| p,
-                else => continue,
+        pub fn startQueryRaw(self: *Self, raw_name: []const u8, type_: wire.Type) StartQueryError!QueryHandle {
+            const handle = self.findFreeSlot() orelse return error.NoFreeSlot;
+            if (raw_name.len > MAX_NAME_SIZE) return error.NameTooLong;
+
+            var pq = PendingQuery{
+                .name_len = raw_name.len,
+                .type_ = type_,
+                .txid = testTransactionId(),
+                .port = testSourcePort(),
+                .delay = RETRANSMIT_DELAY,
+                .timeout_at = null,
+                .retransmit_at = Instant.ZERO,
+                .server_idx = 0,
             };
+            @memcpy(pq.name[0..raw_name.len], raw_name);
 
-            if (pq.timeout_at == null) pq.timeout_at = now.add(RETRANSMIT_TIMEOUT);
+            self.queries[handle.index].state = .{ .pending = pq };
+            return handle;
+        }
 
-            if (pq.timeout_at.?.lessThan(now)) {
-                pq.timeout_at = now.add(RETRANSMIT_TIMEOUT);
-                pq.retransmit_at = Instant.ZERO;
-                pq.delay = RETRANSMIT_DELAY;
-                pq.server_idx += 1;
-            }
-
-            if (pq.server_idx >= self.server_count) {
-                slot.state = .failure;
-                continue;
-            }
-
-            if (pq.retransmit_at.micros > now.micros) {
-                slot.state = .{ .pending = pq };
-                continue;
-            }
-
-            const repr = wire.Repr{
-                .transaction_id = pq.txid,
-                .flags = wire.Flags.RECURSION_DESIRED,
-                .opcode = .query,
-                .question = .{
-                    .name = pq.name[0..pq.name_len],
-                    .type_ = pq.type_,
+        pub fn getQueryResult(self: *Self, handle: QueryHandle) GetQueryResultError!Addrs {
+            const slot = &self.queries[handle.index];
+            const state = slot.state orelse unreachable;
+            switch (state) {
+                .pending => return error.Pending,
+                .completed => |addrs| {
+                    slot.state = null;
+                    return addrs;
                 },
-            };
+                .failure => {
+                    slot.state = null;
+                    return error.Failed;
+                },
+            }
+        }
 
-            const pkt_len = wire.emit(repr, buf) catch {
+        pub fn cancelQuery(self: *Self, handle: QueryHandle) void {
+            self.queries[handle.index].state = null;
+        }
+
+        pub fn process(self: *Self, dst_port: u16, pkt_data: []const u8) void {
+            if (pkt_data.len < wire.HEADER_LEN) return;
+
+            const pkt_opcode = wire.opcode(pkt_data) catch return;
+            if (pkt_opcode != .query) return;
+
+            const pkt_flags = wire.flags(pkt_data) catch return;
+            if (pkt_flags & wire.Flags.RESPONSE == 0) return;
+
+            const qcount = wire.questionCount(pkt_data) catch return;
+            if (qcount != 1) return;
+
+            const pkt_txid = wire.transactionId(pkt_data) catch return;
+            const pkt_rcode = wire.rcode(pkt_data) catch return;
+            const answer_count = wire.answerCount(pkt_data) catch return;
+
+            for (self.queries) |*slot| {
+                const state = slot.state orelse continue;
+                var pq = switch (state) {
+                    .pending => |p| p,
+                    else => continue,
+                };
+
+                if (dst_port != pq.port or pkt_txid != pq.txid) continue;
+
+                if (pkt_rcode == .nx_domain) {
+                    slot.state = .failure;
+                    continue;
+                }
+
+                const pld = wire.payload(pkt_data) catch return;
+                const qr = wire.parseQuestion(pld) catch return;
+                if (qr.question.type_ != pq.type_) return;
+
+                const q_name = wire.parseName(pkt_data, headerOffset(pkt_data, qr.question.name)) catch return;
+                const pq_name = wire.parseName(pq.name[0..pq.name_len], 0) catch return;
+                if (!wire.eqNames(q_name, pq_name)) return;
+
+                var addresses = Addrs{};
+                var rest = qr.rest;
+                for (0..answer_count) |_| {
+                    const ar = wire.parseRecord(rest) catch return;
+                    rest = ar.rest;
+
+                    const rec_name = wire.parseName(pkt_data, headerOffset(pkt_data, ar.record.name)) catch return;
+                    const cur_name = wire.parseName(pq.name[0..pq.name_len], 0) catch return;
+                    if (!wire.eqNames(rec_name, cur_name)) continue;
+
+                    switch (ar.record.data) {
+                        .a => |addr| addresses.push(addr),
+                        .cname => |cname_data| {
+                            const cname_labels = wire.parseName(pkt_data, headerOffset(pkt_data, cname_data)) catch return;
+                            pq.name_len = wire.copyName(&pq.name, cname_labels) catch return;
+                            slot.state = .{ .pending = pq };
+                        },
+                        .other => {},
+                    }
+                }
+
+                if (addresses.len > 0) {
+                    slot.state = .{ .completed = addresses };
+                } else {
+                    slot.state = .failure;
+                }
+                return;
+            }
+        }
+
+        pub fn dispatch(self: *Self, now: Instant, buf: []u8) ?DispatchResult {
+            for (self.queries) |*slot| {
+                const state = slot.state orelse continue;
+                var pq = switch (state) {
+                    .pending => |p| p,
+                    else => continue,
+                };
+
+                if (pq.timeout_at == null) pq.timeout_at = now.add(RETRANSMIT_TIMEOUT);
+
+                if (pq.timeout_at.?.lessThan(now)) {
+                    pq.timeout_at = now.add(RETRANSMIT_TIMEOUT);
+                    pq.retransmit_at = Instant.ZERO;
+                    pq.delay = RETRANSMIT_DELAY;
+                    pq.server_idx += 1;
+                }
+
+                if (pq.server_idx >= self.server_count) {
+                    slot.state = .failure;
+                    continue;
+                }
+
+                if (pq.retransmit_at.micros > now.micros) {
+                    slot.state = .{ .pending = pq };
+                    continue;
+                }
+
+                const repr = wire.Repr{
+                    .transaction_id = pq.txid,
+                    .flags = wire.Flags.RECURSION_DESIRED,
+                    .opcode = .query,
+                    .question = .{
+                        .name = pq.name[0..pq.name_len],
+                        .type_ = pq.type_,
+                    },
+                };
+
+                const pkt_len = wire.emit(repr, buf) catch {
+                    slot.state = .{ .pending = pq };
+                    continue;
+                };
+
+                pq.retransmit_at = now.add(pq.delay);
+                pq.delay = MAX_RETRANSMIT_DELAY.min(Duration.fromMicros(pq.delay.micros * 2));
+
                 slot.state = .{ .pending = pq };
-                continue;
-            };
 
-            pq.retransmit_at = now.add(pq.delay);
-            pq.delay = MAX_RETRANSMIT_DELAY.min(Duration.fromMicros(pq.delay.micros * 2));
+                return .{
+                    .payload = buf[0..pkt_len],
+                    .src_port = pq.port,
+                    .dst_ip = self.servers[pq.server_idx],
+                };
+            }
 
-            slot.state = .{ .pending = pq };
-
-            return .{
-                .payload = buf[0..pkt_len],
-                .src_port = pq.port,
-                .dst_ip = self.servers[pq.server_idx],
-            };
+            return null;
         }
 
-        return null;
-    }
-
-    pub fn pollAt(self: *const Socket) ?Instant {
-        var earliest: ?Instant = null;
-        for (self.queries) |slot| {
-            const pq = switch (slot.state orelse continue) {
-                .pending => |p| p,
-                else => continue,
-            };
-            earliest = if (earliest) |e|
-                if (pq.retransmit_at.lessThan(e)) pq.retransmit_at else e
-            else
-                pq.retransmit_at;
+        pub fn pollAt(self: *const Self) ?Instant {
+            var earliest: ?Instant = null;
+            for (self.queries) |slot| {
+                const pq = switch (slot.state orelse continue) {
+                    .pending => |p| p,
+                    else => continue,
+                };
+                earliest = if (earliest) |e|
+                    if (pq.retransmit_at.lessThan(e)) pq.retransmit_at else e
+                else
+                    pq.retransmit_at;
+            }
+            return earliest;
         }
-        return earliest;
-    }
 
-    fn testTransactionId() u16 {
-        return 0xABCD;
-    }
+        fn testTransactionId() u16 {
+            return 0xABCD;
+        }
 
-    fn testSourcePort() u16 {
-        return 49152;
-    }
-};
+        fn testSourcePort() u16 {
+            return 49152;
+        }
+    };
+}
 
 fn headerOffset(packet: []const u8, sub: []const u8) usize {
     return @intFromPtr(sub.ptr) - @intFromPtr(packet.ptr);
@@ -351,20 +361,21 @@ fn headerOffset(packet: []const u8, sub: []const u8) usize {
 
 const testing = std.testing;
 
+const DnsSock = Socket(ipv4);
 const DNS_SERVER_1 = [4]u8{ 8, 8, 8, 8 };
 const DNS_SERVER_2 = [4]u8{ 8, 8, 4, 4 };
 const TXID: u16 = 0xABCD;
 const SRC_PORT: u16 = 49152;
 
-fn createSocket() struct { socket: Socket, slots: *[4]QuerySlot, buf: *[512]u8 } {
+fn createSocket() struct { socket: DnsSock, slots: *[4]DnsSock.QuerySlot, buf: *[512]u8 } {
     const S = struct {
-        var slots: [4]QuerySlot = [_]QuerySlot{.{}} ** 4;
+        var slots: [4]DnsSock.QuerySlot = [_]DnsSock.QuerySlot{.{}} ** 4;
         var buf: [512]u8 = undefined;
     };
     @memset(std.mem.asBytes(&S.slots), 0);
     const servers = [_][4]u8{ DNS_SERVER_1, DNS_SERVER_2 };
     return .{
-        .socket = Socket.init(&S.slots, &servers),
+        .socket = DnsSock.init(&S.slots, &servers),
         .slots = &S.slots,
         .buf = &S.buf,
     };
