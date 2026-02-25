@@ -2,12 +2,19 @@
 //
 // Egress: Fragmenter buffers an oversized IP payload and emits it
 //         as multiple fragments across poll cycles.
-// Ingress: Reassembly is not yet implemented.
+// Ingress: Reassembler collects fragments into a single payload buffer,
+//          using the Assembler hole-tracker for out-of-order support.
+//
+// Single-slot design: only one packet ID can be in-flight at a time.
+// If a new key arrives while another is in-progress, the old one is
+// evicted. Acceptable for embedded targets where fragmentation is rare.
 //
 // Reference: smoltcp src/iface/fragmentation.rs
 
 const ipv4 = @import("wire/ipv4.zig");
 const ethernet = @import("wire/ethernet.zig");
+const time = @import("time.zig");
+const Assembler = @import("storage/assembler.zig").Assembler;
 
 /// Fragment payloads must be multiples of 8 bytes (except the last).
 pub const IPV4_FRAGMENT_ALIGNMENT: usize = 8;
@@ -130,10 +137,99 @@ pub fn Fragmenter(comptime buffer_size: usize) type {
 }
 
 // -------------------------------------------------------------------------
+// Ingress reassembly
+// -------------------------------------------------------------------------
+
+pub const FragKey = struct {
+    id: u16,
+    src_addr: ipv4.Address,
+    dst_addr: ipv4.Address,
+    protocol: ipv4.Protocol,
+
+    pub fn eql(a: FragKey, b: FragKey) bool {
+        return a.id == b.id and
+            std.mem.eql(u8, &a.src_addr, &b.src_addr) and
+            std.mem.eql(u8, &a.dst_addr, &b.dst_addr) and
+            a.protocol == b.protocol;
+    }
+};
+
+pub fn isFragment(ip_repr: ipv4.Repr) bool {
+    return ip_repr.more_fragments or ip_repr.fragment_offset != 0;
+}
+
+pub const ReassemblerConfig = struct {
+    buffer_size: usize = 1500,
+    max_segments: usize = 4,
+};
+
+pub fn Reassembler(comptime config: ReassemblerConfig) type {
+    return struct {
+        const Self = @This();
+        const Asm = Assembler(config.max_segments);
+
+        key: ?FragKey = null,
+        buffer: [config.buffer_size]u8 = undefined,
+        assembler: Asm = Asm.init(),
+        total_size: ?usize = null,
+        expires_at: time.Instant = time.Instant.ZERO,
+
+        pub fn isFree(self: *const Self) bool {
+            return self.key == null;
+        }
+
+        pub fn accept(self: *Self, key: FragKey, expires_at: time.Instant) void {
+            if (self.key) |current| {
+                if (current.eql(key)) {
+                    return;
+                }
+            }
+            self.reset();
+            self.key = key;
+            self.expires_at = expires_at;
+        }
+
+        pub fn add(self: *Self, data: []const u8, byte_offset: usize) bool {
+            if (self.key == null) return false;
+            if (byte_offset + data.len > config.buffer_size) return false;
+            @memcpy(self.buffer[byte_offset..][0..data.len], data);
+            self.assembler.add(byte_offset, data.len) catch return false;
+            return true;
+        }
+
+        pub fn setTotalSize(self: *Self, size: usize) void {
+            self.total_size = size;
+        }
+
+        pub fn assemble(self: *Self) ?[]const u8 {
+            const total = self.total_size orelse return null;
+            if (self.assembler.peekFront() != total) return null;
+            const result = self.buffer[0..total];
+            self.reset();
+            return result;
+        }
+
+        pub fn removeExpired(self: *Self, now: time.Instant) void {
+            if (self.key == null) return;
+            if (self.expires_at.lessThan(now)) {
+                self.reset();
+            }
+        }
+
+        pub fn reset(self: *Self) void {
+            self.key = null;
+            self.assembler = Asm.init();
+            self.total_size = null;
+        }
+    };
+}
+
+// -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------
 
-const testing = @import("std").testing;
+const std = @import("std");
+const testing = std.testing;
 
 test "maxIpv4FragmentPayload alignment" {
     // For each possible header len variation, result must be 8-aligned.
@@ -192,4 +288,123 @@ test "fragmenter stage and emit" {
 
     // No more fragments.
     try testing.expect(f.emitNext(&frame_buf, hw, ip_mtu) == null);
+}
+
+// -------------------------------------------------------------------------
+// Reassembler tests
+// -------------------------------------------------------------------------
+
+const test_key = FragKey{
+    .id = 1,
+    .src_addr = .{ 10, 0, 0, 2 },
+    .dst_addr = .{ 10, 0, 0, 1 },
+    .protocol = .udp,
+};
+
+test "reassembler two-part assembly" {
+    // [smoltcp:iface/fragmentation.rs:packet_assembler_assemble]
+    const R = Reassembler(.{ .buffer_size = 64, .max_segments = 4 });
+    var r = R{};
+    try testing.expect(r.isFree());
+
+    r.accept(test_key, time.Instant.fromSecs(60));
+    try testing.expect(!r.isFree());
+
+    r.setTotalSize(12);
+    try testing.expect(r.add("Hello ", 0));
+    try testing.expect(r.assemble() == null);
+
+    try testing.expect(r.add("World!", 6));
+    const result = r.assemble() orelse return error.ExpectedAssembly;
+    try testing.expectEqualSlices(u8, "Hello World!", result);
+    try testing.expect(r.isFree());
+}
+
+test "reassembler out-of-order assembly" {
+    // [smoltcp:iface/fragmentation.rs:packet_assembler_out_of_order_assemble]
+    const R = Reassembler(.{ .buffer_size = 64, .max_segments = 4 });
+    var r = R{};
+
+    r.accept(test_key, time.Instant.fromSecs(60));
+    r.setTotalSize(12);
+
+    try testing.expect(r.add("World!", 6));
+    try testing.expect(r.assemble() == null);
+
+    try testing.expect(r.add("Hello ", 0));
+    const result = r.assemble() orelse return error.ExpectedAssembly;
+    try testing.expectEqualSlices(u8, "Hello World!", result);
+}
+
+test "reassembler overlapping fragments" {
+    // [smoltcp:iface/fragmentation.rs:packet_assembler_overlap]
+    const R = Reassembler(.{ .buffer_size = 64, .max_segments = 4 });
+    var r = R{};
+
+    r.accept(test_key, time.Instant.fromSecs(60));
+    r.setTotalSize(5);
+
+    try testing.expect(r.add("Rust", 0));
+    try testing.expect(r.add("Rust", 1));
+    const result = r.assemble() orelse return error.ExpectedAssembly;
+    try testing.expectEqualSlices(u8, "RRust", result);
+}
+
+test "reassembler expiry" {
+    const R = Reassembler(.{ .buffer_size = 64, .max_segments = 4 });
+    var r = R{};
+
+    r.accept(test_key, time.Instant.fromSecs(60));
+    r.setTotalSize(6);
+    try testing.expect(r.add("abc", 0));
+    try testing.expect(!r.isFree());
+
+    // Not expired at t=30s.
+    r.removeExpired(time.Instant.fromSecs(30));
+    try testing.expect(!r.isFree());
+
+    // Expired at t=61s.
+    r.removeExpired(time.Instant.fromSecs(61));
+    try testing.expect(r.isFree());
+}
+
+test "reassembler eviction on new key" {
+    const R = Reassembler(.{ .buffer_size = 64, .max_segments = 4 });
+    var r = R{};
+
+    r.accept(test_key, time.Instant.fromSecs(60));
+    r.setTotalSize(6);
+    try testing.expect(r.add("abc", 0));
+
+    // New key evicts old.
+    const key2 = FragKey{
+        .id = 2,
+        .src_addr = .{ 10, 0, 0, 3 },
+        .dst_addr = .{ 10, 0, 0, 1 },
+        .protocol = .tcp,
+    };
+    r.accept(key2, time.Instant.fromSecs(120));
+
+    // Old partial assembly is gone; new slot is clean.
+    try testing.expect(r.assemble() == null);
+    try testing.expect(!r.isFree());
+
+    // Complete the new key's payload.
+    r.setTotalSize(4);
+    try testing.expect(r.add("ABCD", 0));
+    const result = r.assemble() orelse return error.ExpectedAssembly;
+    try testing.expectEqualSlices(u8, "ABCD", result);
+}
+
+test "reassembler buffer overflow" {
+    const R = Reassembler(.{ .buffer_size = 8, .max_segments = 4 });
+    var r = R{};
+
+    r.accept(test_key, time.Instant.fromSecs(60));
+    r.setTotalSize(16);
+
+    // First add fits.
+    try testing.expect(r.add("12345678", 0));
+    // Second add exceeds buffer -- rejected.
+    try testing.expect(!r.add("overflow!", 8));
 }

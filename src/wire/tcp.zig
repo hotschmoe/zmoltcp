@@ -791,3 +791,100 @@ test "SYN options MSS + WindowScale + SackPermitted roundtrip" {
     try testing.expect(parsed.timestamp == null);
     try testing.expect(parsed.sack_ranges[0] == null);
 }
+
+// [smoltcp:wire/tcp.rs:test_malformed_tcp_options]
+test "malformed TCP options parsed without error" {
+    // zmoltcp's parseOptions silently returns on malformed input.
+    // Each case builds a TCP header with malformed options. parse() succeeds
+    // but option fields stay at defaults.
+
+    // Helper: build a minimal TCP header with data_offset and option bytes.
+    const base = [HEADER_LEN]u8{
+        0x00, 0x50, 0x1F, 0x90, // ports
+        0x00, 0x00, 0x00, 0x01, // seq
+        0x00, 0x00, 0x00, 0x00, // ack
+        0x00, 0x00, // data_offset + flags (filled per case)
+        0x10, 0x00, // window
+        0x00, 0x00, // checksum
+        0x00, 0x00, // urgent
+    };
+
+    // Case 1: MSS kind=2 truncated (need 4 bytes, only 3 remain after NOP)
+    {
+        var buf: [24]u8 = undefined;
+        @memcpy(buf[0..HEADER_LEN], &base);
+        buf[12] = 0x60; // data_offset=6 (24 bytes)
+        buf[20] = 0x01; // NOP
+        buf[21] = 0x02; // MSS kind
+        buf[22] = 0x04; // MSS length (needs i+4, but only 3 bytes from kind)
+        buf[23] = 0x00;
+        const repr = try parse(&buf);
+        try testing.expect(repr.max_seg_size == null);
+    }
+
+    // Case 2: WindowScale kind=3 truncated (need 3 bytes, only 2 remain)
+    {
+        var buf: [24]u8 = undefined;
+        @memcpy(buf[0..HEADER_LEN], &base);
+        buf[12] = 0x60; // data_offset=6
+        buf[20] = 0x01; // NOP
+        buf[21] = 0x01; // NOP
+        buf[22] = 0x03; // WS kind at position 2, only 1 byte left
+        buf[23] = 0x00;
+        const repr = try parse(&buf);
+        try testing.expect(repr.window_scale == null);
+    }
+
+    // Case 3: Unknown kind with length < 2 (illegal minimum)
+    {
+        var buf: [24]u8 = undefined;
+        @memcpy(buf[0..HEADER_LEN], &base);
+        buf[12] = 0x60;
+        buf[20] = 0x0C; // unknown kind
+        buf[21] = 0x01; // length=1 (illegal, minimum is 2)
+        buf[22] = 0x00;
+        buf[23] = 0x00;
+        const repr = try parse(&buf);
+        try testing.expect(repr.max_seg_size == null);
+        try testing.expect(repr.window_scale == null);
+        try testing.expect(repr.timestamp == null);
+    }
+
+    // Case 4: Unknown kind at end of options (no length byte available)
+    {
+        var buf: [24]u8 = undefined;
+        @memcpy(buf[0..HEADER_LEN], &base);
+        buf[12] = 0x60;
+        buf[20] = 0x01; // NOP
+        buf[21] = 0x01; // NOP
+        buf[22] = 0x01; // NOP
+        buf[23] = 0x0C; // unknown kind at last byte, no length byte
+        const repr = try parse(&buf);
+        try testing.expect(repr.max_seg_size == null);
+    }
+
+    // Case 5: Timestamps kind with wrong length (!=10)
+    {
+        var buf: [28]u8 = undefined;
+        @memcpy(buf[0..HEADER_LEN], &base);
+        buf[12] = 0x70; // data_offset=7 (28 bytes)
+        buf[20] = 0x08; // timestamps kind
+        buf[21] = 0x08; // length=8 (should be 10)
+        @memset(buf[22..28], 0);
+        const repr = try parse(&buf);
+        try testing.expect(repr.timestamp == null);
+    }
+
+    // Case 6: SACK kind with length < 2
+    {
+        var buf: [24]u8 = undefined;
+        @memcpy(buf[0..HEADER_LEN], &base);
+        buf[12] = 0x60;
+        buf[20] = 0x05; // SACK kind
+        buf[21] = 0x01; // length=1 (illegal)
+        buf[22] = 0x00;
+        buf[23] = 0x00;
+        const repr = try parse(&buf);
+        try testing.expect(repr.sack_ranges[0] == null);
+    }
+}

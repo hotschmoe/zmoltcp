@@ -10,7 +10,7 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/ethernet | 5 | 5 | 0 | 5 | PASS |
 | wire/arp | 4 | 5 | 0 | 5 | PASS |
 | wire/ipv4 | 15 | 15 | 0 | 15 | PASS |
-| wire/tcp | 9 | 13 | 0 | 13 | PASS |
+| wire/tcp | 9 | 22 | 0 | 22 | PASS |
 | wire/udp | 8 | 8 | 0 | 8 | PASS |
 | wire/icmp | 5 | 5 | 0 | 5 | PASS |
 | storage/ring_buffer | 15 | 14 | 1 | 14 | PASS |
@@ -23,9 +23,9 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/dns | 7 | 7 | 0 | 7 | PASS |
 | socket/dns | 0 | 12 | 0 | 12 | PASS |
 | socket/icmp | 6 | 7 | 0 | 7 | PASS |
-| iface | 24 | 15 | 7 | 15 | PASS |
-| fragmentation | 0 | 2 | 0 | 2 | PASS |
-| stack | 2 | 25 | 0 | 25 | PASS |
+| iface | 24 | 24 | 7 | 24 | PASS |
+| fragmentation | 0 | 8 | 0 | 8 | PASS |
+| stack | 2 | 35 | 0 | 35 | PASS |
 
 ## Wire Layer Tests
 
@@ -91,6 +91,15 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | (original) | "Control seqLen" | PASS |
 | (original) | "Control from and to Flags" | PASS |
 | (original) | "Control quashPsh" | PASS |
+| (original) | "headerLen no options" | PASS |
+| (original) | "headerLen MSS only" | PASS |
+| (original) | "headerLen SYN with MSS + WindowScale + SackPermitted" | PASS |
+| (original) | "headerLen timestamp" | PASS |
+| (original) | "headerLen SACK range" | PASS |
+| (original) | "timestamp option parse and emit roundtrip" | PASS |
+| (original) | "SACK range parse and emit roundtrip" | PASS |
+| (original) | "SYN options MSS + WindowScale + SackPermitted roundtrip" | PASS |
+| wire/tcp.rs:test_malformed_tcp_options | "malformed TCP options parsed without error" | PASS |
 
 ### wire/udp.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -497,6 +506,19 @@ were never actually run despite being listed here. The test module runs with
 | iface/interface/tests/ipv4.rs:test_icmpv4_socket | "ICMP socket receives echo request and auto-reply" | PASS |
 | (original) | "TCP SYN with no listener produces RST" | PASS |
 
+### iface/neighbor -- NeighborCache unit tests
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| iface/neighbor.rs:test_fill | "neighbor cache fill and lookup" | PASS |
+| iface/neighbor.rs:test_expire | "neighbor cache entry expires" | PASS |
+| iface/neighbor.rs:test_replace | "neighbor cache replace entry" | PASS |
+| iface/neighbor.rs:test_evict | "neighbor cache evicts oldest entry" | PASS |
+| iface/neighbor.rs:test_flush | "neighbor cache flush" | PASS |
+| iface/neighbor.rs:test_hush (adapted) | "neighbor cache lookupFull found" | PASS |
+| iface/neighbor.rs:test_hush (adapted) | "neighbor cache lookupFull not found" | PASS |
+| iface/neighbor.rs:test_hush (adapted) | "neighbor cache lookupFull rate limited" | PASS |
+| (original) | "neighbor cache rate limit expires" | PASS |
+
 ## Stack Layer Tests
 
 ### stack.zig
@@ -527,12 +549,28 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "stack DNS pollAt returns retransmit deadline" | PASS |
 | iface/interface/tests/ipv4.rs:test_packet_len | "stack IPv4 fragmentation never exceeds MTU" | PASS |
 | iface/interface/tests/ipv4.rs:test_ipv4_fragment_size | "stack IPv4 fragment payload is 8-byte aligned" | PASS |
+| (original) | "stack emits ARP request for unknown neighbor on TCP egress" | PASS |
+| (original) | "stack TCP SYN sent after ARP resolution" | PASS |
+| (original) | "stack ARP request rate limited" | PASS |
+| (original) | "stack UDP does not lose packet during ARP resolution" | PASS |
+| (original) | "stack ICMP echo reply uses cached neighbor from ingress" | PASS |
+| (original) | "stack pollAt accounts for neighbor resolution delay" | PASS |
+| (original) | "stack broadcast destination skips ARP resolution" | PASS |
+| (original) | "stack reassembles two-fragment ICMP echo" | PASS |
+| (original) | "stack reassembles out-of-order UDP fragments" | PASS |
+| (original) | "stack non-fragmented packets bypass reassembly" | PASS |
 
 ### fragmentation.zig
 | smoltcp Reference | zmoltcp Test | Status |
 |---|---|---|
 | (original) | "maxIpv4FragmentPayload alignment" | PASS |
 | (original) | "fragmenter stage and emit" | PASS |
+| iface/fragmentation.rs:packet_assembler_assemble | "reassembler two-part assembly" | PASS |
+| iface/fragmentation.rs:packet_assembler_out_of_order_assemble | "reassembler out-of-order assembly" | PASS |
+| iface/fragmentation.rs:packet_assembler_overlap | "reassembler overlapping fragments" | PASS |
+| (original) | "reassembler expiry" | PASS |
+| (original) | "reassembler eviction on new key" | PASS |
+| (original) | "reassembler buffer overflow" | PASS |
 
 ## Not Applicable (N/A) Tests
 

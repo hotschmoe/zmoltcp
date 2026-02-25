@@ -70,6 +70,14 @@ pub const IpCidr = struct {
 };
 
 pub const NeighborCache = struct {
+    pub const SILENT_TIME = time.Duration.fromMillis(1000);
+
+    pub const LookupResult = union(enum) {
+        found: ethernet.Address,
+        not_found,
+        rate_limited,
+    };
+
     const Entry = struct {
         protocol_addr: ipv4.Address = ipv4.UNSPECIFIED,
         hardware_addr: ethernet.Address = .{ 0, 0, 0, 0, 0, 0 },
@@ -77,6 +85,7 @@ pub const NeighborCache = struct {
     };
 
     entries: [NEIGHBOR_CACHE_SIZE]Entry = [_]Entry{.{}} ** NEIGHBOR_CACHE_SIZE,
+    silent_until: time.Instant = time.Instant.ZERO,
 
     fn isOccupied(entry: Entry) bool {
         return !ipv4.isUnspecified(entry.protocol_addr);
@@ -119,6 +128,21 @@ pub const NeighborCache = struct {
         return null;
     }
 
+    pub fn lookupFull(self: *const NeighborCache, ip: ipv4.Address, now: time.Instant) LookupResult {
+        for (self.entries) |entry| {
+            if (std.mem.eql(u8, &entry.protocol_addr, &ip)) {
+                if (entry.expires_at.greaterThanOrEqual(now)) return .{ .found = entry.hardware_addr };
+                break;
+            }
+        }
+        if (now.lessThan(self.silent_until)) return .rate_limited;
+        return .not_found;
+    }
+
+    pub fn limitRate(self: *NeighborCache, now: time.Instant) void {
+        self.silent_until = now.add(SILENT_TIME);
+    }
+
     pub fn hasNeighbor(self: *const NeighborCache, ip: ipv4.Address) bool {
         for (self.entries) |entry| {
             if (std.mem.eql(u8, &entry.protocol_addr, &ip)) return true;
@@ -128,6 +152,7 @@ pub const NeighborCache = struct {
 
     pub fn flush(self: *NeighborCache) void {
         self.entries = [_]Entry{.{}} ** NEIGHBOR_CACHE_SIZE;
+        self.silent_until = time.Instant.ZERO;
     }
 };
 
@@ -922,4 +947,194 @@ test "TCP SYN with no listener produces RST" {
 
     // Socket handled -> no response
     try testing.expectEqual(@as(?Response, null), iface_inst.processTcp(ip_repr, &tcp_buf, true));
+}
+
+// -------------------------------------------------------------------------
+// NeighborCache unit tests
+// -------------------------------------------------------------------------
+
+// [smoltcp:iface/neighbor.rs:test_fill]
+test "neighbor cache fill and lookup" {
+    var cache = NeighborCache{};
+
+    const ip1: ipv4.Address = .{ 10, 0, 0, 1 };
+    const ip2: ipv4.Address = .{ 10, 0, 0, 2 };
+    const mac_a: ethernet.Address = .{ 0, 0, 0, 0, 0, 1 };
+
+    // Not found initially
+    try testing.expectEqual(@as(?ethernet.Address, null), cache.lookup(ip1, time.Instant.ZERO));
+    try testing.expectEqual(@as(?ethernet.Address, null), cache.lookup(ip2, time.Instant.ZERO));
+
+    // Fill ip1 -> mac_a
+    cache.fill(ip1, mac_a, time.Instant.ZERO);
+    try testing.expectEqual(mac_a, cache.lookup(ip1, time.Instant.ZERO).?);
+    try testing.expectEqual(@as(?ethernet.Address, null), cache.lookup(ip2, time.Instant.ZERO));
+
+    // Expired after 2x lifetime
+    const expired = time.Instant.ZERO.add(NEIGHBOR_LIFETIME).add(NEIGHBOR_LIFETIME);
+    try testing.expectEqual(@as(?ethernet.Address, null), cache.lookup(ip1, expired));
+
+    // Re-fill, ip2 still not found
+    cache.fill(ip1, mac_a, time.Instant.ZERO);
+    try testing.expectEqual(@as(?ethernet.Address, null), cache.lookup(ip2, time.Instant.ZERO));
+}
+
+// [smoltcp:iface/neighbor.rs:test_expire]
+test "neighbor cache entry expires" {
+    var cache = NeighborCache{};
+
+    const ip1: ipv4.Address = .{ 10, 0, 0, 1 };
+    const mac_a: ethernet.Address = .{ 0, 0, 0, 0, 0, 1 };
+
+    cache.fill(ip1, mac_a, time.Instant.ZERO);
+    try testing.expectEqual(mac_a, cache.lookup(ip1, time.Instant.ZERO).?);
+
+    const expired = time.Instant.ZERO.add(NEIGHBOR_LIFETIME).add(NEIGHBOR_LIFETIME);
+    try testing.expectEqual(@as(?ethernet.Address, null), cache.lookup(ip1, expired));
+}
+
+// [smoltcp:iface/neighbor.rs:test_replace]
+test "neighbor cache replace entry" {
+    var cache = NeighborCache{};
+
+    const ip1: ipv4.Address = .{ 10, 0, 0, 1 };
+    const mac_a: ethernet.Address = .{ 0, 0, 0, 0, 0, 1 };
+    const mac_b: ethernet.Address = .{ 0, 0, 0, 0, 0, 2 };
+
+    cache.fill(ip1, mac_a, time.Instant.ZERO);
+    try testing.expectEqual(mac_a, cache.lookup(ip1, time.Instant.ZERO).?);
+
+    cache.fill(ip1, mac_b, time.Instant.ZERO);
+    try testing.expectEqual(mac_b, cache.lookup(ip1, time.Instant.ZERO).?);
+}
+
+// [smoltcp:iface/neighbor.rs:test_evict]
+test "neighbor cache evicts oldest entry" {
+    var cache = NeighborCache{};
+
+    const macs = [NEIGHBOR_CACHE_SIZE + 1]ethernet.Address{
+        .{ 0, 0, 0, 0, 0, 1 },
+        .{ 0, 0, 0, 0, 0, 2 },
+        .{ 0, 0, 0, 0, 0, 3 },
+        .{ 0, 0, 0, 0, 0, 4 },
+        .{ 0, 0, 0, 0, 0, 5 },
+        .{ 0, 0, 0, 0, 0, 6 },
+        .{ 0, 0, 0, 0, 0, 7 },
+        .{ 0, 0, 0, 0, 0, 8 },
+        .{ 0, 0, 0, 0, 0, 9 },
+    };
+
+    // Fill all 8 slots. Slot 1 (index 1) gets the earliest timestamp.
+    var i: usize = 0;
+    while (i < NEIGHBOR_CACHE_SIZE) : (i += 1) {
+        const ip: ipv4.Address = .{ 10, 0, 0, @intCast(i + 1) };
+        const ts = if (i == 1)
+            time.Instant.fromMillis(50)
+        else
+            time.Instant.fromMillis(@intCast((i + 1) * 100));
+        cache.fill(ip, macs[i], ts);
+    }
+
+    // All 8 should be present (at any time before expiry)
+    const lookup_time = time.Instant.fromMillis(1000);
+    const ip2: ipv4.Address = .{ 10, 0, 0, 2 };
+    try testing.expectEqual(macs[1], cache.lookup(ip2, lookup_time).?);
+
+    // ip9 not present yet
+    const ip9: ipv4.Address = .{ 10, 0, 0, 9 };
+    try testing.expectEqual(@as(?ethernet.Address, null), cache.lookup(ip9, lookup_time));
+
+    // Fill a 9th entry -- evicts the one with earliest expires_at (slot 1, t=50)
+    cache.fill(ip9, macs[8], time.Instant.fromMillis(300));
+
+    // ip2 was evicted
+    try testing.expectEqual(@as(?ethernet.Address, null), cache.lookup(ip2, lookup_time));
+    // ip9 is now present
+    try testing.expectEqual(macs[8], cache.lookup(ip9, lookup_time).?);
+}
+
+// [smoltcp:iface/neighbor.rs:test_flush]
+test "neighbor cache flush" {
+    var cache = NeighborCache{};
+
+    const ip1: ipv4.Address = .{ 10, 0, 0, 1 };
+    const mac_a: ethernet.Address = .{ 0, 0, 0, 0, 0, 1 };
+
+    cache.fill(ip1, mac_a, time.Instant.ZERO);
+    try testing.expectEqual(mac_a, cache.lookup(ip1, time.Instant.ZERO).?);
+
+    cache.flush();
+    try testing.expectEqual(@as(?ethernet.Address, null), cache.lookup(ip1, time.Instant.ZERO));
+}
+
+// [smoltcp:iface/neighbor.rs:test_hush -- lookupFull tri-state]
+test "neighbor cache lookupFull found/not_found/rate_limited" {
+    var cache = NeighborCache{};
+
+    const ip1: ipv4.Address = .{ 10, 0, 0, 1 };
+    const mac_a: ethernet.Address = .{ 0, 0, 0, 0, 0, 1 };
+
+    // Not found initially
+    try testing.expectEqual(NeighborCache.LookupResult.not_found, cache.lookupFull(ip1, time.Instant.ZERO));
+
+    // Rate-limited after limitRate
+    cache.limitRate(time.Instant.ZERO);
+    try testing.expectEqual(NeighborCache.LookupResult.rate_limited, cache.lookupFull(ip1, time.Instant.fromMillis(100)));
+
+    // Rate limit expires after SILENT_TIME
+    try testing.expectEqual(NeighborCache.LookupResult.not_found, cache.lookupFull(ip1, time.Instant.fromMillis(2000)));
+
+    // Found after fill
+    cache.fill(ip1, mac_a, time.Instant.ZERO);
+    switch (cache.lookupFull(ip1, time.Instant.ZERO)) {
+        .found => |mac| try testing.expectEqual(mac_a, mac),
+        else => return error.ExpectedFound,
+    }
+}
+
+test "neighbor cache rate limit expires" {
+    var cache = NeighborCache{};
+
+    const ip1: ipv4.Address = .{ 10, 0, 0, 1 };
+
+    cache.limitRate(time.Instant.fromMillis(500));
+
+    // Within silent period: rate_limited
+    try testing.expectEqual(NeighborCache.LookupResult.rate_limited, cache.lookupFull(ip1, time.Instant.fromMillis(600)));
+    try testing.expectEqual(NeighborCache.LookupResult.rate_limited, cache.lookupFull(ip1, time.Instant.fromMillis(1499)));
+
+    // At exactly silent_until boundary: not rate_limited (greaterThan, not greaterThanOrEqual)
+    try testing.expectEqual(NeighborCache.LookupResult.not_found, cache.lookupFull(ip1, time.Instant.fromMillis(1500)));
+
+    // Well past: not_found
+    try testing.expectEqual(NeighborCache.LookupResult.not_found, cache.lookupFull(ip1, time.Instant.fromMillis(5000)));
+}
+
+test "neighbor cache flush clears rate limit" {
+    var cache = NeighborCache{};
+
+    const ip1: ipv4.Address = .{ 10, 0, 0, 1 };
+
+    cache.limitRate(time.Instant.ZERO);
+    try testing.expectEqual(NeighborCache.LookupResult.rate_limited, cache.lookupFull(ip1, time.Instant.fromMillis(100)));
+
+    cache.flush();
+    try testing.expectEqual(NeighborCache.LookupResult.not_found, cache.lookupFull(ip1, time.Instant.fromMillis(100)));
+}
+
+test "neighbor cache lookupFull prefers found over rate_limited" {
+    var cache = NeighborCache{};
+
+    const ip1: ipv4.Address = .{ 10, 0, 0, 1 };
+    const mac_a: ethernet.Address = .{ 0, 0, 0, 0, 0, 1 };
+
+    // Fill + rate limit simultaneously
+    cache.fill(ip1, mac_a, time.Instant.ZERO);
+    cache.limitRate(time.Instant.ZERO);
+
+    // Found takes precedence over rate_limited
+    switch (cache.lookupFull(ip1, time.Instant.fromMillis(100))) {
+        .found => |mac| try testing.expectEqual(mac_a, mac),
+        else => return error.ExpectedFound,
+    }
 }

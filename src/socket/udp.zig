@@ -217,6 +217,12 @@ pub fn Socket(comptime config: Config) type {
             };
         }
 
+        pub fn peekDstAddr(self: *const Self) ?ipv4.Address {
+            const slice = self.tx.getAllocated(0, 1);
+            if (slice.len == 0) return null;
+            return slice[0].meta.endpoint.addr;
+        }
+
         pub fn dispatch(self: *Self) ?DispatchResult {
             const pkt = self.tx.dequeueOne() catch return null;
             const src_addr = pkt.meta.local_addr orelse
