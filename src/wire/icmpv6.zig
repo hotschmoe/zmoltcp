@@ -7,6 +7,11 @@ const ndisc = @import("ndisc.zig");
 const mld = @import("mld.zig");
 const checksum = @import("checksum.zig");
 
+const readU16 = checksum.readU16;
+const readU32 = checksum.readU32;
+const writeU16 = checksum.writeU16;
+const writeU32 = checksum.writeU32;
+
 pub const HEADER_LEN: usize = 4;
 pub const MAX_ERROR_PACKET_LEN: usize = ipv6.MIN_MTU - ipv6.HEADER_LEN;
 
@@ -173,19 +178,10 @@ pub fn parse(
             } };
         },
         .router_solicit, .router_advert, .neighbor_solicit, .neighbor_advert, .redirect => {
-            const nd = ndisc.parse(@intFromEnum(msg_type), body) catch |err| switch (err) {
-                error.Truncated => return error.Truncated,
-                error.BadLength => return error.BadLength,
-                error.Unrecognized => return error.Unrecognized,
-            };
-            return .{ .ndisc = nd };
+            return .{ .ndisc = try ndisc.parse(@intFromEnum(msg_type), body) };
         },
         .mld_query, .mld_report => {
-            const m = mld.parse(@intFromEnum(msg_type), body) catch |err| switch (err) {
-                error.Truncated => return error.Truncated,
-                error.Unrecognized => return error.Unrecognized,
-            };
-            return .{ .mld = m };
+            return .{ .mld = try mld.parse(@intFromEnum(msg_type), body) };
         },
         _ => return error.Unrecognized,
     }
@@ -246,10 +242,6 @@ pub fn emit(
         },
     }
 
-    // Zero checksum before computing
-    buf[2] = 0;
-    buf[3] = 0;
-
     // Body (after the 4-byte ICMPv6 header)
     const body = buf[HEADER_LEN..len];
     switch (repr) {
@@ -264,28 +256,20 @@ pub fn emit(
             @memcpy(body[4 .. 4 + e.data.len], e.data);
         },
         .dst_unreachable => |d| {
-            @memset(body[0..4], 0); // unused
-            _ = ipv6.emit(d.header, body[4..]) catch return error.BufferTooSmall;
-            const data_len = @min(d.data.len, len - HEADER_LEN - 4 - ipv6.HEADER_LEN);
-            @memcpy(body[4 + ipv6.HEADER_LEN .. 4 + ipv6.HEADER_LEN + data_len], d.data[0..data_len]);
+            @memset(body[0..4], 0);
+            try emitErrorBody(body, d.header, d.data, len);
         },
         .pkt_too_big => |p| {
             writeU32(body[0..4], p.mtu);
-            _ = ipv6.emit(p.header, body[4..]) catch return error.BufferTooSmall;
-            const data_len = @min(p.data.len, len - HEADER_LEN - 4 - ipv6.HEADER_LEN);
-            @memcpy(body[4 + ipv6.HEADER_LEN .. 4 + ipv6.HEADER_LEN + data_len], p.data[0..data_len]);
+            try emitErrorBody(body, p.header, p.data, len);
         },
         .time_exceeded => |t| {
-            @memset(body[0..4], 0); // unused
-            _ = ipv6.emit(t.header, body[4..]) catch return error.BufferTooSmall;
-            const data_len = @min(t.data.len, len - HEADER_LEN - 4 - ipv6.HEADER_LEN);
-            @memcpy(body[4 + ipv6.HEADER_LEN .. 4 + ipv6.HEADER_LEN + data_len], t.data[0..data_len]);
+            @memset(body[0..4], 0);
+            try emitErrorBody(body, t.header, t.data, len);
         },
         .param_problem => |pp| {
             writeU32(body[0..4], pp.pointer);
-            _ = ipv6.emit(pp.header, body[4..]) catch return error.BufferTooSmall;
-            const data_len = @min(pp.data.len, len - HEADER_LEN - 4 - ipv6.HEADER_LEN);
-            @memcpy(body[4 + ipv6.HEADER_LEN .. 4 + ipv6.HEADER_LEN + data_len], pp.data[0..data_len]);
+            try emitErrorBody(body, pp.header, pp.data, len);
         },
         .ndisc => |n| {
             _ = ndisc.emit(n, body) catch return error.BufferTooSmall;
@@ -310,6 +294,12 @@ pub fn verifyChecksum(data: []const u8, src_addr: ipv6.Address, dst_addr: ipv6.A
     return checksum.finish(checksum.calculate(data, pseudo)) == 0;
 }
 
+fn emitErrorBody(body: []u8, header: ipv6.Repr, data: []const u8, total_len: usize) error{BufferTooSmall}!void {
+    _ = ipv6.emit(header, body[4..]) catch return error.BufferTooSmall;
+    const data_len = @min(data.len, total_len - HEADER_LEN - 4 - ipv6.HEADER_LEN);
+    @memcpy(body[4 + ipv6.HEADER_LEN .. 4 + ipv6.HEADER_LEN + data_len], data[0..data_len]);
+}
+
 fn fillChecksum(data: []u8, src_addr: ipv6.Address, dst_addr: ipv6.Address) void {
     data[2] = 0;
     data[3] = 0;
@@ -322,27 +312,6 @@ fn fillChecksum(data: []u8, src_addr: ipv6.Address, dst_addr: ipv6.Address) void
     const cksum = checksum.finish(checksum.calculate(data, pseudo));
     data[2] = @truncate(cksum >> 8);
     data[3] = @truncate(cksum);
-}
-
-fn readU16(data: *const [2]u8) u16 {
-    return @as(u16, data[0]) << 8 | @as(u16, data[1]);
-}
-
-fn readU32(data: *const [4]u8) u32 {
-    return @as(u32, data[0]) << 24 | @as(u32, data[1]) << 16 |
-        @as(u32, data[2]) << 8 | @as(u32, data[3]);
-}
-
-fn writeU16(buf: *[2]u8, val: u16) void {
-    buf[0] = @truncate(val >> 8);
-    buf[1] = @truncate(val);
-}
-
-fn writeU32(buf: *[4]u8, val: u32) void {
-    buf[0] = @truncate(val >> 24);
-    buf[1] = @truncate(val >> 16);
-    buf[2] = @truncate(val >> 8);
-    buf[3] = @truncate(val);
 }
 
 // -------------------------------------------------------------------------

@@ -7,6 +7,10 @@
 
 const ipv6 = @import("ipv6.zig");
 const ethernet = @import("ethernet.zig");
+const checksum = @import("checksum.zig");
+
+const readU32 = checksum.readU32;
+const writeU32 = checksum.writeU32;
 
 pub const Type = enum(u8) {
     source_link_layer_addr = 1,
@@ -70,13 +74,13 @@ pub fn parse(data: []const u8) error{ Truncated, BadLength }!Repr {
     if (data.len < total) return error.Truncated;
 
     switch (opt_type) {
-        .source_link_layer_addr => {
+        .source_link_layer_addr, .target_link_layer_addr => {
             if (total < 2 + ethernet.ADDR_LEN) return error.Truncated;
-            return .{ .source_link_layer_addr = data[2..8].* };
-        },
-        .target_link_layer_addr => {
-            if (total < 2 + ethernet.ADDR_LEN) return error.Truncated;
-            return .{ .target_link_layer_addr = data[2..8].* };
+            const addr = data[2..8].*;
+            if (opt_type == .source_link_layer_addr)
+                return .{ .source_link_layer_addr = addr }
+            else
+                return .{ .target_link_layer_addr = addr };
         },
         .prefix_information => {
             if (length != 4) return error.BadLength;
@@ -111,13 +115,12 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
     if (buf.len < len) return error.BufferTooSmall;
 
     switch (repr) {
-        .source_link_layer_addr => |addr| {
-            buf[0] = @intFromEnum(Type.source_link_layer_addr);
-            buf[1] = 1;
-            @memcpy(buf[2..8], &addr);
-        },
-        .target_link_layer_addr => |addr| {
-            buf[0] = @intFromEnum(Type.target_link_layer_addr);
+        .source_link_layer_addr, .target_link_layer_addr => |addr| {
+            buf[0] = switch (repr) {
+                .source_link_layer_addr => @intFromEnum(Type.source_link_layer_addr),
+                .target_link_layer_addr => @intFromEnum(Type.target_link_layer_addr),
+                else => unreachable,
+            };
             buf[1] = 1;
             @memcpy(buf[2..8], &addr);
         },
@@ -148,18 +151,6 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
         },
     }
     return len;
-}
-
-fn readU32(data: *const [4]u8) u32 {
-    return @as(u32, data[0]) << 24 | @as(u32, data[1]) << 16 |
-        @as(u32, data[2]) << 8 | @as(u32, data[3]);
-}
-
-fn writeU32(buf: *[4]u8, val: u32) void {
-    buf[0] = @truncate(val >> 24);
-    buf[1] = @truncate(val >> 16);
-    buf[2] = @truncate(val >> 8);
-    buf[3] = @truncate(val);
 }
 
 // -------------------------------------------------------------------------

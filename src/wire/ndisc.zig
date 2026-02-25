@@ -8,6 +8,12 @@
 const ipv6 = @import("ipv6.zig");
 const ethernet = @import("ethernet.zig");
 const ndiscoption = @import("ndiscoption.zig");
+const checksum = @import("checksum.zig");
+
+const readU16 = checksum.readU16;
+const readU32 = checksum.readU32;
+const writeU16 = checksum.writeU16;
+const writeU32 = checksum.writeU32;
 
 pub const ROUTER_SOLICIT: u8 = 0x85;
 pub const ROUTER_ADVERT: u8 = 0x86;
@@ -251,27 +257,6 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
         },
     }
     return len;
-}
-
-fn readU16(data: *const [2]u8) u16 {
-    return @as(u16, data[0]) << 8 | @as(u16, data[1]);
-}
-
-fn readU32(data: *const [4]u8) u32 {
-    return @as(u32, data[0]) << 24 | @as(u32, data[1]) << 16 |
-        @as(u32, data[2]) << 8 | @as(u32, data[3]);
-}
-
-fn writeU16(buf: *[2]u8, val: u16) void {
-    buf[0] = @truncate(val >> 8);
-    buf[1] = @truncate(val);
-}
-
-fn writeU32(buf: *[4]u8, val: u32) void {
-    buf[0] = @truncate(val >> 24);
-    buf[1] = @truncate(val >> 16);
-    buf[2] = @truncate(val >> 8);
-    buf[3] = @truncate(val);
 }
 
 // -------------------------------------------------------------------------

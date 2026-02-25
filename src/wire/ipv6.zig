@@ -28,10 +28,7 @@ pub const Protocol = enum(u8) {
 };
 
 pub fn isUnspecified(addr: Address) bool {
-    for (addr) |b| {
-        if (b != 0) return false;
-    }
-    return true;
+    return eql(addr, UNSPECIFIED);
 }
 
 pub fn isBroadcast(_: Address) bool {
@@ -58,14 +55,14 @@ pub fn isGlobalUnicast(addr: Address) bool {
     return (addr[0] >> 5) == 0b001;
 }
 
+// ff02::1:ffXX:XXXX -- last 3 bytes vary per solicited address
+const SOLICITED_NODE_PREFIX = [13]u8{ 0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0xFF };
+
 pub fn isSolicitedNodeMulticast(addr: Address) bool {
-    return addr[0] == 0xFF and addr[1] == 0x02 and
-        addr[2] == 0 and addr[3] == 0 and
-        addr[4] == 0 and addr[5] == 0 and
-        addr[6] == 0 and addr[7] == 0 and
-        addr[8] == 0 and addr[9] == 0 and
-        addr[10] == 0 and addr[11] == 0x01 and
-        addr[12] == 0xFF;
+    for (addr[0..13], SOLICITED_NODE_PREFIX) |a, b| {
+        if (a != b) return false;
+    }
+    return true;
 }
 
 pub fn solicitedNode(addr: Address) Address {

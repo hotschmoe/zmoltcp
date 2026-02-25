@@ -8,6 +8,13 @@
 //   Bytes 2-3: fragment_offset(13 bits) | reserved(2 bits) | more_frags(1 bit)
 //   Bytes 4-7: identification (u32 big-endian)
 
+const checksum = @import("checksum.zig");
+
+const readU16 = checksum.readU16;
+const readU32 = checksum.readU32;
+const writeU16 = checksum.writeU16;
+const writeU32 = checksum.writeU32;
+
 pub const HEADER_LEN: usize = 8;
 
 pub const Repr = struct {
@@ -20,14 +27,13 @@ pub const Repr = struct {
 pub fn parse(data: []const u8) error{Truncated}!Repr {
     if (data.len < HEADER_LEN) return error.Truncated;
 
-    const offset_flags: u16 = @as(u16, data[2]) << 8 | @as(u16, data[3]);
+    const offset_flags = readU16(data[2..4]);
 
     return .{
         .next_header = data[0],
         .frag_offset = offset_flags >> 3,
         .more_frags = (offset_flags & 0x01) != 0,
-        .ident = @as(u32, data[4]) << 24 | @as(u32, data[5]) << 16 |
-            @as(u32, data[6]) << 8 | @as(u32, data[7]),
+        .ident = readU32(data[4..8]),
     };
 }
 
@@ -39,13 +45,8 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
 
     var offset_flags: u16 = (repr.frag_offset & 0x1FFF) << 3;
     if (repr.more_frags) offset_flags |= 0x01;
-    buf[2] = @truncate(offset_flags >> 8);
-    buf[3] = @truncate(offset_flags);
-
-    buf[4] = @truncate(repr.ident >> 24);
-    buf[5] = @truncate(repr.ident >> 16);
-    buf[6] = @truncate(repr.ident >> 8);
-    buf[7] = @truncate(repr.ident);
+    writeU16(buf[2..4], offset_flags);
+    writeU32(buf[4..8], repr.ident);
 
     return HEADER_LEN;
 }

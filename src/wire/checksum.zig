@@ -1,7 +1,7 @@
-// Internet checksum (RFC 1071)
+// Internet checksum (RFC 1071) and big-endian byte-order helpers.
 //
-// Used by IPv4, TCP, UDP, and ICMP. Computes the one's complement sum
-// of 16-bit words, then takes the one's complement of the result.
+// Checksum: one's complement sum of 16-bit words, complemented.
+// Byte-order: shared read/write for big-endian wire formats.
 
 /// Compute the internet checksum over a byte slice.
 /// Returns the checksum in host byte order.
@@ -58,6 +58,31 @@ pub fn pseudoHeaderChecksumV6(
     pseudo[38] = 0;
     pseudo[39] = next_header;
     return calculate(&pseudo, 0);
+}
+
+// -------------------------------------------------------------------------
+// Big-endian byte-order helpers
+// -------------------------------------------------------------------------
+
+pub fn readU16(data: *const [2]u8) u16 {
+    return @as(u16, data[0]) << 8 | @as(u16, data[1]);
+}
+
+pub fn readU32(data: *const [4]u8) u32 {
+    return @as(u32, data[0]) << 24 | @as(u32, data[1]) << 16 |
+        @as(u32, data[2]) << 8 | @as(u32, data[3]);
+}
+
+pub fn writeU16(buf: *[2]u8, val: u16) void {
+    buf[0] = @truncate(val >> 8);
+    buf[1] = @truncate(val);
+}
+
+pub fn writeU32(buf: *[4]u8, val: u32) void {
+    buf[0] = @truncate(val >> 24);
+    buf[1] = @truncate(val >> 16);
+    buf[2] = @truncate(val >> 8);
+    buf[3] = @truncate(val);
 }
 
 // -------------------------------------------------------------------------

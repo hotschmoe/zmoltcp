@@ -6,6 +6,10 @@
 // starts at byte 4 of the ICMPv6 message (after type+code+checksum).
 
 const ipv6 = @import("ipv6.zig");
+const checksum = @import("checksum.zig");
+
+const readU16 = checksum.readU16;
+const writeU16 = checksum.writeU16;
 
 pub const RecordType = enum(u8) {
     mode_is_include = 1,
@@ -115,15 +119,6 @@ pub fn emitAddressRecord(record: AddressRecordRepr, buf: []u8) error{BufferTooSm
     writeU16(buf[2..4], record.num_srcs);
     @memcpy(buf[4..20], &record.mcast_addr);
     return 20;
-}
-
-fn readU16(data: *const [2]u8) u16 {
-    return @as(u16, data[0]) << 8 | @as(u16, data[1]);
-}
-
-fn writeU16(buf: *[2]u8, val: u16) void {
-    buf[0] = @truncate(val >> 8);
-    buf[1] = @truncate(val);
 }
 
 // -------------------------------------------------------------------------
