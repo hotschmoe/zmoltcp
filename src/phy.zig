@@ -12,6 +12,15 @@ const iface_mod = @import("iface.zig");
 
 const MAX_FRAME_LEN = 1514;
 
+fn delegateCapabilities(comptime Device: type) iface_mod.DeviceCapabilities {
+    if (@hasDecl(Device, "capabilities")) return Device.capabilities();
+    return .{};
+}
+
+fn hitPercent(r: u32, comptime shift: u5, threshold: u8) bool {
+    return @as(u8, @truncate(r >> shift)) % 100 < threshold;
+}
+
 /// Wraps a Device and calls `trace_fn` with every frame that passes
 /// through receive() or transmit(). The callback receives the raw
 /// Ethernet frame bytes.
@@ -40,8 +49,7 @@ pub fn Tracer(comptime Device: type) type {
         }
 
         pub fn capabilities() iface_mod.DeviceCapabilities {
-            if (@hasDecl(Device, "capabilities")) return Device.capabilities();
-            return .{};
+            return delegateCapabilities(Device);
         }
     };
 }
@@ -72,27 +80,23 @@ pub fn FaultInjector(comptime Device: type) type {
         pub fn receive(self: *Self) ?[]const u8 {
             const frame = self.inner.receive() orelse return null;
             const r = self.rng_fn();
-            if (@as(u8, @truncate(r)) % 100 < self.config.rx_drop_pct) return null;
-            if (@as(u8, @truncate(r >> 8)) % 100 < self.config.rx_corrupt_pct) {
-                return self.corrupt(frame, r);
-            }
+            if (hitPercent(r, 0, self.config.rx_drop_pct)) return null;
+            if (hitPercent(r, 8, self.config.rx_corrupt_pct)) return self.corrupt(frame, r);
             return frame;
         }
 
         pub fn transmit(self: *Self, frame: []const u8) void {
             const r = self.rng_fn();
-            if (@as(u8, @truncate(r)) % 100 < self.config.tx_drop_pct) return;
-            if (@as(u8, @truncate(r >> 8)) % 100 < self.config.tx_corrupt_pct) {
-                const corrupted = self.corrupt(frame, r);
-                self.inner.transmit(corrupted);
+            if (hitPercent(r, 0, self.config.tx_drop_pct)) return;
+            if (hitPercent(r, 8, self.config.tx_corrupt_pct)) {
+                self.inner.transmit(self.corrupt(frame, r));
                 return;
             }
             self.inner.transmit(frame);
         }
 
         pub fn capabilities() iface_mod.DeviceCapabilities {
-            if (@hasDecl(Device, "capabilities")) return Device.capabilities();
-            return .{};
+            return delegateCapabilities(Device);
         }
 
         fn corrupt(self: *Self, frame: []const u8, r: u32) []const u8 {

@@ -275,7 +275,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     }
                 },
                 .igmp => {
-                    self.processIgmp(ip_repr, ip_payload, device);
+                    self.processIgmp(ip_payload, device);
                 },
                 .tcp => {
                     const result = self.routeToTcpSockets(timestamp, ip_repr, ip_payload);
@@ -381,26 +381,19 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             return true;
         }
 
-        fn processIgmp(self: *Self, ip_repr: ipv4.Repr, ip_payload: []const u8, device: *Device) void {
+        fn processIgmp(self: *Self, ip_payload: []const u8, device: *Device) void {
             const repr = igmp_wire.parse(ip_payload) catch return;
             switch (repr) {
                 .membership_query => |q| {
-                    // Respond to general or group-specific queries with reports
-                    // for all joined groups (general) or the specific group.
                     if (ipv4.isUnspecified(q.group_addr)) {
-                        // General query: report for each joined group.
                         for (self.iface.multicast_groups) |slot| {
                             if (slot) |group| {
                                 self.emitIgmpReport(group, device);
                             }
                         }
-                    } else {
-                        // Group-specific query.
-                        if (self.iface.hasMulticastGroup(q.group_addr)) {
-                            self.emitIgmpReport(q.group_addr, device);
-                        }
+                    } else if (self.iface.hasMulticastGroup(q.group_addr)) {
+                        self.emitIgmpReport(q.group_addr, device);
                     }
-                    _ = ip_repr;
                 },
                 .membership_report, .leave_group => {},
             }
@@ -437,7 +430,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
 
         fn processEgress(self: *Self, timestamp: Instant, device: *Device) bool {
             var dispatched = false;
-            var burst_budget: usize = if (device_caps.max_burst_size) |b| b else std.math.maxInt(usize);
+            var burst_budget: usize = device_caps.max_burst_size orelse std.math.maxInt(usize);
 
             if (comptime has_tcp) {
                 for (self.sockets.tcp_sockets) |sock| {
@@ -2738,14 +2731,13 @@ test "stack multicast destination accepted for joined group" {
 
 // -- Device Capabilities Tests --
 
-test "TCP checksum offload skips computation" {
-    // Device where hardware computes TX checksums (software only verifies RX).
-    const OffloadDevice = struct {
+fn TestDeviceWithCaps(comptime caps: iface_mod.DeviceCapabilities) type {
+    return struct {
         const Self = @This();
         inner: TestDevice = TestDevice.init(),
 
         pub fn capabilities() iface_mod.DeviceCapabilities {
-            return .{ .checksum = .{ .tcp = .rx_only } };
+            return caps;
         }
 
         pub fn receive(self: *Self) ?[]const u8 {
@@ -2756,7 +2748,10 @@ test "TCP checksum offload skips computation" {
             self.inner.transmit(frame);
         }
     };
+}
 
+test "TCP checksum offload skips computation" {
+    const OffloadDevice = TestDeviceWithCaps(.{ .checksum = .{ .tcp = .rx_only } });
     const TcpSock = tcp_socket.Socket(4);
     const Sockets = struct { tcp_sockets: []*TcpSock };
     const OffloadStack = Stack(OffloadDevice, Sockets);
@@ -2785,31 +2780,14 @@ test "TCP checksum offload skips computation" {
     const ip_repr = try ipv4.parse(ip_data);
     try testing.expectEqual(ipv4.Protocol.tcp, ip_repr.protocol);
 
-    // With rx_only mode, shouldComputeTx() returns false (hardware
-    // computes TX checksum). Checksum field should be left zeroed.
+    // Checksum field should be left zeroed (hardware computes TX checksum).
     const tcp_data = try ipv4.payloadSlice(ip_data);
     const tcp_cksum = @as(u16, tcp_data[16]) << 8 | @as(u16, tcp_data[17]);
     try testing.expectEqual(@as(u16, 0), tcp_cksum);
 }
 
 test "burst size limits frames per poll cycle" {
-    // Device with burst size of 1.
-    const BurstDevice = struct {
-        const Self = @This();
-        inner: TestDevice = TestDevice.init(),
-
-        pub fn capabilities() iface_mod.DeviceCapabilities {
-            return .{ .max_burst_size = 1 };
-        }
-
-        pub fn receive(self: *Self) ?[]const u8 {
-            return self.inner.receive();
-        }
-
-        pub fn transmit(self: *Self, frame: []const u8) void {
-            self.inner.transmit(frame);
-        }
-    };
+    const BurstDevice = TestDeviceWithCaps(.{ .max_burst_size = 1 });
 
     const UdpSock = udp_socket_mod.Socket(.{ .payload_size = 64 });
     const Sockets = struct { udp_sockets: []*UdpSock };

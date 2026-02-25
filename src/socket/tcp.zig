@@ -523,8 +523,9 @@ pub const Cubic = struct {
         const w_cubic = C_CONST * s * s * s + @as(f64, @floatFromInt(self.w_max));
 
         self.last_update = now;
-        const w_int: usize = if (w_cubic < 0) 0 else if (w_cubic > @as(f64, @floatFromInt(std.math.maxInt(usize)))) std.math.maxInt(usize) else @intFromFloat(w_cubic);
-        self.cwnd = @min(@max(w_int, self.min_cwnd), self.rwnd);
+        const max_f = @as(f64, @floatFromInt(std.math.maxInt(usize)));
+        const clamped = @max(@as(f64, 0), @min(w_cubic, max_f));
+        self.cwnd = @min(@max(@as(usize, @intFromFloat(clamped)), self.min_cwnd), self.rwnd);
     }
 
     pub fn postTransmit(_: *Cubic, _: Instant, _: usize) void {}
@@ -545,65 +546,49 @@ pub const CongestionController = union(enum) {
 
     pub fn window(self: CongestionController) usize {
         return switch (self) {
-            .none => |c| c.window(),
-            .reno => |c| c.window(),
-            .cubic => |c| c.window(),
+            inline else => |c| c.window(),
         };
     }
 
     pub fn onAck(self: *CongestionController, now: Instant, len: usize, rtte: *const RttEstimator) void {
         switch (self.*) {
-            .none => |*c| c.onAck(now, len, rtte),
-            .reno => |*c| c.onAck(now, len, rtte),
-            .cubic => |*c| c.onAck(now, len, rtte),
+            inline else => |*c| c.onAck(now, len, rtte),
         }
     }
 
     pub fn onRetransmit(self: *CongestionController, now: Instant) void {
         switch (self.*) {
-            .none => |*c| c.onRetransmit(now),
-            .reno => |*c| c.onRetransmit(now),
-            .cubic => |*c| c.onRetransmit(now),
+            inline else => |*c| c.onRetransmit(now),
         }
     }
 
     pub fn onDuplicateAck(self: *CongestionController, now: Instant) void {
         switch (self.*) {
-            .none => |*c| c.onDuplicateAck(now),
-            .reno => |*c| c.onDuplicateAck(now),
-            .cubic => |*c| c.onDuplicateAck(now),
+            inline else => |*c| c.onDuplicateAck(now),
         }
     }
 
     pub fn preTransmit(self: *CongestionController, now: Instant) void {
         switch (self.*) {
-            .none => |*c| c.preTransmit(now),
-            .reno => |*c| c.preTransmit(now),
-            .cubic => |*c| c.preTransmit(now),
+            inline else => |*c| c.preTransmit(now),
         }
     }
 
     pub fn postTransmit(self: *CongestionController, now: Instant, len: usize) void {
         switch (self.*) {
-            .none => |*c| c.postTransmit(now, len),
-            .reno => |*c| c.postTransmit(now, len),
-            .cubic => |*c| c.postTransmit(now, len),
+            inline else => |*c| c.postTransmit(now, len),
         }
     }
 
     pub fn setMss(self: *CongestionController, mss: usize) void {
         switch (self.*) {
-            .none => |*c| c.setMss(mss),
-            .reno => |*c| c.setMss(mss),
-            .cubic => |*c| c.setMss(mss),
+            inline else => |*c| c.setMss(mss),
         }
     }
 
     pub fn setRemoteWindow(self: *CongestionController, remote_window: usize) void {
         switch (self.*) {
-            .none => |*c| c.setRemoteWindow(remote_window),
-            .reno => |*c| c.setRemoteWindow(remote_window),
-            .cubic => |*c| c.setRemoteWindow(remote_window),
+            inline else => |*c| c.setRemoteWindow(remote_window),
         }
     }
 };
@@ -931,36 +916,28 @@ pub fn Socket(comptime max_asm_segs: usize) type {
 
             const old_length = self.tx_buffer.len();
             const size = self.tx_buffer.enqueueSlice(data);
-            if (size > 0) {
-                if (old_length == 0) {
-                    self.remote_last_ts = null;
-                }
-                if (self.remote_win_len == 0 and self.timer.isIdle()) {
-                    const delay = self.rtte.retransmissionTimeout();
-                    self.timer.setForZeroWindowProbe(Instant.ZERO, delay);
-                }
-            }
+            if (size > 0) self.postEnqueue(old_length);
             return size;
         }
 
         pub const RecvError = error{ InvalidState, Finished };
 
-        pub fn recvSlice(self: *Self, data: []u8) RecvError!usize {
+        fn checkRecv(self: Self) RecvError!void {
             if (!self.mayRecv()) {
                 if (self.rx_fin_received) return error.Finished;
                 return error.InvalidState;
             }
+        }
 
+        pub fn recvSlice(self: *Self, data: []u8) RecvError!usize {
+            try self.checkRecv();
             const size = self.rx_buffer.dequeueSlice(data);
             self.remote_seq_no = self.remote_seq_no.add(size);
             return size;
         }
 
         pub fn peek(self: *Self, max: usize) RecvError![]const u8 {
-            if (!self.mayRecv()) {
-                if (self.rx_fin_received) return error.Finished;
-                return error.InvalidState;
-            }
+            try self.checkRecv();
             return self.rx_buffer.getAllocated(0, max);
         }
 
@@ -976,23 +953,14 @@ pub fn Socket(comptime max_asm_segs: usize) type {
             const written = f(ctx, buf);
             if (written > 0) {
                 self.tx_buffer.enqueueUnallocated(written);
-                if (old_length == 0) {
-                    self.remote_last_ts = null;
-                }
-                if (self.remote_win_len == 0 and self.timer.isIdle()) {
-                    const delay = self.rtte.retransmissionTimeout();
-                    self.timer.setForZeroWindowProbe(Instant.ZERO, delay);
-                }
+                self.postEnqueue(old_length);
             }
             return written;
         }
 
         /// Zero-copy recv: calls `f` with readable buffer, returns bytes consumed.
         pub fn recv(self: *Self, ctx: anytype, f: *const fn (@TypeOf(ctx), []const u8) usize) RecvError!usize {
-            if (!self.mayRecv()) {
-                if (self.rx_fin_received) return error.Finished;
-                return error.InvalidState;
-            }
+            try self.checkRecv();
 
             const available = self.rx_buffer.len();
             if (available == 0) return 0;
@@ -1660,6 +1628,14 @@ pub fn Socket(comptime max_asm_segs: usize) type {
         }
 
         // -- Internal helpers --
+
+        fn postEnqueue(self: *Self, old_length: usize) void {
+            if (old_length == 0) self.remote_last_ts = null;
+            if (self.remote_win_len == 0 and self.timer.isIdle()) {
+                const delay = self.rtte.retransmissionTimeout();
+                self.timer.setForZeroWindowProbe(Instant.ZERO, delay);
+            }
+        }
 
         fn timedOut(self: Self, timestamp: Instant) bool {
             if (self.remote_last_ts) |rts| {
@@ -6835,8 +6811,8 @@ test "localEndpoint and remoteEndpoint" {
 
     // In LISTEN state, no tuple is set.
     var s2 = socketListen();
-    try testing.expectEqual(@as(?Endpoint, null), s2.localEndpoint());
-    try testing.expectEqual(@as(?Endpoint, null), s2.remoteEndpoint());
+    try testing.expectEqual(null, s2.localEndpoint());
+    try testing.expectEqual(null, s2.remoteEndpoint());
 }
 
 test "setTimeout and setKeepAlive" {
@@ -6846,7 +6822,7 @@ test "setTimeout and setKeepAlive" {
     try testing.expectEqual(Duration.fromSecs(30), s.timeout.?);
 
     s.setTimeout(null);
-    try testing.expectEqual(@as(?Duration, null), s.timeout);
+    try testing.expectEqual(null, s.timeout);
 
     s.setKeepAlive(Duration.fromSecs(10));
     try testing.expectEqual(Duration.fromSecs(10), s.keep_alive.?);
@@ -6860,13 +6836,13 @@ test "setTimeout and setKeepAlive" {
 
 test "setAckDelay" {
     var s = socketNew();
-    try testing.expectEqual(@as(?Duration, null), s.ack_delay);
+    try testing.expectEqual(null, s.ack_delay);
 
     s.setAckDelay(Duration.fromMillis(20));
     try testing.expectEqual(Duration.fromMillis(20), s.ack_delay.?);
 
     s.setAckDelay(null);
-    try testing.expectEqual(@as(?Duration, null), s.ack_delay);
+    try testing.expectEqual(null, s.ack_delay);
 }
 
 test "setNagleEnabled" {
@@ -6882,14 +6858,12 @@ test "setNagleEnabled" {
 
 test "sendQueue and recvQueue" {
     var s = socketEstablished();
-    try testing.expectEqual(@as(usize, 0), s.sendQueue());
-    try testing.expectEqual(@as(usize, 0), s.recvQueue());
+    try testing.expectEqual(0, s.sendQueue());
+    try testing.expectEqual(0, s.recvQueue());
 
-    // Enqueue data for sending.
     _ = try s.sendSlice("hello");
-    try testing.expectEqual(@as(usize, 5), s.sendQueue());
+    try testing.expectEqual(5, s.sendQueue());
 
-    // Receive data into socket.
     _ = sendPacketAt0(&s, TcpRepr{
         .src_port = SEND_TEMPL.src_port,
         .dst_port = SEND_TEMPL.dst_port,
@@ -6898,13 +6872,13 @@ test "sendQueue and recvQueue" {
         .window_len = SEND_TEMPL.window_len,
         .payload = "world",
     });
-    try testing.expectEqual(@as(usize, 5), s.recvQueue());
+    try testing.expectEqual(5, s.recvQueue());
 }
 
 test "sendCapacity and recvCapacity" {
     var s = socketNew();
-    try testing.expectEqual(@as(usize, 64), s.sendCapacity());
-    try testing.expectEqual(@as(usize, 64), s.recvCapacity());
+    try testing.expectEqual(64, s.sendCapacity());
+    try testing.expectEqual(64, s.recvCapacity());
 }
 
 test "setHopLimit validation" {
@@ -6915,7 +6889,7 @@ test "setHopLimit validation" {
     try s.setHopLimit(255);
     try testing.expectEqual(@as(?u8, 255), s.hop_limit);
     try s.setHopLimit(null);
-    try testing.expectEqual(@as(?u8, null), s.hop_limit);
+    try testing.expectEqual(null, s.hop_limit);
 }
 
 // -- Congestion Control: Unit Tests --
@@ -6934,45 +6908,44 @@ test "NoControl window is maxInt" {
 test "Reno slow start doubles cwnd" {
     var reno = Reno{ .cwnd = 1460, .min_cwnd = 1460, .ssthresh = std.math.maxInt(usize) };
     reno.onAck(Instant.ZERO, 1460, &dummy_rtte);
-    try testing.expectEqual(@as(usize, 2920), reno.cwnd);
+    try testing.expectEqual(2920, reno.cwnd);
     reno.onAck(Instant.ZERO, 1460, &dummy_rtte);
-    try testing.expectEqual(@as(usize, 4380), reno.cwnd);
+    try testing.expectEqual(4380, reno.cwnd);
 }
 
 test "Reno congestion avoidance linear growth" {
     var reno = Reno{ .cwnd = 4000, .min_cwnd = 1460, .ssthresh = 3000 };
     reno.onAck(Instant.ZERO, 1460, &dummy_rtte);
-    // cwnd >= ssthresh, so ssthresh = cwnd (4000), add min_cwnd (1460)
-    try testing.expectEqual(@as(usize, 5460), reno.cwnd);
+    try testing.expectEqual(5460, reno.cwnd);
 }
 
 test "Reno onRetransmit halves cwnd" {
     var reno = Reno{ .cwnd = 8000, .min_cwnd = 1460 };
     reno.onRetransmit(Instant.ZERO);
-    try testing.expectEqual(@as(usize, 4000), reno.cwnd);
+    try testing.expectEqual(4000, reno.cwnd);
     reno.onRetransmit(Instant.ZERO);
-    try testing.expectEqual(@as(usize, 2000), reno.cwnd);
+    try testing.expectEqual(2000, reno.cwnd);
     reno.onRetransmit(Instant.ZERO);
-    try testing.expectEqual(@as(usize, 1460), reno.cwnd);
+    try testing.expectEqual(1460, reno.cwnd);
 }
 
 test "Reno onDuplicateAck sets ssthresh" {
     var reno = Reno{ .cwnd = 8000, .min_cwnd = 1460, .ssthresh = std.math.maxInt(usize) };
     reno.onDuplicateAck(Instant.ZERO);
-    try testing.expectEqual(@as(usize, 4000), reno.ssthresh);
-    try testing.expectEqual(@as(usize, 8000), reno.cwnd);
+    try testing.expectEqual(4000, reno.ssthresh);
+    try testing.expectEqual(8000, reno.cwnd);
 }
 
 test "Reno cwnd capped by rwnd" {
     var reno = Reno{ .cwnd = 3000, .min_cwnd = 1460, .ssthresh = std.math.maxInt(usize), .rwnd = 4000 };
     reno.onAck(Instant.ZERO, 3000, &dummy_rtte);
-    try testing.expectEqual(@as(usize, 4000), reno.cwnd);
+    try testing.expectEqual(4000, reno.cwnd);
 }
 
 test "Reno setMss updates min_cwnd" {
     var reno = Reno{};
     reno.setMss(536);
-    try testing.expectEqual(@as(usize, 536), reno.min_cwnd);
+    try testing.expectEqual(536, reno.min_cwnd);
 }
 
 test "Cubic cubeRoot correctness" {
@@ -6985,36 +6958,36 @@ test "Cubic cubeRoot correctness" {
     const result3 = Cubic.cubeRoot(1e6) orelse unreachable;
     try testing.expect(result3 > 99.0 and result3 < 101.0);
 
-    try testing.expectEqual(@as(?f64, null), Cubic.cubeRoot(0.0));
-    try testing.expectEqual(@as(?f64, null), Cubic.cubeRoot(-1.0));
+    try testing.expectEqual(null, Cubic.cubeRoot(0.0));
+    try testing.expectEqual(null, Cubic.cubeRoot(-1.0));
 }
 
 test "Cubic onRetransmit records w_max and halves ssthresh" {
     var cubic = Cubic{ .cwnd = 10000, .min_cwnd = 1460 };
     cubic.onRetransmit(Instant.fromMillis(100));
-    try testing.expectEqual(@as(usize, 10000), cubic.w_max);
-    try testing.expectEqual(@as(usize, 5000), cubic.ssthresh);
+    try testing.expectEqual(10000, cubic.w_max);
+    try testing.expectEqual(5000, cubic.ssthresh);
     try testing.expect(cubic.recovery_start != null);
 }
 
 test "Cubic slow start grows like Reno" {
     var cubic = Cubic{ .cwnd = 1460, .min_cwnd = 1460, .ssthresh = std.math.maxInt(usize) };
     cubic.onAck(Instant.ZERO, 1460, &dummy_rtte);
-    try testing.expectEqual(@as(usize, 2920), cubic.cwnd);
+    try testing.expectEqual(2920, cubic.cwnd);
 }
 
 test "Cubic preTransmit sets recovery_start on first call" {
     var cubic = Cubic{};
-    try testing.expectEqual(@as(?Instant, null), cubic.recovery_start);
+    try testing.expectEqual(null, cubic.recovery_start);
     cubic.preTransmit(Instant.fromMillis(500));
     try testing.expect(cubic.recovery_start != null);
 }
 
 test "CongestionController dispatch to Reno variant" {
     var cc = CongestionController{ .reno = .{ .cwnd = 4000, .min_cwnd = 1460 } };
-    try testing.expectEqual(@as(usize, 4000), cc.window());
+    try testing.expectEqual(4000, cc.window());
     cc.onRetransmit(Instant.ZERO);
-    try testing.expectEqual(@as(usize, 2000), cc.window());
+    try testing.expectEqual(2000, cc.window());
 }
 
 // -- Congestion Control: Socket Integration Tests --
@@ -7034,7 +7007,7 @@ test "Reno cwnd limits send window in established" {
     _ = s.sendSlice("abcdefghij") catch unreachable;
     const repr = recvAt0(&s) orelse unreachable;
     // Reno cwnd=3, so payload should be at most 3 bytes
-    try testing.expectEqual(@as(usize, 3), repr.payload.len);
+    try testing.expectEqual(3, repr.payload.len);
 }
 
 test "Reno onAck grows cwnd via process" {
@@ -7045,9 +7018,7 @@ test "Reno onAck grows cwnd via process" {
         .ssthresh = std.math.maxInt(usize),
     } });
     _ = s.sendSlice("hello") catch unreachable;
-    // Dispatch the data segment.
     _ = recvAt0(&s);
-    // Send ACK back from remote, acknowledging data.
     _ = sendPacketAt0(&s, .{
         .src_port = SEND_TEMPL.src_port,
         .dst_port = SEND_TEMPL.dst_port,
@@ -7056,12 +7027,11 @@ test "Reno onAck grows cwnd via process" {
         .window_len = 256,
         .payload = &.{},
     });
-    // cwnd should have grown (slow start: += ack_len=5)
     const cwnd = switch (s.congestion_controller) {
         .reno => |r| r.cwnd,
         else => unreachable,
     };
-    try testing.expectEqual(@as(usize, 1465), cwnd);
+    try testing.expectEqual(1465, cwnd);
 }
 
 test "Reno onRetransmit via dispatch retransmit path" {
@@ -7072,7 +7042,6 @@ test "Reno onRetransmit via dispatch retransmit path" {
     } });
     _ = s.sendSlice("data") catch unreachable;
     _ = recvAt0(&s);
-    // Advance time past retransmit timeout to trigger retransmit.
     const far_future = Instant.fromSecs(10);
     s.remote_last_ts = Instant.ZERO;
     s.timeout = null;
@@ -7081,7 +7050,7 @@ test "Reno onRetransmit via dispatch retransmit path" {
         .reno => |r| r.cwnd,
         else => unreachable,
     };
-    try testing.expectEqual(@as(usize, 2000), cwnd);
+    try testing.expectEqual(2000, cwnd);
 }
 
 test "congestion controller survives socket reset" {
@@ -7089,7 +7058,7 @@ test "congestion controller survives socket reset" {
     s.setCongestionControl(.{ .reno = .{ .cwnd = 5000 } });
     s.reset();
     try testing.expect(s.congestionControl() == .reno);
-    try testing.expectEqual(@as(usize, 5000), switch (s.congestion_controller) {
+    try testing.expectEqual(5000, switch (s.congestion_controller) {
         .reno => |r| r.cwnd,
         else => unreachable,
     });
@@ -7114,8 +7083,8 @@ test "closure send enqueues data and dispatches" {
     var s = socketEstablished();
     const ctx: *const u0 = &0;
     const written = try s.send(ctx, &testSendCallback);
-    try testing.expectEqual(@as(usize, 5), written);
-    try testing.expectEqual(@as(usize, 5), s.sendQueue());
+    try testing.expectEqual(5, written);
+    try testing.expectEqual(5, s.sendQueue());
 
     const repr = recvAt0(&s) orelse return error.TestUnexpectedResult;
     try testing.expectEqualSlices(u8, "hello", repr.payload);
@@ -7123,7 +7092,6 @@ test "closure send enqueues data and dispatches" {
 
 test "closure recv consumes data from rx buffer" {
     var s = socketEstablished();
-    // Inject data via process (simulated incoming segment).
     _ = sendPacketAt0(&s, .{
         .src_port = SEND_TEMPL.src_port,
         .dst_port = SEND_TEMPL.dst_port,
@@ -7132,13 +7100,13 @@ test "closure recv consumes data from rx buffer" {
         .window_len = 256,
         .payload = "world",
     });
-    try testing.expectEqual(@as(usize, 5), s.recvQueue());
+    try testing.expectEqual(5, s.recvQueue());
 
     var out: [64]u8 = undefined;
     const consumed = try s.recv(&out, &testRecvCallback);
-    try testing.expectEqual(@as(usize, 5), consumed);
+    try testing.expectEqual(5, consumed);
     try testing.expectEqualSlices(u8, "world", out[0..5]);
-    try testing.expectEqual(@as(usize, 0), s.recvQueue());
+    try testing.expectEqual(0, s.recvQueue());
 }
 
 test "closure send returns zero when tx buffer full" {
@@ -7156,11 +7124,10 @@ test "closure send returns zero when tx buffer full" {
     s.remote_win_len = 256;
     s.remote_seq_no = REMOTE_SEQ.add(1);
 
-    // Fill the 4-byte tx buffer.
     _ = try s.sendSlice("abcd");
-    try testing.expectEqual(@as(usize, 0), s.tx_buffer.window());
+    try testing.expectEqual(0, s.tx_buffer.window());
 
     const ctx: *const u0 = &0;
     const written = try s.send(ctx, &testSendCallback);
-    try testing.expectEqual(@as(usize, 0), written);
+    try testing.expectEqual(0, written);
 }

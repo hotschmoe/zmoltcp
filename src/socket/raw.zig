@@ -33,7 +33,7 @@ pub fn Socket(comptime config: Config) type {
         pub const Packet = struct {
             payload: [config.payload_size]u8 = undefined,
             payload_len: usize = 0,
-            src_addr: ipv4.Address = ipv4.UNSPECIFIED,
+            addr: ipv4.Address = ipv4.UNSPECIFIED,
         };
 
         const RingBuffer = ring_buffer_mod.RingBuffer(Packet);
@@ -115,7 +115,7 @@ pub fn Socket(comptime config: Config) type {
             const pkt = self.tx.enqueueOne() catch return error.BufferFull;
             @memcpy(pkt.payload[0..data.len], data);
             pkt.payload_len = data.len;
-            pkt.src_addr = dst_addr;
+            pkt.addr = dst_addr;
         }
 
         // -- Receive --
@@ -126,7 +126,7 @@ pub fn Socket(comptime config: Config) type {
             @memcpy(buf[0..pkt.payload_len], pkt.payload[0..pkt.payload_len]);
             return .{
                 .data_len = pkt.payload_len,
-                .src_addr = pkt.src_addr,
+                .src_addr = pkt.addr,
             };
         }
 
@@ -136,7 +136,7 @@ pub fn Socket(comptime config: Config) type {
             const pkt = &slice[0];
             return .{
                 .payload = pkt.payload[0..pkt.payload_len],
-                .src_addr = pkt.src_addr,
+                .src_addr = pkt.addr,
             };
         }
 
@@ -160,20 +160,20 @@ pub fn Socket(comptime config: Config) type {
             const copy_len = @min(payload.len, config.payload_size);
             @memcpy(pkt.payload[0..copy_len], payload[0..copy_len]);
             pkt.payload_len = copy_len;
-            pkt.src_addr = src_addr;
+            pkt.addr = src_addr;
         }
 
         pub fn peekDstAddr(self: *const Self) ?ipv4.Address {
             const slice = self.tx.getAllocated(0, 1);
             if (slice.len == 0) return null;
-            return slice[0].src_addr;
+            return slice[0].addr;
         }
 
         pub fn dispatch(self: *Self) ?DispatchResult {
             const pkt = self.tx.dequeueOne() catch return null;
             return .{
                 .ip_protocol = self.ip_protocol orelse return null,
-                .dst_addr = pkt.src_addr,
+                .dst_addr = pkt.addr,
                 .hop_limit = self.hop_limit,
                 .payload = pkt.payload[0..pkt.payload_len],
             };

@@ -42,6 +42,14 @@ pub const Repr = union(enum) {
     },
 };
 
+fn groupAddr(repr: Repr) ipv4.Address {
+    return switch (repr) {
+        .membership_query => |q| q.group_addr,
+        .membership_report => |r| r.group_addr,
+        .leave_group => |l| l.group_addr,
+    };
+}
+
 // -------------------------------------------------------------------------
 // Parse
 // -------------------------------------------------------------------------
@@ -62,7 +70,7 @@ pub fn parse(data: []const u8) ParseError!Repr {
 
     const msg_type: MessageType = @enumFromInt(data[0]);
     const max_resp_code = data[1];
-    const group_addr = ipv4.Address{ data[4], data[5], data[6], data[7] };
+    const group_addr: ipv4.Address = data[4..8].*;
 
     // Group address must be unspecified or multicast.
     if (!ipv4.isUnspecified(group_addr) and !ipv4.isMulticast(group_addr)) {
@@ -103,30 +111,19 @@ pub fn emit(repr: Repr, buf: []u8) !usize {
         .membership_query => |q| {
             buf[0] = @intFromEnum(MessageType.membership_query);
             buf[1] = q.max_resp_time;
-            buf[4] = q.group_addr[0];
-            buf[5] = q.group_addr[1];
-            buf[6] = q.group_addr[2];
-            buf[7] = q.group_addr[3];
         },
         .membership_report => |r| {
             buf[0] = switch (r.version) {
                 .v1 => @intFromEnum(MessageType.membership_report_v1),
                 .v2 => @intFromEnum(MessageType.membership_report_v2),
             };
-            buf[4] = r.group_addr[0];
-            buf[5] = r.group_addr[1];
-            buf[6] = r.group_addr[2];
-            buf[7] = r.group_addr[3];
         },
-        .leave_group => |l| {
+        .leave_group => {
             buf[0] = @intFromEnum(MessageType.leave_group);
-            buf[4] = l.group_addr[0];
-            buf[5] = l.group_addr[1];
-            buf[6] = l.group_addr[2];
-            buf[7] = l.group_addr[3];
         },
     }
 
+    buf[4..8].* = groupAddr(repr);
     fillChecksum(buf[0..HEADER_LEN]);
     return HEADER_LEN;
 }

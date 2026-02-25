@@ -127,7 +127,7 @@ pub const Route = struct {
 };
 
 pub const Routes = struct {
-    entries: [MAX_ROUTE_COUNT]?Route = .{ null, null, null, null },
+    entries: [MAX_ROUTE_COUNT]?Route = .{null} ** MAX_ROUTE_COUNT,
 
     pub fn add(self: *Routes, route: Route) bool {
         for (&self.entries) |*slot| {
@@ -279,7 +279,7 @@ pub const Interface = struct {
     routes: Routes = .{},
     now: time.Instant = time.Instant.ZERO,
     any_ip: bool = false,
-    multicast_groups: [MAX_MULTICAST_GROUPS]?ipv4.Address = .{ null, null, null, null },
+    multicast_groups: [MAX_MULTICAST_GROUPS]?ipv4.Address = .{null} ** MAX_MULTICAST_GROUPS,
 
     pub fn init(hw_addr: ethernet.Address) Interface {
         return .{ .hardware_addr = hw_addr };
@@ -349,10 +349,7 @@ pub const Interface = struct {
 
     pub fn hasNeighbor(self: *const Interface, dst: ipv4.Address) bool {
         const next_hop = self.route(dst) orelse return false;
-        return switch (self.neighbor_cache.lookupFull(next_hop, self.now)) {
-            .found => true,
-            .not_found, .rate_limited => false,
-        };
+        return self.neighbor_cache.lookup(next_hop, self.now) != null;
     }
 
     // -- Multicast group management --
