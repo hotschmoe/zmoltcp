@@ -68,26 +68,16 @@ echo ""
 echo "=== Section sizes ==="
 echo ""
 
-# Determine the llvm-size binary
-LLVM_SIZE="llvm-size"
-if ! command -v "$LLVM_SIZE" >/dev/null 2>&1; then
-    # Try versioned names
-    for v in 19 18 17 16 15 14; do
-        if command -v "llvm-size-${v}" >/dev/null 2>&1; then
-            LLVM_SIZE="llvm-size-${v}"
-            break
-        fi
-    done
-fi
-
-# Also accept plain `size` as fallback
-if ! command -v "$LLVM_SIZE" >/dev/null 2>&1; then
-    if command -v size >/dev/null 2>&1; then
-        LLVM_SIZE="size"
-    else
-        echo "ERROR: neither llvm-size nor size found on PATH" >&2
-        exit 1
+LLVM_SIZE=""
+for candidate in llvm-size llvm-size-{19,18,17,16,15,14} size; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        LLVM_SIZE="$candidate"
+        break
     fi
+done
+if [ -z "$LLVM_SIZE" ]; then
+    echo "ERROR: neither llvm-size nor size found on PATH" >&2
+    exit 1
 fi
 
 # Collect sizes into arrays
@@ -108,11 +98,13 @@ done
 
 # ── Output table ────────────────────────────────────────────────────────
 
-LABELS_A="A: TCP/IPv4"
-LABELS_B="B: TCP+UDP+ICMP"
-LABELS_C="C: Full IPv4"
-LABELS_D="D: Dual-stack"
-LABELS_E="E: Wire-only"
+declare -A LABELS=(
+    [a]="A: TCP/IPv4"
+    [b]="B: TCP+UDP+ICMP"
+    [c]="C: Full IPv4"
+    [d]="D: Dual-stack"
+    [e]="E: Wire-only"
+)
 
 printf "\n"
 printf "%-18s  %10s  %10s  %10s  %10s  %8s\n" \
@@ -121,7 +113,7 @@ printf "%-18s  %10s  %10s  %10s  %10s  %8s\n" \
     "--------" "-------" "-------" "-----" "-----" "-------"
 
 for s in $SCENARIOS; do
-    eval "label=\$LABELS_$(echo $s | tr a-z A-Z)"
+    label=${LABELS[$s]}
 
     zt=${Z_TEXT[$s]}; rt=${R_TEXT[$s]}
     zd=${Z_DATA[$s]}; rd=${R_DATA[$s]}

@@ -11,16 +11,7 @@ const icmp_socket = zmoltcp.socket.icmp;
 const dhcp_socket = zmoltcp.socket.dhcp;
 const dns_socket = zmoltcp.socket.dns;
 const raw_socket = zmoltcp.socket.raw;
-
-const BenchDevice = struct {
-    pub const medium: zmoltcp.iface.Medium = .ethernet;
-
-    pub fn receive(_: *BenchDevice) ?[]const u8 {
-        return null;
-    }
-
-    pub fn transmit(_: *BenchDevice, _: []const u8) void {}
-};
+const BenchDevice = @import("device.zig").BenchDevice;
 
 const TcpSock = tcp_socket.Socket(ipv4, 4);
 const UdpSock = udp_socket.Socket(ipv4);

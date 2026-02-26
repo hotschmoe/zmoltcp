@@ -8,17 +8,7 @@ const ipv4 = zmoltcp.wire.ipv4;
 const tcp_socket = zmoltcp.socket.tcp;
 const udp_socket = zmoltcp.socket.udp;
 const icmp_socket = zmoltcp.socket.icmp;
-const packet_buffer = zmoltcp.storage.packet_buffer;
-
-const BenchDevice = struct {
-    pub const medium: zmoltcp.iface.Medium = .ethernet;
-
-    pub fn receive(_: *BenchDevice) ?[]const u8 {
-        return null;
-    }
-
-    pub fn transmit(_: *BenchDevice, _: []const u8) void {}
-};
+const BenchDevice = @import("device.zig").BenchDevice;
 
 const TcpSock = tcp_socket.Socket(ipv4, 4);
 const UdpSock = udp_socket.Socket(ipv4);
