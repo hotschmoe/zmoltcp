@@ -12,6 +12,8 @@ pub const Protocol = enum(u8) {
     igmp = 2,
     tcp = 6,
     udp = 17,
+    ipsec_esp = 50,
+    ipsec_ah = 51,
     _,
 };
 

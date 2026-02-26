@@ -1,0 +1,104 @@
+// IPsec Encapsulating Security Payload (ESP) header parsing and serialization.
+//
+// Reference: RFC 4303, smoltcp src/wire/ipsec_esp.rs
+
+pub const HEADER_LEN: usize = 8;
+
+pub const Repr = struct {
+    spi: u32,
+    sequence_number: u32,
+};
+
+pub fn parse(data: []const u8) error{Truncated}!Repr {
+    if (data.len < HEADER_LEN) return error.Truncated;
+    return .{
+        .spi = readU32(data[0..4]),
+        .sequence_number = readU32(data[4..8]),
+    };
+}
+
+pub fn emit(repr: Repr, buf: []u8) error{Truncated}!void {
+    if (buf.len < HEADER_LEN) return error.Truncated;
+    writeU32(buf[0..4], repr.spi);
+    writeU32(buf[4..8], repr.sequence_number);
+}
+
+pub fn bufferLen(_: Repr) usize {
+    return HEADER_LEN;
+}
+
+fn readU32(b: *const [4]u8) u32 {
+    return @as(u32, b[0]) << 24 | @as(u32, b[1]) << 16 | @as(u32, b[2]) << 8 | b[3];
+}
+
+fn writeU32(b: *[4]u8, v: u32) void {
+    b[0] = @truncate(v >> 24);
+    b[1] = @truncate(v >> 16);
+    b[2] = @truncate(v >> 8);
+    b[3] = @truncate(v);
+}
+
+// -------------------------------------------------------------------------
+// Tests
+// -------------------------------------------------------------------------
+
+const testing = @import("std").testing;
+
+// [smoltcp:wire/ipsec_esp.rs:PACKET_BYTES]
+const PACKET_BYTES = [_]u8{
+    0xfb, 0x51, 0x28, 0xa6, 0x00, 0x00, 0x00, 0x02, 0x5d, 0xbe, 0x2d, 0x56, 0xd4, 0x6a, 0x57,
+    0xf5, 0xfc, 0x69, 0x8b, 0x3c, 0xa6, 0xb6, 0x88, 0x3a, 0x6c, 0xc1, 0x33, 0x92, 0xdb, 0x40,
+    0xab, 0x11, 0x54, 0xb4, 0x0f, 0x22, 0x4d, 0x37, 0x3a, 0x06, 0x94, 0x1e, 0xd4, 0x25, 0xaf,
+    0xf0, 0xb0, 0x11, 0x1f, 0x07, 0x96, 0x2a, 0xa7, 0x20, 0xb1, 0xf5, 0x52, 0xb2, 0x12, 0x46,
+    0xd6, 0xa5, 0x13, 0x4e, 0x97, 0x75, 0x44, 0x19, 0xc7, 0x29, 0x35, 0xc5, 0xed, 0xa4, 0x0c,
+    0xe7, 0x87, 0xec, 0x9c, 0xb1, 0x12, 0x42, 0x74, 0x7c, 0x12, 0x3c, 0x7f, 0x44, 0x9c, 0x6b,
+    0x46, 0x27, 0x28, 0xd2, 0x0e, 0xb1, 0x28, 0xd3, 0xd8, 0xc2, 0xd1, 0xac, 0x25, 0xfe, 0xef,
+    0xed, 0x13, 0xfd, 0x8f, 0x18, 0x9c, 0x2d, 0xb1, 0x0e, 0x50, 0xe9, 0xaa, 0x65, 0x93, 0x56,
+    0x40, 0x43, 0xa3, 0x72, 0x54, 0xba, 0x1b, 0xb1, 0xaf, 0xca, 0x04, 0x15, 0xf9, 0xef, 0xb7,
+    0x1d,
+};
+
+fn packetRepr() Repr {
+    return .{ .spi = 0xfb5128a6, .sequence_number = 2 };
+}
+
+// [smoltcp:wire/ipsec_esp.rs:test_deconstruct]
+test "parse ESP header fields" {
+    const repr = try parse(&PACKET_BYTES);
+    try testing.expectEqual(@as(u32, 0xfb5128a6), repr.spi);
+    try testing.expectEqual(@as(u32, 2), repr.sequence_number);
+}
+
+// [smoltcp:wire/ipsec_esp.rs:test_construct]
+test "emit ESP header matches wire bytes" {
+    var buf: [8]u8 = undefined;
+    try emit(packetRepr(), &buf);
+    try testing.expectEqualSlices(u8, PACKET_BYTES[0..8], &buf);
+}
+
+// [smoltcp:wire/ipsec_esp.rs:test_check_len]
+test "ESP parse rejects truncated buffer" {
+    try testing.expectError(error.Truncated, parse(PACKET_BYTES[0..7]));
+    _ = try parse(&PACKET_BYTES);
+}
+
+// [smoltcp:wire/ipsec_esp.rs:test_parse]
+test "ESP parse returns correct repr" {
+    const repr = try parse(&PACKET_BYTES);
+    const expected = packetRepr();
+    try testing.expectEqual(expected.spi, repr.spi);
+    try testing.expectEqual(expected.sequence_number, repr.sequence_number);
+}
+
+// [smoltcp:wire/ipsec_esp.rs:test_emit]
+test "ESP emit into fresh buffer" {
+    var buf: [136]u8 = undefined;
+    @memset(&buf, 0);
+    try emit(packetRepr(), &buf);
+    try testing.expectEqualSlices(u8, PACKET_BYTES[0..8], buf[0..8]);
+}
+
+// [smoltcp:wire/ipsec_esp.rs:test_buffer_len]
+test "ESP bufferLen is always 8" {
+    try testing.expectEqual(@as(usize, 8), bufferLen(packetRepr()));
+}

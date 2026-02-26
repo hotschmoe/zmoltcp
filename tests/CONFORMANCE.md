@@ -2,7 +2,7 @@
 
 Tracks zmoltcp tests against their smoltcp reference implementations.
 
-**Total: 676 tests passing** (675 named + 1 root import test)
+**Total: 726 tests passing** (725 named + 1 root import test)
 
 ## Summary
 
@@ -16,15 +16,18 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/tcp | 9 | 22 | 0 | 22 | PASS |
 | wire/udp | 8 | 11 | 0 | 11 | PASS |
 | wire/icmp | 5 | 5 | 0 | 5 | PASS |
+| wire/ipsec_esp | 6 | 6 | 0 | 6 | PASS |
+| wire/ipsec_ah | 6 | 6 | 0 | 6 | PASS |
 | storage/ring_buffer | 15 | 14 | 1 | 14 | PASS |
 | storage/assembler | 38 | 37 | 1 | 37 | PASS |
+| storage/packet_buffer | 10 | 12 | 0 | 12 | PASS |
 | time | 10 | 8 | 2 | 8 | PASS |
 | socket/tcp | 175 | 217 | 3 | 217 | PASS |
 | socket/udp | 16 | 17 | 0 | 17 | PASS |
 | wire/dhcp | 9 | 9 | 0 | 9 | PASS |
 | socket/dhcp | 11 | 11 | 0 | 11 | PASS |
 | wire/dns | 7 | 7 | 0 | 7 | PASS |
-| socket/dns | 0 | 12 | 0 | 12 | PASS |
+| socket/dns | 0 | 16 | 0 | 16 | PASS |
 | socket/icmp | 6 | 7 | 0 | 7 | PASS |
 | socket/raw | 5 | 11 | 0 | 11 | PASS |
 | wire/igmp | 4 | 8 | 0 | 8 | PASS |
@@ -38,11 +41,11 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/ndisc | 2 | 4 | 0 | 4 | PASS |
 | wire/mld | 2 | 6 | 0 | 6 | PASS |
 | wire/icmpv6 | 6 | 9 | 0 | 9 | PASS |
-| iface | 24 | 59 | 1 | 59 | PASS |
-| phy | 0 | 9 | 0 | 9 | PASS |
-| fragmentation | 3 | 11 | 0 | 11 | PASS |
-| stack | 2 | 99 | 0 | 99 | PASS |
-| **Total** | | **675** | **8** | **675** | **PASS** |
+| iface | 24 | 62 | 1 | 62 | PASS |
+| phy | 0 | 16 | 0 | 16 | PASS |
+| fragmentation | 3 | 12 | 0 | 12 | PASS |
+| stack | 2 | 110 | 0 | 110 | PASS |
+| **Total** | | **725** | **8** | **725** | **PASS** |
 
 ## Wire Layer Tests
 
@@ -154,6 +157,26 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | (original) | "ICMP echo emit with valid checksum" | PASS |
 | (original) | "ICMP echo roundtrip" | PASS |
 | wire/icmpv4.rs:test_check_len | "ICMP check length" | PASS |
+
+### wire/ipsec_esp.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| wire/ipsec_esp.rs:test_deconstruct | "ESP parse header fields" | PASS |
+| wire/ipsec_esp.rs:test_parse | "ESP parse repr" | PASS |
+| wire/ipsec_esp.rs:test_emit | "ESP emit repr" | PASS |
+| wire/ipsec_esp.rs:test_buffer_len | "ESP buffer length" | PASS |
+| wire/ipsec_esp.rs:test_check_len | "ESP truncated packet rejected" | PASS |
+| (original) | "ESP roundtrip parse then emit" | PASS |
+
+### wire/ipsec_ah.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| wire/ipsec_ah.rs:test_deconstruct | "AH parse header fields" | PASS |
+| wire/ipsec_ah.rs:test_parse | "AH parse repr" | PASS |
+| wire/ipsec_ah.rs:test_emit | "AH emit repr" | PASS |
+| wire/ipsec_ah.rs:test_header_len | "AH header length from wire" | PASS |
+| wire/ipsec_ah.rs:test_check_len | "AH truncated packet rejected" | PASS |
+| (original) | "AH roundtrip parse then emit" | PASS |
 
 ### wire/dhcp.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -353,6 +376,22 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | storage/assembler.rs:test_add_then_remove_front_at_front_touch | "add then remove front touching" | PASS |
 | storage/assembler.rs:test_add_then_remove_front_at_front_full | "add then remove front when full" | PASS |
 | storage/assembler.rs:test_add_then_remove_front_at_front_full_offset_0 | "add then remove front offset 0 when full" | PASS |
+
+### storage/packet_buffer.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| storage/packet_buffer.rs:test_simple | "enqueue dequeue simple" | PASS |
+| storage/packet_buffer.rs:test_peek | "peek does not consume" | PASS |
+| storage/packet_buffer.rs:test_padding | "padding inserted when contiguous tail too small" | PASS |
+| storage/packet_buffer.rs:test_padding_with_large_payload | "padding with large payload wraps around" | PASS |
+| storage/packet_buffer.rs:test_metadata_full_empty | "metadata ring limits packet count" | PASS |
+| storage/packet_buffer.rs:test_window_too_small | "enqueue fails when total window insufficient" | PASS |
+| storage/packet_buffer.rs:test_contiguous_window_too_small | "enqueue fails when wrap would exhaust metadata" | PASS |
+| storage/packet_buffer.rs:test_contiguous_window_wrap | "successful wrap around with padding" | PASS |
+| storage/packet_buffer.rs:test_capacity_too_small | "enqueue larger than capacity fails immediately" | PASS |
+| storage/packet_buffer.rs:test_contig_window_prioritized | "contiguous window prioritized over wrap" | PASS |
+| storage/packet_buffer.rs:clear | "reset clears buffer" | PASS |
+| (original) | "PacketBuffer with typed header" | PASS |
 
 ## Time Tests
 
@@ -872,6 +911,13 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "FaultInjector corrupts tx frame" | PASS |
 | (original) | "FaultInjector zero config passes everything through" | PASS |
 | (original) | "Tracer and FaultInjector compose" | PASS |
+| phy/pcap_writer.rs | "PcapWriter global header written once" | PASS |
+| phy/pcap_writer.rs | "PcapWriter captures rx frame" | PASS |
+| phy/pcap_writer.rs | "PcapWriter captures tx frame" | PASS |
+| phy/pcap_writer.rs | "PcapWriter rx_only mode skips tx" | PASS |
+| phy/pcap_writer.rs | "PcapWriter tx_only mode skips rx" | PASS |
+| (original) | "PcapWriter medium propagation" | PASS |
+| (original) | "PcapWriter composes with Tracer" | PASS |
 
 ### fragmentation.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -887,6 +933,7 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "FragKeyV6 equality" | PASS |
 | (original) | "reassembler with v6 keys" | PASS |
 | (original) | "isFragmentV6" | PASS |
+| (original) | "Medium::Ip fragmenter emits raw IP" | PASS |
 
 ## Not Applicable (N/A) Tests
 

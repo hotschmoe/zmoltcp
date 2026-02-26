@@ -398,7 +398,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                         self.emitResponse(response, device);
                     }
                 },
-                _ => {
+                .ipsec_esp, .ipsec_ah, _ => {
                     if (is_broadcast or raw_handled) return;
                     if (self.iface.icmpProtoUnreachable(ip_repr, ip_payload)) |response| {
                         self.emitResponse(response, device);
@@ -505,7 +505,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     }
                 },
                 .no_next_header, .hop_by_hop, .routing, .fragment, .destination => {},
-                _ => {
+                .ipsec_esp, .ipsec_ah, _ => {
                     if (raw_handled) return;
                     if (self.iface.icmpv6ParamProblem(
                         ip_repr,
@@ -594,7 +594,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             if (comptime !has_dns4) return false;
 
             const wire_repr = udp_wire.parse(raw_udp) catch return false;
-            if (wire_repr.src_port != dns_socket_mod.DNS_PORT) return false;
+            if (wire_repr.src_port != dns_socket_mod.DNS_PORT and wire_repr.src_port != dns_socket_mod.MDNS_PORT) return false;
             const payload = udp_wire.payloadSlice(raw_udp) catch return false;
 
             for (self.sockets.dns4_sockets) |sock| {
@@ -702,7 +702,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             if (comptime !has_dns6) return false;
 
             const wire_repr = udp_wire.parse(raw_udp) catch return false;
-            if (wire_repr.src_port != dns_socket_mod.DNS_PORT) return false;
+            if (wire_repr.src_port != dns_socket_mod.DNS_PORT and wire_repr.src_port != dns_socket_mod.MDNS_PORT) return false;
             const payload = udp_wire.payloadSlice(raw_udp) catch return false;
 
             for (self.sockets.dns6_sockets) |sock| {
@@ -1330,7 +1330,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + result.payload.len);
             const hdr_len = udp_wire.emit(.{
                 .src_port = result.src_port,
-                .dst_port = dns_socket_mod.DNS_PORT,
+                .dst_port = result.dst_port,
                 .length = udp_total,
                 .checksum = 0,
             }, &payload_buf) catch return .sent;
@@ -1400,7 +1400,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + result.payload.len);
             const hdr_len = udp_wire.emit(.{
                 .src_port = result.src_port,
-                .dst_port = dns_socket_mod.DNS_PORT,
+                .dst_port = result.dst_port,
                 .length = udp_total,
                 .checksum = 0,
             }, &payload_buf) catch return .sent;
@@ -1933,15 +1933,17 @@ test "stack TCP SYN no listener produces RST" {
 }
 
 test "stack UDP to bound socket delivers data" {
-    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4);
     const Sockets = struct { udp4_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 68 });
 
     var sock_arr = [_]*UdpSock{&sock};
@@ -1974,15 +1976,17 @@ test "stack UDP to bound socket delivers data" {
 }
 
 test "stack ICMP echo with bound socket delivers and auto-replies" {
-    const IcmpSock = icmp_socket_mod.Socket(ipv4, .{ .payload_size = 128 });
+    const IcmpSock = icmp_socket_mod.Socket(ipv4);
     const Sockets = struct { icmp4_sockets: []*IcmpSock };
     const IcmpStack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
-    var rx_buf: [1]IcmpSock.Packet = undefined;
-    var tx_buf: [1]IcmpSock.Packet = undefined;
-    var sock = IcmpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]IcmpSock.PacketMeta = .{.{}};
+    var rx_payload: [128]u8 = undefined;
+    var tx_meta: [1]IcmpSock.PacketMeta = .{.{}};
+    var tx_payload: [128]u8 = undefined;
+    var sock = IcmpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .ident = 0x1234 });
 
     var sock_arr = [_]*IcmpSock{&sock};
@@ -2190,15 +2194,17 @@ test "stack TCP handshake completes via listen" {
 }
 
 test "stack UDP egress dispatches datagram" {
-    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4);
     const Sockets = struct { udp4_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 12345 });
     try sock.sendSlice("Hello", .{
         .endpoint = .{ .addr = REMOTE_IP, .port = 54321 },
@@ -2233,15 +2239,17 @@ test "stack UDP egress dispatches datagram" {
 }
 
 test "stack ICMP egress dispatches echo request" {
-    const IcmpSock = icmp_socket_mod.Socket(ipv4, .{ .payload_size = 128 });
+    const IcmpSock = icmp_socket_mod.Socket(ipv4);
     const Sockets = struct { icmp4_sockets: []*IcmpSock };
     const IcmpStack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
-    var rx_buf: [1]IcmpSock.Packet = undefined;
-    var tx_buf: [1]IcmpSock.Packet = undefined;
-    var sock = IcmpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]IcmpSock.PacketMeta = .{.{}};
+    var rx_payload: [128]u8 = undefined;
+    var tx_meta: [1]IcmpSock.PacketMeta = .{.{}};
+    var tx_payload: [128]u8 = undefined;
+    var sock = IcmpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
 
     // Build an ICMP echo request to send
     const echo_data = [_]u8{ 0xCA, 0xFE };
@@ -2276,15 +2284,17 @@ test "stack ICMP egress dispatches echo request" {
 }
 
 test "stack poll returns true for egress-only activity" {
-    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4);
     const Sockets = struct { udp4_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 100 });
     try sock.sendSlice("X", .{
         .endpoint = .{ .addr = REMOTE_IP, .port = 200 },
@@ -2324,13 +2334,15 @@ test "stack pollAt returns ZERO for pending TCP SYN-SENT" {
 }
 
 test "stack pollAt returns null for idle sockets" {
-    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4);
     const Sockets = struct { udp4_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 100 });
 
     var sock_arr = [_]*UdpSock{&sock};
@@ -2342,15 +2354,17 @@ test "stack pollAt returns null for idle sockets" {
 }
 
 test "stack egress uses cached neighbor MAC" {
-    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4);
     const Sockets = struct { udp4_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 100 });
 
     var sock_arr = [_]*UdpSock{&sock};
@@ -2955,15 +2969,17 @@ test "stack ARP request rate limited" {
 }
 
 test "stack UDP does not lose packet during ARP resolution" {
-    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4);
     const Sockets = struct { udp4_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 12345 });
     try sock.sendSlice("Hello", .{
         .endpoint = .{ .addr = REMOTE_IP, .port = 54321 },
@@ -3033,15 +3049,17 @@ test "stack ICMP echo reply uses cached neighbor from ingress" {
 }
 
 test "stack pollAt accounts for neighbor resolution delay" {
-    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4);
     const Sockets = struct { udp4_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 100 });
     try sock.sendSlice("X", .{
         .endpoint = .{ .addr = REMOTE_IP, .port = 200 },
@@ -3063,15 +3081,17 @@ test "stack pollAt accounts for neighbor resolution delay" {
 }
 
 test "stack broadcast destination skips ARP resolution" {
-    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4);
     const Sockets = struct { udp4_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 100 });
     // Send to broadcast address.
     try sock.sendSlice("bcast", .{
@@ -3180,14 +3200,16 @@ test "stack reassembles two-fragment ICMP echo" {
 }
 
 test "stack reassembles out-of-order UDP fragments" {
-    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 128 });
+    const UdpSock = udp_socket_mod.Socket(ipv4);
     const Sockets = struct { udp4_sockets: []*UdpSock };
     const UdpStack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 12345 });
 
     var sock_arr = [_]*UdpSock{&sock};
@@ -3490,15 +3512,17 @@ test "stack IGMP query triggers report for joined group" {
 }
 
 test "stack multicast destination accepted for joined group" {
-    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4);
     const Sockets = struct { udp4_sockets: []*UdpSock };
     const McastStack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 5000 });
 
     var sock_arr = [_]*UdpSock{&sock};
@@ -3586,15 +3610,17 @@ test "TCP checksum offload skips computation" {
 test "burst size limits frames per poll cycle" {
     const BurstDevice = TestDeviceWithCaps(.{ .max_burst_size = 1 });
 
-    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4);
     const Sockets = struct { udp4_sockets: []*UdpSock };
     const BurstStack = Stack(BurstDevice, Sockets);
 
     var device = BurstDevice{};
 
-    var rx_buf: [4]UdpSock.Packet = undefined;
-    var tx_buf: [4]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [4]UdpSock.PacketMeta = .{UdpSock.PacketMeta{}} ** 4;
+    var rx_payload: [256]u8 = undefined;
+    var tx_meta: [4]UdpSock.PacketMeta = .{UdpSock.PacketMeta{}} ** 4;
+    var tx_payload: [256]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 3000 });
 
     // Enqueue 3 outgoing UDP packets.
@@ -4805,15 +4831,17 @@ test "DeviceCapabilities defaults include icmpv6 checksum" {
 // -------------------------------------------------------------------------
 
 test "stack v6 UDP socket receives datagram" {
-    const UdpSock = udp_socket_mod.Socket(ipv6, .{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv6);
     const Sockets = struct { udp6_sockets: []*UdpSock };
     const V6Stack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 5000 });
 
     var sock_arr = [_]*UdpSock{&sock};
@@ -4905,15 +4933,17 @@ test "stack v6 TCP socket receives SYN, replies SYN-ACK" {
 }
 
 test "stack v6 ICMPv6 socket receives echo reply" {
-    const IcmpSock = icmp_socket_mod.Socket(ipv6, .{ .payload_size = 128 });
+    const IcmpSock = icmp_socket_mod.Socket(ipv6);
     const Sockets = struct { icmp6_sockets: []*IcmpSock };
     const V6Stack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
-    var rx_buf: [1]IcmpSock.Packet = undefined;
-    var tx_buf: [1]IcmpSock.Packet = undefined;
-    var sock = IcmpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]IcmpSock.PacketMeta = .{.{}};
+    var rx_payload: [128]u8 = undefined;
+    var tx_meta: [1]IcmpSock.PacketMeta = .{.{}};
+    var tx_payload: [128]u8 = undefined;
+    var sock = IcmpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .ident = 0xABCD });
 
     var sock_arr = [_]*IcmpSock{&sock};
@@ -5054,15 +5084,17 @@ test "stack v6 TCP egress dispatches SYN on connect" {
 }
 
 test "stack v6 UDP egress dispatches datagram with mandatory checksum" {
-    const UdpSock = udp_socket_mod.Socket(ipv6, .{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv6);
     const Sockets = struct { udp6_sockets: []*UdpSock };
     const V6Stack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 12345 });
     try sock.sendSlice("Hello", .{
         .endpoint = .{ .addr = REMOTE_V6, .port = 54321 },
@@ -5096,15 +5128,17 @@ test "stack v6 UDP egress dispatches datagram with mandatory checksum" {
 }
 
 test "stack v6 ICMP egress dispatches echo request" {
-    const IcmpSock = icmp_socket_mod.Socket(ipv6, .{ .payload_size = 128 });
+    const IcmpSock = icmp_socket_mod.Socket(ipv6);
     const Sockets = struct { icmp6_sockets: []*IcmpSock };
     const V6Stack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
-    var rx_buf: [1]IcmpSock.Packet = undefined;
-    var tx_buf: [1]IcmpSock.Packet = undefined;
-    var sock = IcmpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]IcmpSock.PacketMeta = .{.{}};
+    var rx_payload: [128]u8 = undefined;
+    var tx_meta: [1]IcmpSock.PacketMeta = .{.{}};
+    var tx_payload: [128]u8 = undefined;
+    var sock = IcmpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .ident = 0xBEEF });
 
     // Build serialized ICMPv6 echo request
@@ -5207,13 +5241,15 @@ test "stack v6 pollAt returns ZERO for pending TCP6 SYN-SENT" {
 }
 
 test "stack v6 pollAt returns ZERO for pending UDP6 data" {
-    const UdpSock = udp_socket_mod.Socket(ipv6, .{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv6);
     const Sockets = struct { udp6_sockets: []*UdpSock };
     const V6Stack = Stack(TestDevice, Sockets);
 
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 5000 });
     try sock.sendSlice("test", .{
         .endpoint = .{ .addr = REMOTE_V6, .port = 6000 },
@@ -5228,13 +5264,15 @@ test "stack v6 pollAt returns ZERO for pending UDP6 data" {
 }
 
 test "stack v6 pollAt returns null for idle sockets" {
-    const UdpSock = udp_socket_mod.Socket(ipv6, .{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv6);
     const Sockets = struct { udp6_sockets: []*UdpSock };
     const V6Stack = Stack(TestDevice, Sockets);
 
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 5000 });
     // No pending data
 
@@ -5251,15 +5289,17 @@ test "stack v6 pollAt returns null for idle sockets" {
 // -------------------------------------------------------------------------
 
 test "stack v6 two-fragment reassembly delivers to socket" {
-    const UdpSock = udp_socket_mod.Socket(ipv6, .{ .payload_size = 256 });
+    const UdpSock = udp_socket_mod.Socket(ipv6);
     const Sockets = struct { udp6_sockets: []*UdpSock };
     const V6Stack = Stack(TestDevice, Sockets);
 
     var device = TestDevice.init();
 
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 5000 });
 
     var sock_arr = [_]*UdpSock{&sock};
@@ -5702,15 +5742,17 @@ test "Medium::Ip IPv6 TCP RST" {
 }
 
 test "Medium::Ip UDP socket roundtrip" {
-    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 64 });
+    const UdpSock = udp_socket_mod.Socket(ipv4);
     const Sockets = struct { udp4_sockets: []*UdpSock };
     const IpUdpStack = Stack(TestIpDevice, Sockets);
 
     var device = TestIpDevice{};
 
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 5000 });
 
     var sock_arr = [_]*UdpSock{&sock};
@@ -5794,15 +5836,17 @@ test "Medium::Ip TCP socket SYN-ACK" {
 const TestIpSmallMtuDevice = IpLoopbackDevice(8, .{ .max_transmission_unit = 576 });
 
 test "Medium::Ip IPv4 fragmented egress" {
-    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 1024 });
+    const UdpSock = udp_socket_mod.Socket(ipv4);
     const Sockets = struct { udp4_sockets: []*UdpSock };
     const SmallMtuStack = Stack(TestIpSmallMtuDevice, Sockets);
 
     var device = TestIpSmallMtuDevice{};
 
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [1024]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 9000 });
 
     var sock_arr = [_]*UdpSock{&sock};
@@ -5834,15 +5878,17 @@ test "Medium::Ip IPv4 fragmented egress" {
 }
 
 test "Medium::Ip IPv4 fragmented ingress" {
-    const UdpSock = udp_socket_mod.Socket(ipv4, .{ .payload_size = 256 });
+    const UdpSock = udp_socket_mod.Socket(ipv4);
     const Sockets = struct { udp4_sockets: []*UdpSock };
     const IpUdpStack = Stack(TestIpDevice, Sockets);
 
     var device = TestIpDevice{};
 
-    var rx_buf: [1]UdpSock.Packet = undefined;
-    var tx_buf: [1]UdpSock.Packet = undefined;
-    var sock = UdpSock.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 7000 });
 
     var sock_arr = [_]*UdpSock{&sock};

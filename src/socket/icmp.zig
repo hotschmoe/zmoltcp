@@ -5,6 +5,8 @@
 // - Udp: matches ICMP error messages (DstUnreachable, TimeExceeded)
 //   containing an embedded UDP header from a bound local port
 //
+// Uses dual-ring PacketBuffer for variable-length datagram storage.
+//
 // [smoltcp:socket/icmp.rs]
 
 const std = @import("std");
@@ -13,7 +15,7 @@ const ipv4 = @import("../wire/ipv4.zig");
 const ipv6 = @import("../wire/ipv6.zig");
 const icmp = @import("../wire/icmp.zig");
 const icmpv6_wire = @import("../wire/icmpv6.zig");
-const ring_buffer_mod = @import("../storage/ring_buffer.zig");
+const packet_buffer_mod = @import("../storage/packet_buffer.zig");
 const time = @import("../time.zig");
 const iface_mod = @import("../iface.zig");
 
@@ -37,11 +39,7 @@ fn embeddedSrcPortV6(payload: []const u8) ?u16 {
     return readU16(payload[offset..][0..2]);
 }
 
-pub const Config = struct {
-    payload_size: comptime_int,
-};
-
-pub fn Socket(comptime Ip: type, comptime config: Config) type {
+pub fn Socket(comptime Ip: type) type {
     comptime ip_generic.assertIsIp(Ip);
     const is_v6 = Ip.ADDRESS_LEN == 16;
     return struct {
@@ -64,16 +62,15 @@ pub fn Socket(comptime Ip: type, comptime config: Config) type {
             }
         };
 
-        pub const Packet = struct {
-            payload: [config.payload_size]u8 = undefined,
-            payload_len: usize = 0,
+        pub const PacketHeader = struct {
             addr: Ip.Address = Ip.UNSPECIFIED,
         };
 
-        const RingBuffer = ring_buffer_mod.RingBuffer(Packet);
+        pub const PacketMeta = packet_buffer_mod.PacketMeta(PacketHeader);
+        const PktBuf = packet_buffer_mod.PacketBuffer(PacketHeader);
 
-        rx: RingBuffer,
-        tx: RingBuffer,
+        rx: PktBuf,
+        tx: PktBuf,
         endpoint: Endpoint,
         hop_limit: ?u8,
 
@@ -96,10 +93,15 @@ pub fn Socket(comptime Ip: type, comptime config: Config) type {
 
         // -- Init / lifecycle --
 
-        pub fn init(rx_storage: []Packet, tx_storage: []Packet) Self {
+        pub fn init(
+            rx_meta: []PacketMeta,
+            rx_payload: []u8,
+            tx_meta: []PacketMeta,
+            tx_payload: []u8,
+        ) Self {
             return .{
-                .rx = RingBuffer.init(rx_storage),
-                .tx = RingBuffer.init(tx_storage),
+                .rx = PktBuf.init(rx_meta, rx_payload),
+                .tx = PktBuf.init(tx_meta, tx_payload),
                 .endpoint = .unspecified,
                 .hop_limit = null,
             };
@@ -113,8 +115,8 @@ pub fn Socket(comptime Ip: type, comptime config: Config) type {
 
         pub fn close(self: *Self) void {
             self.endpoint = .unspecified;
-            self.rx.clear();
-            self.tx.clear();
+            self.rx.reset();
+            self.tx.reset();
         }
 
         pub fn isOpen(self: Self) bool {
@@ -140,23 +142,22 @@ pub fn Socket(comptime Ip: type, comptime config: Config) type {
 
         pub fn sendSlice(self: *Self, data: []const u8, dst_addr: Ip.Address) SendError!void {
             if (Ip.isUnspecified(dst_addr)) return error.Unaddressable;
-            if (data.len > config.payload_size) return error.BufferFull;
 
-            const pkt = self.tx.enqueueOne() catch return error.BufferFull;
-            @memcpy(pkt.payload[0..data.len], data);
-            pkt.payload_len = data.len;
-            pkt.addr = dst_addr;
+            const buf = self.tx.enqueue(data.len, .{
+                .addr = dst_addr,
+            }) catch return error.BufferFull;
+            @memcpy(buf[0..data.len], data);
         }
 
         // -- Receive --
 
         pub fn recvSlice(self: *Self, buf: []u8) RecvError!RecvResult {
-            const pkt = self.rx.dequeueOne() catch return error.Exhausted;
-            if (buf.len < pkt.payload_len) return error.Truncated;
-            @memcpy(buf[0..pkt.payload_len], pkt.payload[0..pkt.payload_len]);
+            const result = self.rx.dequeue() catch return error.Exhausted;
+            if (buf.len < result.payload.len) return error.Truncated;
+            @memcpy(buf[0..result.payload.len], result.payload);
             return .{
-                .data_len = pkt.payload_len,
-                .src_addr = pkt.addr,
+                .data_len = result.payload.len,
+                .src_addr = result.header.addr,
             };
         }
 
@@ -216,35 +217,32 @@ pub fn Socket(comptime Ip: type, comptime config: Config) type {
         }
 
         pub fn process(self: *Self, src_addr: Ip.Address, dst_addr: Ip.Address, repr: IcmpRepr, payload: []const u8) void {
-            if (comptime is_v6) {
-                if (icmpv6_wire.bufferLen(repr) > config.payload_size) return;
-            } else {
-                if (icmp.HEADER_LEN + payload.len > config.payload_size) return;
-            }
+            const total_len = if (comptime is_v6)
+                icmpv6_wire.bufferLen(repr)
+            else
+                icmp.HEADER_LEN + payload.len;
 
-            const pkt = self.rx.enqueueOne() catch return;
+            const buf = self.rx.enqueue(total_len, .{ .addr = src_addr }) catch return;
             if (comptime is_v6) {
-                pkt.payload_len = icmpv6_wire.emit(repr, src_addr, dst_addr, &pkt.payload) catch unreachable;
+                _ = icmpv6_wire.emit(repr, src_addr, dst_addr, buf) catch return;
             } else {
-                pkt.payload_len = switch (repr) {
-                    .echo => |echo| icmp.emitEcho(echo, payload, &pkt.payload) catch unreachable,
-                    .other => |other| icmp.emitOther(other, payload, &pkt.payload) catch unreachable,
+                _ = switch (repr) {
+                    .echo => |echo| icmp.emitEcho(echo, payload, buf) catch return,
+                    .other => |other| icmp.emitOther(other, payload, buf) catch return,
                 };
             }
-            pkt.addr = src_addr;
         }
 
-        pub fn peekDstAddr(self: *const Self) ?Ip.Address {
-            const slice = self.tx.getAllocated(0, 1);
-            if (slice.len == 0) return null;
-            return slice[0].addr;
+        pub fn peekDstAddr(self: *Self) ?Ip.Address {
+            const result = self.tx.peek() catch return null;
+            return result.header.addr;
         }
 
         pub fn dispatch(self: *Self) ?DispatchResult {
-            const pkt = self.tx.dequeueOne() catch return null;
+            const result = self.tx.dequeue() catch return null;
             return .{
-                .payload = pkt.payload[0..pkt.payload_len],
-                .dst_addr = pkt.addr,
+                .payload = result.payload,
+                .dst_addr = result.header.addr,
                 .hop_limit = self.hop_limit,
             };
         }
@@ -257,8 +255,7 @@ pub fn Socket(comptime Ip: type, comptime config: Config) type {
 
 const testing = std.testing;
 
-const TestConfig = Config{ .payload_size = 64 };
-const TestSocket = Socket(ipv4, TestConfig);
+const TestSocket = Socket(ipv4);
 
 const LOCAL_PORT: u16 = 53;
 const LOCAL_ADDR: ipv4.Address = .{ 192, 168, 1, 1 };
@@ -266,6 +263,25 @@ const REMOTE_ADDR: ipv4.Address = .{ 192, 168, 1, 2 };
 const ECHO_IDENT: u16 = 0x1234;
 const ECHO_SEQ: u16 = 0x5678;
 const ECHO_DATA = [_]u8{0xff} ** 16;
+
+fn makeSocket(
+    comptime rx_meta_n: usize,
+    comptime rx_payload_n: usize,
+    comptime tx_meta_n: usize,
+    comptime tx_payload_n: usize,
+) TestSocket {
+    const S = struct {
+        var rx_meta: [rx_meta_n]TestSocket.PacketMeta = .{TestSocket.PacketMeta{}} ** rx_meta_n;
+        var rx_payload: [rx_payload_n]u8 = .{0} ** rx_payload_n;
+        var tx_meta: [tx_meta_n]TestSocket.PacketMeta = .{TestSocket.PacketMeta{}} ** tx_meta_n;
+        var tx_payload: [tx_payload_n]u8 = .{0} ** tx_payload_n;
+    };
+    S.rx_meta = .{TestSocket.PacketMeta{}} ** rx_meta_n;
+    S.rx_payload = .{0} ** rx_payload_n;
+    S.tx_meta = .{TestSocket.PacketMeta{}} ** tx_meta_n;
+    S.tx_payload = .{0} ** tx_payload_n;
+    return TestSocket.init(&S.rx_meta, &S.rx_payload, &S.tx_meta, &S.tx_payload);
+}
 
 fn buildEchoPacket(buf: []u8) []const u8 {
     const echo_repr = icmp.EchoRepr{
@@ -281,9 +297,7 @@ fn buildEchoPacket(buf: []u8) []const u8 {
 
 // [smoltcp:socket/icmp.rs:test_send_unaddressable]
 test "send rejects unaddressable destination" {
-    var rx: [0]TestSocket.Packet = undefined;
-    var tx: [1]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx, &tx);
+    var s = makeSocket(0, 0, 1, 64);
 
     try testing.expectError(error.Unaddressable, s.sendSlice("abcdef", ipv4.UNSPECIFIED));
     try s.sendSlice("abcdef", REMOTE_ADDR);
@@ -291,9 +305,7 @@ test "send rejects unaddressable destination" {
 
 // [smoltcp:socket/icmp.rs:test_send_dispatch]
 test "send and dispatch outbound packet" {
-    var rx: [0]TestSocket.Packet = undefined;
-    var tx: [1]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx, &tx);
+    var s = makeSocket(0, 0, 1, 64);
 
     try testing.expect(s.canSend());
     try testing.expect(s.dispatch() == null);
@@ -319,9 +331,7 @@ test "send and dispatch outbound packet" {
 
 // [smoltcp:socket/icmp.rs:test_set_hop_limit_v4]
 test "hop limit propagates to dispatch" {
-    var rx: [0]TestSocket.Packet = undefined;
-    var tx: [1]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx, &tx);
+    var s = makeSocket(0, 0, 1, 64);
 
     var echo_buf: [24]u8 = undefined;
     const echo_bytes = buildEchoPacket(&echo_buf);
@@ -335,9 +345,7 @@ test "hop limit propagates to dispatch" {
 
 // [smoltcp:socket/icmp.rs:test_recv_process]
 test "process inbound and recv" {
-    var rx_buf: [1]TestSocket.Packet = undefined;
-    var tx_buf: [1]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx_buf, &tx_buf);
+    var s = makeSocket(1, 128, 1, 64);
     try s.bind(.{ .ident = ECHO_IDENT });
 
     try testing.expect(!s.canRecv());
@@ -356,7 +364,7 @@ test "process inbound and recv" {
     s.process(REMOTE_ADDR, LOCAL_ADDR, echo_repr, &ECHO_DATA);
     try testing.expect(s.canRecv());
 
-    // Second process to full buffer (rx size 1) is accepted but dropped
+    // Second process to full buffer (rx meta size 1) is accepted but dropped
     try testing.expect(s.accepts(REMOTE_ADDR, LOCAL_ADDR, echo_repr, &ECHO_DATA));
     s.process(REMOTE_ADDR, LOCAL_ADDR, echo_repr, &ECHO_DATA);
 
@@ -373,9 +381,7 @@ test "process inbound and recv" {
 
 // [smoltcp:socket/icmp.rs:test_accept_bad_id]
 test "rejects packet with wrong identifier" {
-    var rx_buf: [1]TestSocket.Packet = undefined;
-    var tx_buf: [1]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx_buf, &tx_buf);
+    var s = makeSocket(1, 128, 1, 64);
     try s.bind(.{ .ident = ECHO_IDENT });
 
     const bad_repr = icmp.Repr{ .echo = .{
@@ -391,20 +397,17 @@ test "rejects packet with wrong identifier" {
 
 // [smoltcp:socket/icmp.rs:test_accepts_udp]
 test "accepts ICMP error for bound UDP port" {
-    var rx_buf: [1]TestSocket.Packet = undefined;
-    var tx_buf: [1]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx_buf, &tx_buf);
+    var s = makeSocket(1, 128, 1, 64);
     try s.bind(.{ .udp = .{ .addr = LOCAL_ADDR, .port = LOCAL_PORT } });
 
     // Construct payload of an ICMP DstUnreachable: embedded IPv4 header + UDP header.
-    // The original packet was sent FROM LOCAL_ADDR:LOCAL_PORT TO REMOTE_ADDR:9090.
     const embedded_payload = [_]u8{
         // IPv4 header (20 bytes): version=4, IHL=5, protocol=UDP(17)
-        0x45, 0x00, 0x00, 0x1C, // ver/IHL, DSCP/ECN, total_len=28
-        0x00, 0x00, 0x00, 0x00, // identification, flags/frag
-        0x40, 0x11, 0x00, 0x00, // TTL=64, protocol=UDP, checksum
-        192,  168,  1,    1, // src = LOCAL_ADDR
-        192,  168,  1,    2, // dst = REMOTE_ADDR
+        0x45, 0x00, 0x00, 0x1C,
+        0x00, 0x00, 0x00, 0x00,
+        0x40, 0x11, 0x00, 0x00,
+        192,  168,  1,    1,
+        192,  168,  1,    2,
         // UDP header (8 bytes)
         0x00, 0x35, // src_port = 53 (LOCAL_PORT)
         0x23, 0x82, // dst_port = 9090
@@ -414,14 +417,13 @@ test "accepts ICMP error for bound UDP port" {
 
     const icmp_repr = icmp.Repr{ .other = .{
         .icmp_type = .dest_unreachable,
-        .code = 3, // port unreachable
+        .code = 3,
         .checksum = 0,
         .data = 0,
     } };
 
     try testing.expect(!s.canRecv());
 
-    // Verify accepts matches the bound UDP port
     try testing.expect(s.accepts(REMOTE_ADDR, LOCAL_ADDR, icmp_repr, &embedded_payload));
     s.process(REMOTE_ADDR, LOCAL_ADDR, icmp_repr, &embedded_payload);
     try testing.expect(s.canRecv());
@@ -439,9 +441,7 @@ test "accepts ICMP error for bound UDP port" {
 
 // (original)
 test "pollAt returns ZERO when tx queued, null when empty" {
-    var rx: [0]TestSocket.Packet = undefined;
-    var tx: [1]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx, &tx);
+    var s = makeSocket(0, 0, 1, 64);
 
     try testing.expectEqual(@as(?Instant, null), s.pollAt());
 

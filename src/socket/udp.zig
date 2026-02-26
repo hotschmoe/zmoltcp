@@ -1,15 +1,14 @@
 // UDP socket: message-oriented datagram send/receive.
 //
-// Implements a connectionless UDP socket with packet-level buffering.
-// Each packet is stored as a fixed-size struct in a RingBuffer(Packet),
-// avoiding the complexity of smoltcp's dual-ring PacketBuffer.
+// Uses dual-ring PacketBuffer for variable-length datagram storage,
+// matching smoltcp's PacketBuffer design.
 //
 // [smoltcp:socket/udp.rs]
 
 const std = @import("std");
 const ip_generic = @import("../wire/ip.zig");
 const ipv4 = @import("../wire/ipv4.zig");
-const ring_buffer_mod = @import("../storage/ring_buffer.zig");
+const packet_buffer_mod = @import("../storage/packet_buffer.zig");
 const time = @import("../time.zig");
 const iface_mod = @import("../iface.zig");
 
@@ -25,18 +24,10 @@ pub const UdpRepr = struct {
 };
 
 // -------------------------------------------------------------------------
-// Config
-// -------------------------------------------------------------------------
-
-pub const Config = struct {
-    payload_size: comptime_int,
-};
-
-// -------------------------------------------------------------------------
 // Socket
 // -------------------------------------------------------------------------
 
-pub fn Socket(comptime Ip: type, comptime config: Config) type {
+pub fn Socket(comptime Ip: type) type {
     comptime ip_generic.assertIsIp(Ip);
     return struct {
         const Self = @This();
@@ -49,16 +40,11 @@ pub fn Socket(comptime Ip: type, comptime config: Config) type {
             local_addr: ?Ip.Address = null,
         };
 
-        pub const Packet = struct {
-            payload: [config.payload_size]u8 = undefined,
-            payload_len: usize = 0,
-            meta: Metadata = .{},
-        };
+        pub const PacketMeta = packet_buffer_mod.PacketMeta(Metadata);
+        const PktBuf = packet_buffer_mod.PacketBuffer(Metadata);
 
-        const RingBuffer = ring_buffer_mod.RingBuffer(Packet);
-
-        rx: RingBuffer,
-        tx: RingBuffer,
+        rx: PktBuf,
+        tx: PktBuf,
         local_endpoint: ListenEndpoint,
         hop_limit: ?u8,
 
@@ -88,10 +74,15 @@ pub fn Socket(comptime Ip: type, comptime config: Config) type {
 
         // -- Init / lifecycle --
 
-        pub fn init(rx_storage: []Packet, tx_storage: []Packet) Self {
+        pub fn init(
+            rx_meta: []PacketMeta,
+            rx_payload: []u8,
+            tx_meta: []PacketMeta,
+            tx_payload: []u8,
+        ) Self {
             return .{
-                .rx = RingBuffer.init(rx_storage),
-                .tx = RingBuffer.init(tx_storage),
+                .rx = PktBuf.init(rx_meta, rx_payload),
+                .tx = PktBuf.init(tx_meta, tx_payload),
                 .local_endpoint = .{},
                 .hop_limit = null,
             };
@@ -105,8 +96,8 @@ pub fn Socket(comptime Ip: type, comptime config: Config) type {
 
         pub fn close(self: *Self) void {
             self.local_endpoint = .{};
-            self.rx.clear();
-            self.tx.clear();
+            self.rx.reset();
+            self.tx.reset();
         }
 
         pub fn isOpen(self: Self) bool {
@@ -134,36 +125,31 @@ pub fn Socket(comptime Ip: type, comptime config: Config) type {
             if (self.local_endpoint.port == 0) return error.Unaddressable;
             if (Ip.isUnspecified(meta.endpoint.addr)) return error.Unaddressable;
             if (meta.endpoint.port == 0) return error.Unaddressable;
-            if (data.len > config.payload_size) return error.BufferFull;
 
-            const pkt = self.tx.enqueueOne() catch return error.BufferFull;
-            @memcpy(pkt.payload[0..data.len], data);
-            pkt.payload_len = data.len;
-            pkt.meta = .{
+            const buf = self.tx.enqueue(data.len, .{
                 .endpoint = meta.endpoint,
                 .local_addr = meta.local_addr,
-            };
+            }) catch return error.BufferFull;
+            @memcpy(buf[0..data.len], data);
         }
 
         // -- Receive --
 
         pub fn recvSlice(self: *Self, buf: []u8) RecvError!RecvResult {
-            const pkt = self.rx.dequeueOne() catch return error.Exhausted;
-            if (buf.len < pkt.payload_len) return error.Truncated;
-            @memcpy(buf[0..pkt.payload_len], pkt.payload[0..pkt.payload_len]);
+            const result = self.rx.dequeue() catch return error.Exhausted;
+            if (buf.len < result.payload.len) return error.Truncated;
+            @memcpy(buf[0..result.payload.len], result.payload);
             return .{
-                .data_len = pkt.payload_len,
-                .meta = pkt.meta,
+                .data_len = result.payload.len,
+                .meta = result.header,
             };
         }
 
         pub fn peek(self: *Self) RecvError!PeekResult {
-            const slice = self.rx.getAllocated(0, 1);
-            if (slice.len == 0) return error.Exhausted;
-            const pkt = &slice[0];
+            const result = self.rx.peek() catch return error.Exhausted;
             return .{
-                .payload = pkt.payload[0..pkt.payload_len],
-                .meta = pkt.meta,
+                .payload = result.payload,
+                .meta = result.header.*,
             };
         }
 
@@ -196,35 +182,31 @@ pub fn Socket(comptime Ip: type, comptime config: Config) type {
         }
 
         pub fn process(self: *Self, src_addr: Ip.Address, dst_addr: Ip.Address, repr: UdpRepr, payload: []const u8) void {
-            const pkt = self.rx.enqueueOne() catch return;
-            const copy_len = @min(payload.len, config.payload_size);
-            @memcpy(pkt.payload[0..copy_len], payload[0..copy_len]);
-            pkt.payload_len = copy_len;
-            pkt.meta = .{
+            const buf = self.rx.enqueue(payload.len, .{
                 .endpoint = .{ .addr = src_addr, .port = repr.src_port },
                 .local_addr = dst_addr,
-            };
+            }) catch return;
+            @memcpy(buf[0..payload.len], payload);
         }
 
-        pub fn peekDstAddr(self: *const Self) ?Ip.Address {
-            const slice = self.tx.getAllocated(0, 1);
-            if (slice.len == 0) return null;
-            return slice[0].meta.endpoint.addr;
+        pub fn peekDstAddr(self: *Self) ?Ip.Address {
+            const result = self.tx.peek() catch return null;
+            return result.header.endpoint.addr;
         }
 
         pub fn dispatch(self: *Self) ?DispatchResult {
-            const pkt = self.tx.dequeueOne() catch return null;
-            const src_addr = pkt.meta.local_addr orelse
+            const result = self.tx.dequeue() catch return null;
+            const src_addr = result.header.local_addr orelse
                 (self.local_endpoint.addr orelse Ip.UNSPECIFIED);
             return .{
                 .repr = .{
                     .src_port = self.local_endpoint.port,
-                    .dst_port = pkt.meta.endpoint.port,
+                    .dst_port = result.header.endpoint.port,
                 },
                 .src_addr = src_addr,
-                .dst_addr = pkt.meta.endpoint.addr,
+                .dst_addr = result.header.endpoint.addr,
                 .hop_limit = self.hop_limit,
-                .payload = pkt.payload[0..pkt.payload_len],
+                .payload = result.payload,
             };
         }
     };
@@ -236,8 +218,7 @@ pub fn Socket(comptime Ip: type, comptime config: Config) type {
 
 const testing = std.testing;
 
-const TestConfig = Config{ .payload_size = 16 };
-const TestSocket = Socket(ipv4, TestConfig);
+const TestSocket = Socket(ipv4);
 
 const LOCAL_PORT: u16 = 53;
 const REMOTE_PORT: u16 = 49500;
@@ -250,28 +231,41 @@ const REMOTE_END = TestSocket.Endpoint{ .addr = REMOTE_ADDR, .port = REMOTE_PORT
 
 const PAYLOAD = "abcdef";
 
+fn makeSocket(
+    comptime rx_meta_n: usize,
+    comptime rx_payload_n: usize,
+    comptime tx_meta_n: usize,
+    comptime tx_payload_n: usize,
+) TestSocket {
+    const S = struct {
+        var rx_meta: [rx_meta_n]TestSocket.PacketMeta = .{TestSocket.PacketMeta{}} ** rx_meta_n;
+        var rx_payload: [rx_payload_n]u8 = .{0} ** rx_payload_n;
+        var tx_meta: [tx_meta_n]TestSocket.PacketMeta = .{TestSocket.PacketMeta{}} ** tx_meta_n;
+        var tx_payload: [tx_payload_n]u8 = .{0} ** tx_payload_n;
+    };
+    S.rx_meta = .{TestSocket.PacketMeta{}} ** rx_meta_n;
+    S.rx_payload = .{0} ** rx_payload_n;
+    S.tx_meta = .{TestSocket.PacketMeta{}} ** tx_meta_n;
+    S.tx_payload = .{0} ** tx_payload_n;
+    return TestSocket.init(&S.rx_meta, &S.rx_payload, &S.tx_meta, &S.tx_payload);
+}
+
 // [smoltcp:socket/udp.rs:test_bind_unaddressable]
 test "bind rejects port 0" {
-    var rx: [0]TestSocket.Packet = undefined;
-    var tx: [0]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx, &tx);
+    var s = makeSocket(0, 0, 0, 0);
     try testing.expectError(error.Unaddressable, s.bind(.{ .port = 0 }));
 }
 
 // [smoltcp:socket/udp.rs:test_bind_twice]
 test "bind twice fails" {
-    var rx: [0]TestSocket.Packet = undefined;
-    var tx: [0]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx, &tx);
+    var s = makeSocket(0, 0, 0, 0);
     try s.bind(.{ .port = 1 });
     try testing.expectError(error.InvalidState, s.bind(.{ .port = 2 }));
 }
 
 // [smoltcp:socket/udp.rs:test_set_hop_limit_zero]
 test "set hop limit zero rejected" {
-    var rx: [0]TestSocket.Packet = undefined;
-    var tx: [1]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx, &tx);
+    var s = makeSocket(0, 0, 1, 64);
     try testing.expectError(error.InvalidHopLimit, s.setHopLimit(0));
     try s.setHopLimit(42);
     try testing.expectEqual(@as(?u8, 42), s.hop_limit);
@@ -281,9 +275,7 @@ test "set hop limit zero rejected" {
 
 // [smoltcp:socket/udp.rs:test_send_unaddressable]
 test "send before bind and with bad addresses" {
-    var rx: [0]TestSocket.Packet = undefined;
-    var tx: [1]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx, &tx);
+    var s = makeSocket(0, 0, 1, 64);
 
     try testing.expectError(error.Unaddressable, s.sendSlice(PAYLOAD, .{ .endpoint = REMOTE_END }));
 
@@ -302,9 +294,7 @@ test "send before bind and with bad addresses" {
 
 // [smoltcp:socket/udp.rs:test_send_with_source]
 test "send with explicit local address" {
-    var rx: [0]TestSocket.Packet = undefined;
-    var tx: [1]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx, &tx);
+    var s = makeSocket(0, 0, 1, 64);
     try s.bind(.{ .port = LOCAL_PORT });
     try s.sendSlice(PAYLOAD, .{
         .endpoint = REMOTE_END,
@@ -314,9 +304,7 @@ test "send with explicit local address" {
 
 // [smoltcp:socket/udp.rs:test_send_dispatch]
 test "send and dispatch outbound packet" {
-    var rx: [0]TestSocket.Packet = undefined;
-    var tx: [1]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx, &tx);
+    var s = makeSocket(0, 0, 1, 64);
     try s.bind(LOCAL_END);
 
     try testing.expect(s.canSend());
@@ -339,9 +327,7 @@ test "send and dispatch outbound packet" {
 
 // [smoltcp:socket/udp.rs:test_recv_process]
 test "process inbound and recv" {
-    var rx_buf: [1]TestSocket.Packet = undefined;
-    var tx_buf: [0]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx_buf, &tx_buf);
+    var s = makeSocket(1, 64, 0, 0);
     try s.bind(.{ .port = LOCAL_PORT });
 
     try testing.expect(!s.canRecv());
@@ -365,9 +351,7 @@ test "process inbound and recv" {
 
 // [smoltcp:socket/udp.rs:test_peek_process]
 test "peek returns data without consuming" {
-    var rx_buf: [1]TestSocket.Packet = undefined;
-    var tx_buf: [0]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx_buf, &tx_buf);
+    var s = makeSocket(1, 64, 0, 0);
     try s.bind(.{ .port = LOCAL_PORT });
 
     try testing.expectError(error.Exhausted, s.peek());
@@ -387,9 +371,7 @@ test "peek returns data without consuming" {
 
 // [smoltcp:socket/udp.rs:test_recv_truncated_slice]
 test "recv_slice truncated with small buffer" {
-    var rx_buf: [1]TestSocket.Packet = undefined;
-    var tx_buf: [0]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx_buf, &tx_buf);
+    var s = makeSocket(1, 64, 0, 0);
     try s.bind(.{ .port = LOCAL_PORT });
 
     const repr = UdpRepr{ .src_port = REMOTE_PORT, .dst_port = LOCAL_PORT };
@@ -401,9 +383,7 @@ test "recv_slice truncated with small buffer" {
 
 // [smoltcp:socket/udp.rs:test_peek_truncated_slice]
 test "peek_slice non-destructive, recv_slice destructive" {
-    var rx_buf: [1]TestSocket.Packet = undefined;
-    var tx_buf: [0]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx_buf, &tx_buf);
+    var s = makeSocket(1, 64, 0, 0);
     try s.bind(.{ .port = LOCAL_PORT });
 
     const repr = UdpRepr{ .src_port = REMOTE_PORT, .dst_port = LOCAL_PORT };
@@ -417,9 +397,7 @@ test "peek_slice non-destructive, recv_slice destructive" {
 
 // [smoltcp:socket/udp.rs:test_set_hop_limit]
 test "hop limit propagates to dispatch" {
-    var rx: [0]TestSocket.Packet = undefined;
-    var tx: [1]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx, &tx);
+    var s = makeSocket(0, 0, 1, 64);
     try s.bind(LOCAL_END);
 
     try s.setHopLimit(0x2a);
@@ -431,9 +409,7 @@ test "hop limit propagates to dispatch" {
 
 // [smoltcp:socket/udp.rs:test_doesnt_accept_wrong_port]
 test "rejects packet with wrong destination port" {
-    var rx_buf: [1]TestSocket.Packet = undefined;
-    var tx_buf: [0]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx_buf, &tx_buf);
+    var s = makeSocket(1, 64, 0, 0);
     try s.bind(.{ .port = LOCAL_PORT });
 
     const good = UdpRepr{ .src_port = REMOTE_PORT, .dst_port = LOCAL_PORT };
@@ -445,28 +421,22 @@ test "rejects packet with wrong destination port" {
 
 // [smoltcp:socket/udp.rs:test_doesnt_accept_wrong_ip]
 test "port-only bind accepts any addr; addr+port rejects wrong" {
-    var rx1: [1]TestSocket.Packet = undefined;
-    var tx1: [0]TestSocket.Packet = undefined;
-    var port_only = TestSocket.init(&rx1, &tx1);
-    try port_only.bind(.{ .port = LOCAL_PORT });
+    var s1 = makeSocket(1, 64, 0, 0);
+    try s1.bind(.{ .port = LOCAL_PORT });
 
     const repr = UdpRepr{ .src_port = REMOTE_PORT, .dst_port = LOCAL_PORT };
-    try testing.expect(port_only.accepts(REMOTE_ADDR, OTHER_ADDR, repr));
+    try testing.expect(s1.accepts(REMOTE_ADDR, OTHER_ADDR, repr));
 
-    var rx2: [1]TestSocket.Packet = undefined;
-    var tx2: [0]TestSocket.Packet = undefined;
-    var ip_bound = TestSocket.init(&rx2, &tx2);
-    try ip_bound.bind(LOCAL_END);
+    var s2 = makeSocket(1, 64, 0, 0);
+    try s2.bind(LOCAL_END);
 
-    try testing.expect(!ip_bound.accepts(REMOTE_ADDR, OTHER_ADDR, repr));
-    try testing.expect(ip_bound.accepts(REMOTE_ADDR, LOCAL_ADDR, repr));
+    try testing.expect(!s2.accepts(REMOTE_ADDR, OTHER_ADDR, repr));
+    try testing.expect(s2.accepts(REMOTE_ADDR, LOCAL_ADDR, repr));
 }
 
 // [smoltcp:socket/udp.rs:test_send_large_packet]
 test "payload exceeding capacity returns BufferFull" {
-    var rx: [0]TestSocket.Packet = undefined;
-    var tx: [4]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx, &tx);
+    var s = makeSocket(0, 0, 4, 16);
     try s.bind(LOCAL_END);
 
     const too_large = "01234567890abcdefX";
@@ -477,9 +447,7 @@ test "payload exceeding capacity returns BufferFull" {
 
 // [smoltcp:socket/udp.rs:test_process_empty_payload]
 test "zero-length datagram is valid" {
-    var rx_buf: [1]TestSocket.Packet = undefined;
-    var tx_buf: [0]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx_buf, &tx_buf);
+    var s = makeSocket(1, 64, 0, 0);
     try s.bind(.{ .port = LOCAL_PORT });
 
     const repr = UdpRepr{ .src_port = REMOTE_PORT, .dst_port = LOCAL_PORT };
@@ -493,9 +461,7 @@ test "zero-length datagram is valid" {
 
 // [smoltcp:socket/udp.rs:test_closing]
 test "close resets socket" {
-    var rx_buf: [1]TestSocket.Packet = undefined;
-    var tx_buf: [0]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx_buf, &tx_buf);
+    var s = makeSocket(1, 64, 0, 0);
     try s.bind(.{ .port = LOCAL_PORT });
 
     try testing.expect(s.isOpen());
@@ -505,9 +471,7 @@ test "close resets socket" {
 
 // (original)
 test "pollAt returns ZERO when tx queued, null when empty" {
-    var rx: [0]TestSocket.Packet = undefined;
-    var tx: [1]TestSocket.Packet = undefined;
-    var s = TestSocket.init(&rx, &tx);
+    var s = makeSocket(0, 0, 1, 64);
     try s.bind(LOCAL_END);
 
     try testing.expectEqual(@as(?Instant, null), s.pollAt());

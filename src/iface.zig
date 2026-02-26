@@ -398,6 +398,7 @@ pub const Interface = struct {
     neighbor_cache_v6: NeighborCache(ipv6) = .{},
     now: time.Instant = time.Instant.ZERO,
     any_ip: bool = false,
+    auto_icmp_echo_reply: bool = true,
     multicast_groups: [MAX_MULTICAST_GROUPS]?ipv4.Address = .{null} ** MAX_MULTICAST_GROUPS,
     multicast_groups_v6: [MAX_MULTICAST_GROUPS_V6]?MulticastGroupEntryV6 = .{null} ** MAX_MULTICAST_GROUPS_V6,
     slaac: ?SlaacState = null,
@@ -798,7 +799,7 @@ pub const Interface = struct {
             .igmp => return null, // caller handles via stack
             .udp => return null, // caller handles via processUdp
             .tcp => return null, // caller handles
-            _ => {
+            .ipsec_esp, .ipsec_ah, _ => {
                 if (is_broadcast) return null; // RFC 1122: no ICMP for broadcast
                 return self.icmpProtoUnreachable(ip_repr, ip_payload);
             },
@@ -810,6 +811,7 @@ pub const Interface = struct {
         switch (icmp_repr) {
             .echo => |echo| {
                 if (echo.icmp_type != .echo_request) return null;
+                if (!self.auto_icmp_echo_reply) return null;
                 const echo_data = if (payload_data.len > icmp.HEADER_LEN)
                     payload_data[icmp.HEADER_LEN..]
                 else
@@ -917,7 +919,7 @@ pub const Interface = struct {
             .hop_by_hop => null, // stack handles (requires extension header walking)
             .routing, .fragment, .destination => null, // stack handles extension headers
             .no_next_header => null,
-            _ => self.icmpv6ParamProblem(ip_repr, .unrecognized_nxt_hdr, 6, ip_payload),
+            .ipsec_esp, .ipsec_ah, _ => self.icmpv6ParamProblem(ip_repr, .unrecognized_nxt_hdr, 6, ip_payload),
         };
     }
 
@@ -926,6 +928,7 @@ pub const Interface = struct {
 
         switch (icmpv6_repr) {
             .echo_request => |echo| {
+                if (!self.auto_icmp_echo_reply) return null;
                 const src = if (is_multicast)
                     (self.ipv6Addr() orelse return null)
                 else
@@ -1399,14 +1402,16 @@ test "ICMP error port unreachable" {
 
 // [smoltcp:iface/interface/tests/mod.rs:test_handle_udp_broadcast]
 test "handle UDP broadcast" {
-    const UdpSocket = @import("socket/udp.zig").Socket(ipv4, .{ .payload_size = 64 });
+    const UdpSocket = @import("socket/udp.zig").Socket(ipv4);
     const UdpRepr = @import("socket/udp.zig").UdpRepr;
 
     var iface = testInterface();
 
-    var rx_buf: [1]UdpSocket.Packet = undefined;
-    var tx_buf: [1]UdpSocket.Packet = undefined;
-    var sock = UdpSocket.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]UdpSocket.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSocket.PacketMeta = .{.{}};
+    var tx_payload: [64]u8 = undefined;
+    var sock = UdpSocket.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .port = 68 });
 
     try testing.expect(!sock.canRecv());
@@ -1510,13 +1515,15 @@ test "any_ip accepts ARP for unknown address" {
 
 // [smoltcp:iface/interface/tests/ipv4.rs:test_icmpv4_socket]
 test "ICMP socket receives echo request and auto-reply" {
-    const IcmpSocket = @import("socket/icmp.zig").Socket(ipv4, .{ .payload_size = 128 });
+    const IcmpSocket = @import("socket/icmp.zig").Socket(ipv4);
 
     var iface_inst = testInterface();
 
-    var rx_buf: [1]IcmpSocket.Packet = undefined;
-    var tx_buf: [1]IcmpSocket.Packet = undefined;
-    var sock = IcmpSocket.init(&rx_buf, &tx_buf);
+    var rx_meta: [1]IcmpSocket.PacketMeta = .{.{}};
+    var rx_payload: [128]u8 = undefined;
+    var tx_meta: [1]IcmpSocket.PacketMeta = .{.{}};
+    var tx_payload: [128]u8 = undefined;
+    var sock = IcmpSocket.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .ident = 0x1234 });
 
     const echo_data = [_]u8{0xAA} ** 16;
@@ -2506,4 +2513,63 @@ test "TCP RST suppressed for RST input v6" {
         .hop_limit = 64,
     };
     try testing.expectEqual(@as(?Response, null), iface.processTcpV6(ip_repr, &rst_buf, false));
+}
+
+test "auto_icmp_echo_reply defaults to true (v4 echo reply generated)" {
+    var iface = testInterface();
+    try testing.expect(iface.auto_icmp_echo_reply);
+
+    const icmp_data = [_]u8{ 0xAA, 0x00, 0x00, 0xFF };
+    const icmp_echo = icmp.EchoRepr{
+        .icmp_type = .echo_request,
+        .code = 0,
+        .checksum = 0,
+        .identifier = 0x1234,
+        .sequence = 0xABCD,
+    };
+    var icmp_buf: [icmp.HEADER_LEN + 4]u8 = undefined;
+    _ = icmp.emitEcho(icmp_echo, &icmp_data, &icmp_buf) catch unreachable;
+    const ip_repr = testIpv4Repr(.icmp, REMOTE_IP, LOCAL_IP, icmp_buf.len);
+    const result = iface.processIcmp(ip_repr, &icmp_buf, false);
+    try testing.expect(result != null);
+}
+
+test "auto_icmp_echo_reply disabled suppresses v4 echo reply" {
+    var iface = testInterface();
+    iface.auto_icmp_echo_reply = false;
+
+    const icmp_data = [_]u8{ 0xAA, 0x00, 0x00, 0xFF };
+    const icmp_echo = icmp.EchoRepr{
+        .icmp_type = .echo_request,
+        .code = 0,
+        .checksum = 0,
+        .identifier = 0x1234,
+        .sequence = 0xABCD,
+    };
+    var icmp_buf: [icmp.HEADER_LEN + 4]u8 = undefined;
+    _ = icmp.emitEcho(icmp_echo, &icmp_data, &icmp_buf) catch unreachable;
+    const ip_repr = testIpv4Repr(.icmp, REMOTE_IP, LOCAL_IP, icmp_buf.len);
+    try testing.expectEqual(@as(?Response, null), iface.processIcmp(ip_repr, &icmp_buf, false));
+}
+
+test "auto_icmp_echo_reply disabled suppresses v6 echo reply" {
+    var iface = testV6Interface();
+    iface.auto_icmp_echo_reply = false;
+
+    const echo_data = [_]u8{ 0xDE, 0xAD };
+    var icmp_buf: [256]u8 = undefined;
+    const repr = icmpv6.Repr{ .echo_request = .{
+        .ident = 0x1234,
+        .seq_no = 1,
+        .data = &echo_data,
+    } };
+    const icmp_len = icmpv6.emit(repr, REMOTE_V6_LL, LOCAL_V6_LL, &icmp_buf) catch unreachable;
+    const ip_repr = ipv6.Repr{
+        .src_addr = REMOTE_V6_LL,
+        .dst_addr = LOCAL_V6_LL,
+        .next_header = .icmpv6,
+        .payload_len = @intCast(icmp_len),
+        .hop_limit = 64,
+    };
+    try testing.expectEqual(@as(?Response, null), iface.processIcmpv6(ip_repr, icmp_buf[0..icmp_len], false));
 }

@@ -25,11 +25,14 @@ pub const wire = struct {
     pub const ndiscoption = @import("wire/ndiscoption.zig");
     pub const ndisc = @import("wire/ndisc.zig");
     pub const mld = @import("wire/mld.zig");
+    pub const ipsec_esp = @import("wire/ipsec_esp.zig");
+    pub const ipsec_ah = @import("wire/ipsec_ah.zig");
 };
 
 pub const storage = struct {
     pub const ring_buffer = @import("storage/ring_buffer.zig");
     pub const assembler = @import("storage/assembler.zig");
+    pub const packet_buffer = @import("storage/packet_buffer.zig");
 };
 
 pub const time = @import("time.zig");
@@ -63,6 +66,7 @@ test {
     _ = @import("wire/icmp.zig");
     _ = @import("storage/ring_buffer.zig");
     _ = @import("storage/assembler.zig");
+    _ = @import("storage/packet_buffer.zig");
     _ = @import("socket/udp.zig");
     _ = @import("socket/icmp.zig");
     _ = @import("wire/tcp.zig");
@@ -83,6 +87,8 @@ test {
     _ = @import("wire/ndiscoption.zig");
     _ = @import("wire/ndisc.zig");
     _ = @import("wire/mld.zig");
+    _ = @import("wire/ipsec_esp.zig");
+    _ = @import("wire/ipsec_ah.zig");
     _ = @import("iface.zig");
     _ = @import("fragmentation.zig");
     _ = @import("stack.zig");

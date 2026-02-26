@@ -5,12 +5,14 @@
 const std = @import("std");
 const ip_generic = @import("../wire/ip.zig");
 const ipv4 = @import("../wire/ipv4.zig");
+const ipv6 = @import("../wire/ipv6.zig");
 const wire = @import("../wire/dns.zig");
 const time = @import("../time.zig");
 const Instant = time.Instant;
 const Duration = time.Duration;
 
 pub const DNS_PORT: u16 = 53;
+pub const MDNS_PORT: u16 = 5353;
 pub const MAX_SERVER_COUNT: usize = 4;
 pub const MAX_RESULT_COUNT: usize = 4;
 pub const MAX_NAME_SIZE: usize = wire.MAX_NAME_SIZE;
@@ -40,6 +42,15 @@ pub fn Socket(comptime Ip: type) type {
     return struct {
         const Self = @This();
 
+        const is_v6 = Ip.ADDRESS_LEN == 16;
+
+        pub const mdns_addr: Ip.Address = if (is_v6)
+            // ff02::fb (link-local mDNS multicast)
+            .{ 0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfb }
+        else
+            // 224.0.0.251
+            .{ 224, 0, 0, 251 };
+
         pub const Addresses = struct {
             addrs: [MAX_RESULT_COUNT]Ip.Address = undefined,
             len: u8 = 0,
@@ -66,6 +77,7 @@ pub fn Socket(comptime Ip: type) type {
             retransmit_at: Instant,
             delay: Duration,
             server_idx: usize,
+            mdns: bool = false,
         };
 
         const QueryState = union(enum) {
@@ -82,6 +94,7 @@ pub fn Socket(comptime Ip: type) type {
             payload: []const u8,
             src_port: u16,
             dst_ip: Ip.Address,
+            dst_port: u16 = DNS_PORT,
         };
 
         queries: []QuerySlot,
@@ -150,7 +163,20 @@ pub fn Socket(comptime Ip: type) type {
             raw_name[pos] = 0x00;
             pos += 1;
 
-            return self.startQueryRaw(raw_name[0..pos], type_);
+            const handle = try self.startQueryRaw(raw_name[0..pos], type_);
+            if (isLocalName(work_name)) {
+                var pq = self.queries[handle.index].state.?.pending;
+                pq.mdns = true;
+                self.queries[handle.index].state = .{ .pending = pq };
+            }
+            return handle;
+        }
+
+        fn isLocalName(name: []const u8) bool {
+            // After trailing dot is stripped, mDNS names end with ".local"
+            if (name.len >= 6 and std.mem.eql(u8, name[name.len - 6 ..], ".local")) return true;
+            if (std.mem.eql(u8, name, "local")) return true;
+            return false;
         }
 
         pub fn startQueryRaw(self: *Self, raw_name: []const u8, type_: wire.Type) StartQueryError!QueryHandle {
@@ -272,13 +298,20 @@ pub fn Socket(comptime Ip: type) type {
                 if (pq.timeout_at == null) pq.timeout_at = now.add(RETRANSMIT_TIMEOUT);
 
                 if (pq.timeout_at.?.lessThan(now)) {
-                    pq.timeout_at = now.add(RETRANSMIT_TIMEOUT);
-                    pq.retransmit_at = Instant.ZERO;
-                    pq.delay = RETRANSMIT_DELAY;
-                    pq.server_idx += 1;
+                    if (pq.mdns) {
+                        // mDNS: just reset retransmit, no server rotation
+                        pq.timeout_at = now.add(RETRANSMIT_TIMEOUT);
+                        pq.retransmit_at = Instant.ZERO;
+                        pq.delay = RETRANSMIT_DELAY;
+                    } else {
+                        pq.timeout_at = now.add(RETRANSMIT_TIMEOUT);
+                        pq.retransmit_at = Instant.ZERO;
+                        pq.delay = RETRANSMIT_DELAY;
+                        pq.server_idx += 1;
+                    }
                 }
 
-                if (pq.server_idx >= self.server_count) {
+                if (!pq.mdns and pq.server_idx >= self.server_count) {
                     slot.state = .failure;
                     continue;
                 }
@@ -308,6 +341,14 @@ pub fn Socket(comptime Ip: type) type {
 
                 slot.state = .{ .pending = pq };
 
+                if (pq.mdns) {
+                    return .{
+                        .payload = buf[0..pkt_len],
+                        .src_port = pq.port,
+                        .dst_ip = mdns_addr,
+                        .dst_port = MDNS_PORT,
+                    };
+                }
                 return .{
                     .payload = buf[0..pkt_len],
                     .src_port = pq.port,
@@ -703,4 +744,54 @@ test "cancel query frees slot" {
     // Slot is reusable
     const h2 = try s.startQuery("b.com", .a);
     try testing.expectEqual(h1.index, h2.index);
+}
+
+// (original)
+test "mDNS: .local suffix sets mdns flag" {
+    var ctx = createSocket();
+    var s = &ctx.socket;
+
+    const handle = try s.startQuery("myprinter.local", .a);
+    const pq = s.queries[handle.index].state.?.pending;
+    try testing.expect(pq.mdns);
+}
+
+// (original)
+test "mDNS: non-local name does not set mdns flag" {
+    var ctx = createSocket();
+    var s = &ctx.socket;
+
+    const handle = try s.startQuery("google.com", .a);
+    const pq = s.queries[handle.index].state.?.pending;
+    try testing.expect(!pq.mdns);
+}
+
+// (original)
+test "mDNS: dispatch uses multicast addr and port 5353" {
+    var ctx = createSocket();
+    var s = &ctx.socket;
+    const buf = ctx.buf;
+
+    _ = try s.startQuery("myprinter.local.", .a);
+    const result = s.dispatch(Instant.fromMillis(0), buf) orelse return error.TestExpectedEqual;
+
+    try testing.expectEqualSlices(u8, &[4]u8{ 224, 0, 0, 251 }, &result.dst_ip);
+    try testing.expectEqual(@as(u16, 5353), result.dst_port);
+}
+
+// (original)
+test "mDNS: no server rotation on timeout" {
+    var ctx = createSocket();
+    var s = &ctx.socket;
+    const buf = ctx.buf;
+
+    _ = try s.startQuery("myprinter.local", .a);
+
+    const r1 = s.dispatch(Instant.fromMillis(0), buf) orelse return error.TestExpectedEqual;
+    try testing.expectEqualSlices(u8, &[4]u8{ 224, 0, 0, 251 }, &r1.dst_ip);
+
+    // After timeout, still goes to multicast (no server rotation)
+    const r2 = s.dispatch(Instant.fromSecs(11), buf) orelse return error.TestExpectedEqual;
+    try testing.expectEqualSlices(u8, &[4]u8{ 224, 0, 0, 251 }, &r2.dst_ip);
+    try testing.expectEqual(@as(u16, 5353), r2.dst_port);
 }
