@@ -2,7 +2,7 @@
 
 Tracks zmoltcp tests against their smoltcp reference implementations.
 
-**Total: 726 tests passing** (725 named + 1 root import test)
+**Total: 818 tests passing** (817 named + 1 root import test)
 
 ## Summary
 
@@ -43,9 +43,14 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | wire/icmpv6 | 6 | 9 | 0 | 9 | PASS |
 | iface | 24 | 62 | 1 | 62 | PASS |
 | phy | 0 | 16 | 0 | 16 | PASS |
-| fragmentation | 3 | 12 | 0 | 12 | PASS |
-| stack | 2 | 110 | 0 | 110 | PASS |
-| **Total** | | **725** | **8** | **725** | **PASS** |
+| fragmentation | 3 | 16 | 0 | 16 | PASS |
+| wire/ieee802154 | 5 | 11 | 0 | 11 | PASS |
+| wire/sixlowpan | 6 | 20 | 0 | 20 | PASS |
+| wire/sixlowpan_frag | 0 | 8 | 0 | 8 | PASS |
+| wire/rpl | 0 | 19 | 0 | 19 | PASS |
+| rpl | 0 | 26 | 0 | 26 | PASS |
+| stack | 2 | 114 | 0 | 114 | PASS |
+| **Total** | | **817** | **8** | **817** | **PASS** |
 
 ## Wire Layer Tests
 
@@ -315,6 +320,112 @@ Tracks zmoltcp tests against their smoltcp reference implementations.
 | (original) | "mld query via icmpv6" | PASS |
 | (original) | "truncated message" | PASS |
 | (original) | "verifyChecksum" | PASS |
+
+### wire/ieee802154.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| wire/ieee802154.rs:extended_addr | "parse extended addresses" | PASS |
+| wire/ieee802154.rs:short_addr | "parse short addresses" | PASS |
+| wire/ieee802154.rs:zolertia_remote | "parse zolertia remote" | PASS |
+| wire/ieee802154.rs:security | "parse frame with security" | PASS |
+| (original) | "short addr roundtrip" | PASS |
+| (original) | "extended addr roundtrip with compression" | PASS |
+| (original) | "broadcast detection" | PASS |
+| (original) | "EUI-64 conversion" | PASS |
+| (original) | "link-local address generation" | PASS |
+| (original) | "parse truncated" | PASS |
+| (original) | "bufferLen matches emit output" | PASS |
+
+### wire/sixlowpan.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| sixlowpan/iphc.rs:iphc_fields (vec 1) | "IPHC parse: TF=11 NH=uncompressed HLIM=64 SAM=11 DAM=11" | PASS |
+| sixlowpan/iphc.rs:iphc_fields (vec 2) | "IPHC parse: NH=compressed CID=1 SAC=1 DAC=1 both fully elided with context" | PASS |
+| (original) | "address resolution: fully elided from extended LL" | PASS |
+| (original) | "address resolution: fully elided from short LL" | PASS |
+| (original) | "address resolution: 16-bit inline" | PASS |
+| (original) | "address resolution: 64-bit inline" | PASS |
+| (original) | "address resolution: unspecified (SAC=1 SAM=00)" | PASS |
+| (original) | "multicast address decompression: 8-bit (ff02::XX)" | PASS |
+| (original) | "multicast address decompression: 32-bit (ffXX::00XX:XXXX)" | PASS |
+| (original) | "multicast address decompression: 48-bit (ffXX::00XX:XXXX:XXXX)" | PASS |
+| (original) | "IPHC emit/parse roundtrip: link-local fully elided" | PASS |
+| (original) | "IPHC emit/parse roundtrip: global addresses (16-byte inline)" | PASS |
+| sixlowpan/nhc.rs:ext_header_nh_inlined | "NHC ext header parse: routing header, NH inline ICMPv6" | PASS |
+| sixlowpan/nhc.rs:ext_header_nh_elided | "NHC ext header parse: routing header, NH compressed" | PASS |
+| (original) | "NHC ext header emit roundtrip" | PASS |
+| sixlowpan/nhc.rs:udp_nhc_fields | "UDP NHC parse: P=00 full ports with checksum" | PASS |
+| (original) | "UDP NHC: P=11 (4-bit ports)" | PASS |
+| (original) | "UDP NHC emit/parse roundtrip" | PASS |
+| (original) | "dispatch type detection" | PASS |
+| (original) | "UDP NHC with elided checksum" | PASS |
+
+### wire/sixlowpan_frag.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| (original) | "first fragment parse and emit roundtrip" | PASS |
+| (original) | "subsequent fragment parse and emit roundtrip" | PASS |
+| (original) | "payloadSlice first fragment" | PASS |
+| (original) | "payloadSlice subsequent fragment" | PASS |
+| (original) | "truncated errors" | PASS |
+| (original) | "malformed dispatch" | PASS |
+| (original) | "bufferLen consistency" | PASS |
+| (original) | "emit buffer too small" | PASS |
+
+### wire/rpl.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| (original) | "InstanceId global encoding" | PASS |
+| (original) | "InstanceId local encoding" | PASS |
+| (original) | "InstanceId global zero" | PASS |
+| (original) | "InstanceId local no dodag_is_destination" | PASS |
+| (original) | "DIS parse and emit roundtrip" | PASS |
+| (original) | "DIO parse and emit roundtrip" | PASS |
+| (original) | "DAO parse and emit without DODAG ID" | PASS |
+| (original) | "DAO parse and emit with DODAG ID" | PASS |
+| (original) | "DAO-ACK parse and emit without DODAG ID" | PASS |
+| (original) | "DAO-ACK parse and emit with DODAG ID" | PASS |
+| (original) | "DodagConfiguration option parse and emit" | PASS |
+| (original) | "RplTarget option parse and emit" | PASS |
+| (original) | "TransitInformation option parse and emit without parent" | PASS |
+| (original) | "TransitInformation option parse and emit with parent" | PASS |
+| (original) | "HopByHop option parse and emit" | PASS |
+| (original) | "OptionIterator walks multiple options" | PASS |
+| (original) | "secure message codes rejected as malformed" | PASS |
+| (original) | "truncated messages" | PASS |
+| (original) | "DIO with grounded flag and preference" | PASS |
+
+## RPL State Machine Tests
+
+### rpl.zig
+| smoltcp Reference | zmoltcp Test | Status |
+|---|---|---|
+| (original) | "sequence counter increment wraps linear 255 to 0" | PASS |
+| (original) | "sequence counter increment wraps circular 127 to 0" | PASS |
+| (original) | "sequence counter increment in linear region" | PASS |
+| (original) | "sequence counter increment in circular region" | PASS |
+| (original) | "sequence counter ordering same region" | PASS |
+| (original) | "sequence counter ordering cross-region" | PASS |
+| (original) | "sequence counter ordering uncomparable" | PASS |
+| (original) | "rank dagRank" | PASS |
+| (original) | "rank ordering" | PASS |
+| (original) | "OF0 computeRank from root" | PASS |
+| (original) | "OF0 computeRank from non-root" | PASS |
+| (original) | "OF0 preferredParent selects lowest dagRank" | PASS |
+| (original) | "OF0 preferredParent empty set" | PASS |
+| (original) | "parent set add find remove" | PASS |
+| (original) | "parent set update in place" | PASS |
+| (original) | "parent set eviction when full" | PASS |
+| (original) | "relations add and find" | PASS |
+| (original) | "relations find missing" | PASS |
+| (original) | "relations remove" | PASS |
+| (original) | "relations purge expired" | PASS |
+| (original) | "relations upsert updates next hop" | PASS |
+| (original) | "trickle timer fires at t_expiration" | PASS |
+| (original) | "trickle timer consistency suppresses transmission" | PASS |
+| (original) | "trickle timer inconsistency resets to i_min" | PASS |
+| (original) | "trickle timer interval doubling" | PASS |
+| (original) | "trickle timer pollAt returns earliest expiration" | PASS |
 
 ## Storage Layer Tests
 
@@ -898,6 +1009,21 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "stack v6 pollAt returns null for idle sockets" | PASS |
 | (original) | "stack v6 two-fragment reassembly delivers to socket" | PASS |
 | (original) | "stack v6 extension header chain walking" | PASS |
+| (original) | "Medium::Ip IPv4 ingress echo reply" | PASS |
+| (original) | "Medium::Ip IPv6 ingress echo reply" | PASS |
+| (original) | "Medium::Ip IPv4 no ARP emitted" | PASS |
+| (original) | "Medium::Ip IPv6 no NDP emitted" | PASS |
+| (original) | "Medium::Ip IPv4 UDP port unreachable" | PASS |
+| (original) | "Medium::Ip IPv4 TCP RST" | PASS |
+| (original) | "Medium::Ip IPv6 TCP RST" | PASS |
+| (original) | "Medium::Ip UDP socket roundtrip" | PASS |
+| (original) | "Medium::Ip TCP socket SYN-ACK" | PASS |
+| (original) | "Medium::Ip IPv4 fragmented egress" | PASS |
+| (original) | "Medium::Ip IPv4 fragmented ingress" | PASS |
+| (original) | "802.15.4 stack compiles and initializes" | PASS |
+| (original) | "802.15.4 IPHC ingress: ICMPv6 echo request produces reply" | PASS |
+| (original) | "802.15.4 PAN ID filtering drops wrong PAN" | PASS |
+| (original) | "802.15.4 non-data frame is dropped" | PASS |
 
 ### phy.zig
 | smoltcp Reference | zmoltcp Test | Status |
@@ -934,6 +1060,10 @@ were never actually run despite being listed here. The test module runs with
 | (original) | "reassembler with v6 keys" | PASS |
 | (original) | "isFragmentV6" | PASS |
 | (original) | "Medium::Ip fragmenter emits raw IP" | PASS |
+| (original) | "FragKey6LoWPAN equality" | PASS |
+| (original) | "FragKey6LoWPAN from short address" | PASS |
+| (original) | "reassembler with 6LoWPAN keys" | PASS |
+| (original) | "SixlowpanFragmenter stage and emit" | PASS |
 
 ## Not Applicable (N/A) Tests
 
@@ -973,14 +1103,8 @@ language differences, API design choices, or out-of-scope features.
 |---|---|
 | test_new_panic | Alloc-dependent behavior (zmoltcp is zero-alloc) |
 
-### Out-of-scope protocol families
-
-The following smoltcp modules are 802.15.4 link layers or split-file patterns
-outside zmoltcp's scope:
+### Out-of-scope split-file patterns
 
 | smoltcp Module | Reason |
 |---|---|
-| wire/sixlowpan.rs, wire/ieee802154.rs | 802.15.4 / 6LoWPAN link layer |
-| wire/rpl.rs | RPL routing (6LoWPAN) |
-| iface/interface/sixlowpan.rs | 6LoWPAN interface |
 | socket/tcp/congestion/no_control.rs | Split files in smoltcp; unified in zmoltcp |
