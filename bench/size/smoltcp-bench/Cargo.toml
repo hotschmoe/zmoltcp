@@ -1,0 +1,37 @@
+[package]
+name = "smoltcp-bench"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies.smoltcp]
+path = "../../../ref/smoltcp"
+default-features = false
+
+[features]
+scenario-a = ["smoltcp/medium-ethernet", "smoltcp/proto-ipv4",
+              "smoltcp/socket-tcp"]
+scenario-b = ["smoltcp/medium-ethernet", "smoltcp/proto-ipv4",
+              "smoltcp/socket-tcp", "smoltcp/socket-udp",
+              "smoltcp/socket-icmp"]
+scenario-c = ["smoltcp/medium-ethernet", "smoltcp/proto-ipv4",
+              "smoltcp/proto-ipv4-fragmentation", "smoltcp/proto-dhcpv4",
+              "smoltcp/proto-dns", "smoltcp/socket-tcp", "smoltcp/socket-udp",
+              "smoltcp/socket-icmp", "smoltcp/socket-dhcpv4",
+              "smoltcp/socket-dns", "smoltcp/socket-raw"]
+scenario-d = ["smoltcp/medium-ethernet", "smoltcp/proto-ipv4",
+              "smoltcp/proto-ipv6", "smoltcp/proto-ipv4-fragmentation",
+              "smoltcp/proto-ipv6-fragmentation", "smoltcp/socket-tcp",
+              "smoltcp/socket-udp", "smoltcp/socket-icmp"]
+scenario-e = ["smoltcp/medium-ethernet", "smoltcp/proto-ipv4", "smoltcp/proto-ipv6",
+              "smoltcp/socket-raw"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
