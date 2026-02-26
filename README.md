@@ -119,6 +119,12 @@ src/
   root.zig               Library entry point (public API)
 ```
 
+examples/
+  loopback_echo.zig    TCP echo on single stack (loopback device)
+  back_to_back.zig     TCP transfer between two stacks (simulated wire)
+  udp_icmp.zig         UDP exchange + ICMP ping (two stacks)
+```
+
 ## Building
 
 ```bash
@@ -154,6 +160,26 @@ zig build test
 # Run with verbose output
 zig build test -- --summary all
 ```
+
+## Integration Demos
+
+Three end-to-end demos exercise the full stack API (sockets -> Stack poll
+loop -> LoopbackDevice) with no manual packet construction. They serve as
+both functional validation and usage documentation.
+
+```bash
+# Run all demos
+zig build demo
+
+# Run with verbose output
+zig build demo -- --summary all
+```
+
+| Demo | File | What it proves |
+|------|------|----------------|
+| TCP loopback echo | `examples/loopback_echo.zig` | Full TCP lifecycle on a single stack: ARP, handshake, data echo, close |
+| TCP back-to-back | `examples/back_to_back.zig` | Two stacks communicate over a simulated wire: ARP discovery, 1KB transfer |
+| UDP + ICMP | `examples/udp_icmp.zig` | UDP datagram exchange and ICMP ping with auto-reply |
 
 ## Using in Your Project
 
