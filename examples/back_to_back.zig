@@ -13,6 +13,7 @@
 //
 // Inspired by smoltcp's netsim examples.
 
+const std = @import("std");
 const zmoltcp = @import("zmoltcp");
 const stack_mod = zmoltcp.stack;
 const tcp_socket = zmoltcp.socket.tcp;
@@ -54,9 +55,15 @@ fn shuttleFrames(dev_a: *Device, dev_b: *Device) void {
     }
 }
 
-test "TCP back-to-back transfer" {
-    const std = @import("std");
+fn earliestPollTime(a: ?Instant, b: ?Instant) ?Instant {
+    if (a) |va| {
+        if (b) |vb| return if (va.lessThan(vb)) va else vb;
+        return va;
+    }
+    return b;
+}
 
+test "TCP back-to-back transfer" {
     var server_rx: [4096]u8 = .{0} ** 4096;
     var server_tx: [4096]u8 = .{0} ** 4096;
     var client_rx: [4096]u8 = .{0} ** 4096;
@@ -79,7 +86,6 @@ test "TCP back-to-back transfer" {
     stack_a.iface.v4.addIpAddr(.{ .address = IP_A, .prefix_len = 24 });
     stack_b.iface.v4.addIpAddr(.{ .address = IP_B, .prefix_len = 24 });
 
-    // Build the test pattern
     var send_data: [DATA_LEN]u8 = undefined;
     generatePattern(&send_data);
 
@@ -99,13 +105,11 @@ test "TCP back-to-back transfer" {
         _ = stack_b.poll(cur_time, &dev_b);
         shuttleFrames(&dev_a, &dev_b);
 
-        // Client: send patterned data when established
         if (client_total_sent < DATA_LEN and client_sock.getState() == .established and client_sock.canSend()) {
             const n = client_sock.sendSlice(send_data[client_total_sent..]) catch 0;
             client_total_sent += n;
         }
 
-        // Server: accumulate received data
         if (!server_echoed and server_sock.getState() == .established and server_sock.canRecv()) {
             var buf: [256]u8 = undefined;
             const n = server_sock.recvSlice(&buf) catch 0;
@@ -118,7 +122,6 @@ test "TCP back-to-back transfer" {
             }
         }
 
-        // Server: once all data received, echo it back
         if (!server_echoed and server_total_recv >= DATA_LEN and server_sock.canSend()) {
             const n = server_sock.sendSlice(server_recv_data[server_echo_sent..DATA_LEN]) catch 0;
             server_echo_sent += n;
@@ -128,7 +131,6 @@ test "TCP back-to-back transfer" {
             }
         }
 
-        // Client: accumulate echoed data
         if (client_total_sent >= DATA_LEN and !client_done and client_sock.canRecv()) {
             var buf: [256]u8 = undefined;
             const n = client_sock.recvSlice(&buf) catch 0;
@@ -145,7 +147,6 @@ test "TCP back-to-back transfer" {
             }
         }
 
-        // Check for completion
         if (client_done and server_echoed) {
             const s_state = server_sock.getState();
             const c_state = client_sock.getState();
@@ -154,18 +155,13 @@ test "TCP back-to-back transfer" {
             if (s_final and c_final) break;
         }
 
-        // Advance time
-        const next_a = stack_a.pollAt();
-        const next_b = stack_b.pollAt();
-        const next = if (next_a) |a| (if (next_b) |b| (if (a.lessThan(b)) a else b) else a) else next_b;
-        if (next) |n| {
-            cur_time = if (n.greaterThanOrEqual(cur_time)) n else cur_time.add(STEP);
+        if (earliestPollTime(stack_a.pollAt(), stack_b.pollAt())) |next| {
+            cur_time = if (next.greaterThanOrEqual(cur_time)) next else cur_time.add(STEP);
         } else {
             cur_time = cur_time.add(STEP);
         }
     }
 
-    // Verify data integrity
     try std.testing.expectEqual(DATA_LEN, server_total_recv);
     try std.testing.expectEqualSlices(u8, &send_data, &server_recv_data);
     try std.testing.expectEqual(DATA_LEN, client_total_recv);

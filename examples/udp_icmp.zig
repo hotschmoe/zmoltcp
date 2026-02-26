@@ -13,6 +13,7 @@
 //        |                                  |
 //   LoopbackDevice A <-- shuttle --> LoopbackDevice B
 
+const std = @import("std");
 const zmoltcp = @import("zmoltcp");
 const stack_mod = zmoltcp.stack;
 const udp_socket = zmoltcp.socket.udp;
@@ -47,16 +48,12 @@ fn shuttleFrames(dev_a: *Device, dev_b: *Device) void {
 }
 
 test "UDP echo between two stacks" {
-    const std = @import("std");
-    const SocketsA = struct { udp4_sockets: []*UdpSock };
-    const SocketsB = struct { udp4_sockets: []*UdpSock };
-    const StackA = stack_mod.Stack(Device, SocketsA);
-    const StackB = stack_mod.Stack(Device, SocketsB);
+    const UdpSockets = struct { udp4_sockets: []*UdpSock };
+    const UdpStack = stack_mod.Stack(Device, UdpSockets);
 
     var dev_a: Device = .{};
     var dev_b: Device = .{};
 
-    // Stack A: UDP socket bound to port 5000
     var a_rx_meta: [2]UdpSock.PacketMeta = .{ .{}, .{} };
     var a_rx_payload: [256]u8 = undefined;
     var a_tx_meta: [2]UdpSock.PacketMeta = .{ .{}, .{} };
@@ -64,7 +61,6 @@ test "UDP echo between two stacks" {
     var sock_a = UdpSock.init(&a_rx_meta, &a_rx_payload, &a_tx_meta, &a_tx_payload);
     try sock_a.bind(.{ .port = 5000 });
 
-    // Stack B: UDP socket bound to port 6000
     var b_rx_meta: [2]UdpSock.PacketMeta = .{ .{}, .{} };
     var b_rx_payload: [256]u8 = undefined;
     var b_tx_meta: [2]UdpSock.PacketMeta = .{ .{}, .{} };
@@ -74,12 +70,11 @@ test "UDP echo between two stacks" {
 
     var arr_a = [_]*UdpSock{&sock_a};
     var arr_b = [_]*UdpSock{&sock_b};
-    var stack_a = StackA.init(MAC_A, .{ .udp4_sockets = &arr_a });
-    var stack_b = StackB.init(MAC_B, .{ .udp4_sockets = &arr_b });
+    var stack_a = UdpStack.init(MAC_A, .{ .udp4_sockets = &arr_a });
+    var stack_b = UdpStack.init(MAC_B, .{ .udp4_sockets = &arr_b });
     stack_a.iface.v4.addIpAddr(.{ .address = IP_A, .prefix_len = 24 });
     stack_b.iface.v4.addIpAddr(.{ .address = IP_B, .prefix_len = 24 });
 
-    // Stack B sends "ping" to Stack A
     try sock_b.sendSlice("ping", .{
         .endpoint = .{ .addr = IP_A, .port = 5000 },
     });
@@ -94,18 +89,16 @@ test "UDP echo between two stacks" {
         _ = stack_b.poll(cur_time, &dev_b);
         shuttleFrames(&dev_a, &dev_b);
 
-        // Stack A: receive "ping", reply "pong"
         if (!a_received_ping and sock_a.canRecv()) {
             var buf: [64]u8 = undefined;
             const result = sock_a.recvSlice(&buf) catch continue;
             try std.testing.expectEqualSlices(u8, "ping", buf[0..result.data_len]);
             a_received_ping = true;
             try sock_a.sendSlice("pong", .{
-                .endpoint = .{ .addr = result.meta.endpoint.addr, .port = result.meta.endpoint.port },
+                .endpoint = result.meta.endpoint,
             });
         }
 
-        // Stack B: receive "pong"
         if (a_received_ping and !b_received_pong and sock_b.canRecv()) {
             var buf: [64]u8 = undefined;
             const result = sock_b.recvSlice(&buf) catch continue;
@@ -123,15 +116,13 @@ test "UDP echo between two stacks" {
 }
 
 test "ICMP ping between two stacks" {
-    const std = @import("std");
-    const SocketsA = struct { icmp4_sockets: []*IcmpSock };
-    const StackA = stack_mod.Stack(Device, SocketsA);
-    const StackB = stack_mod.Stack(Device, void);
+    const IcmpSockets = struct { icmp4_sockets: []*IcmpSock };
+    const IcmpStack = stack_mod.Stack(Device, IcmpSockets);
+    const NoSocketStack = stack_mod.Stack(Device, void);
 
     var dev_a: Device = .{};
     var dev_b: Device = .{};
 
-    // Stack A: ICMP socket bound to ident 0x1234
     var a_rx_meta: [2]IcmpSock.PacketMeta = .{ .{}, .{} };
     var a_rx_payload: [256]u8 = undefined;
     var a_tx_meta: [2]IcmpSock.PacketMeta = .{ .{}, .{} };
@@ -140,12 +131,11 @@ test "ICMP ping between two stacks" {
     try icmp_sock.bind(.{ .ident = 0x1234 });
 
     var arr_a = [_]*IcmpSock{&icmp_sock};
-    var stack_a = StackA.init(MAC_A, .{ .icmp4_sockets = &arr_a });
-    var stack_b = StackB.init(MAC_B, {});
+    var stack_a = IcmpStack.init(MAC_A, .{ .icmp4_sockets = &arr_a });
+    var stack_b = NoSocketStack.init(MAC_B, {});
     stack_a.iface.v4.addIpAddr(.{ .address = IP_A, .prefix_len = 24 });
     stack_b.iface.v4.addIpAddr(.{ .address = IP_B, .prefix_len = 24 });
 
-    // Build and send ICMP echo request from Stack A to Stack B
     const echo_payload = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF };
     var icmp_buf: [icmp_wire.HEADER_LEN + echo_payload.len]u8 = undefined;
     _ = icmp_wire.emitEcho(.{
@@ -166,13 +156,11 @@ test "ICMP ping between two stacks" {
         _ = stack_b.poll(cur_time, &dev_b);
         shuttleFrames(&dev_a, &dev_b);
 
-        // Check for echo reply on Stack A's ICMP socket
         if (!got_reply and icmp_sock.canRecv()) {
             var buf: [128]u8 = undefined;
             const result = icmp_sock.recvSlice(&buf) catch continue;
             try std.testing.expectEqual(IP_B, result.src_addr);
 
-            // Parse the ICMP reply
             const reply = icmp_wire.parse(buf[0..result.data_len]) catch continue;
             switch (reply) {
                 .echo => |echo| {
