@@ -119,10 +119,15 @@ src/
   root.zig               Library entry point (public API)
 ```
 
-examples/
-  loopback_echo.zig    TCP echo on single stack (loopback device)
-  back_to_back.zig     TCP transfer between two stacks (simulated wire)
-  udp_icmp.zig         UDP exchange + ICMP ping (two stacks)
+examples/                  End-to-end integration demos (zig build demo)
+  loopback_echo.zig      TCP echo on single stack (loopback device)
+  back_to_back.zig       TCP transfer between two stacks (simulated wire)
+  udp_icmp.zig           UDP exchange + ICMP ping (two stacks)
+  ipv6_echo.zig          IPv6 TCP echo + ICMPv6 ping with NDP
+  fault_tolerant.zig     TCP over lossy link (FaultInjector, 10% drop)
+  ip_medium.zig          UDP echo over Medium::Ip (no Ethernet)
+  fragmentation.zig      IPv4 fragmentation/reassembly (600B over 576 MTU)
+  multi_socket.zig       TCP+UDP+ICMP concurrent on same stacks
 ```
 
 ## Building
@@ -163,9 +168,9 @@ zig build test -- --summary all
 
 ## Integration Demos
 
-Three end-to-end demos exercise the full stack API (sockets -> Stack poll
-loop -> LoopbackDevice) with no manual packet construction. They serve as
-both functional validation and usage documentation.
+Eight end-to-end demos exercise the full stack API (sockets -> Stack poll
+loop -> Device) with no manual packet construction. They serve as both
+functional validation and usage documentation.
 
 ```bash
 # Run all demos
@@ -180,6 +185,11 @@ zig build demo -- --summary all
 | TCP loopback echo | `examples/loopback_echo.zig` | Full TCP lifecycle on a single stack: ARP, handshake, data echo, close |
 | TCP back-to-back | `examples/back_to_back.zig` | Two stacks communicate over a simulated wire: ARP discovery, 1KB transfer |
 | UDP + ICMP | `examples/udp_icmp.zig` | UDP datagram exchange and ICMP ping with auto-reply |
+| IPv6 echo | `examples/ipv6_echo.zig` | TCP6 echo + ICMPv6 ping between two stacks with NDP neighbor discovery |
+| Fault tolerant | `examples/fault_tolerant.zig` | TCP data transfer over 10% packet-loss link (FaultInjector retransmission) |
+| IP medium | `examples/ip_medium.zig` | UDP echo over Medium::Ip -- no Ethernet, no ARP, raw IP point-to-point |
+| Fragmentation | `examples/fragmentation.zig` | 600B UDP over 576B MTU: IPv4 fragmentation on egress, reassembly on ingress |
+| Multi-socket | `examples/multi_socket.zig` | TCP + UDP + ICMP active simultaneously, proving protocol demux under load |
 
 ## Using in Your Project
 
