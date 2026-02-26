@@ -199,6 +199,30 @@ Laminae container (main.zig, netif.zig)    <-- kernel-specific, ~200 LOC
   +-- return next poll time
 ```
 
+## Binary Size
+
+zmoltcp's comptime generics produce smaller binaries than smoltcp's runtime
+dispatch as feature count grows. Measured on `aarch64-freestanding-none` with
+size-optimized settings (Zig `-OReleaseSmall`, Rust `opt-level=z` + LTO):
+
+```
+Scenario            zmoltcp   smoltcp   Ratio    .text bytes
+A: TCP/IPv4          14,405    11,332    1.27x   (zmoltcp slightly larger)
+B: TCP+UDP+ICMP      16,917    15,243    1.11x   (near parity)
+C: Full IPv4         20,317    24,872    0.82x   (zmoltcp 18% smaller)
+D: Dual-stack        27,721    43,380    0.64x   (zmoltcp 36% smaller)
+E: Wire-only          1,145     5,276    0.22x   (zmoltcp 78% smaller)
+TOTAL                80,505   100,103    0.80x   (zmoltcp 20% smaller overall)
+```
+
+Comptime generics break even at ~3 socket types and then progressively win.
+Dual-stack is where the advantage is most pronounced: zmoltcp generates
+fully specialized code per IP version, while smoltcp dispatches through
+`IpRepr` enums at runtime.
+
+Run `bash bench/size/measure.sh` to reproduce. Requires `zig`, `cargo`,
+`rustup target add aarch64-unknown-none`, and `llvm-size` on PATH.
+
 ## Status
 
 Feature-complete dual-stack IPv4/IPv6 TCP/IP stack with full smoltcp feature
