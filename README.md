@@ -1,13 +1,24 @@
 # zmoltcp
 
-A pure Zig TCP/IP stack for freestanding targets, architecturally inspired by
-[smoltcp](https://github.com/smoltcp-rs/smoltcp) (Rust no_std).
+A pure Zig dual-stack (IPv4/IPv6) TCP/IP stack for freestanding targets,
+architecturally inspired by [smoltcp](https://github.com/smoltcp-rs/smoltcp)
+(Rust no_std).
 
 ## What This Is
 
 zmoltcp is a standalone, zero-allocation network stack designed for bare-metal
-and custom OS use. It implements IPv4, TCP, UDP, DHCP, DNS, ARP, and ICMP with
-no runtime dependencies beyond caller-provided buffers.
+and custom OS use. It implements full dual-stack IPv4/IPv6 networking with
+comptime-parameterized generics -- zero runtime branching on address type,
+dead code elimination for single-stack builds, and type safety that prevents
+accidentally passing a v6 address to a v4 socket.
+
+Supported protocols: TCP (full state machine, SACK, timestamps, Reno/Cubic),
+UDP, ICMPv4/v6, ARP, NDP, IGMP, MLD, SLAAC, DHCPv4, DNS (including mDNS),
+raw sockets, IPv4/IPv6 fragmentation/reassembly, IEEE 802.15.4, 6LoWPAN,
+RPL, IPsec ESP/AH wire formats.
+
+Supported mediums: Ethernet (Layer 2), raw IP (Layer 3, TUN/PPP),
+IEEE 802.15.4 (constrained IoT).
 
 Primary consumer: [Laminae](https://github.com/hotschmoe/laminae), a
 container-native research kernel for ARM64. But zmoltcp has no kernel
@@ -31,6 +42,10 @@ unconventional approaches when they serve the design better.
 
 ## Design Principles
 
+- **Comptime dual-stack**: Each socket, endpoint, and routing type is
+  parameterized over an `Ip` type (ipv4 or ipv6). The compiler generates
+  fully specialized code per IP version. No enum tag checks in the hot path.
+
 - **Explicit poll model**: No background timers or callbacks. Call `poll()`
   with a timestamp, it tells you what to do. Your event loop owns the
   scheduling.
@@ -51,32 +66,57 @@ unconventional approaches when they serve the design better.
 
 ```
 src/
-  wire/              Protocol wire formats (parse + serialize)
-    checksum.zig     IP/TCP/UDP internet checksum (RFC 1071)
-    ethernet.zig     Ethernet II frame
-    arp.zig          ARP request/reply
-    ipv4.zig         IPv4 header + options
-    tcp.zig          TCP header + options (MSS, window scale, SACK)
-    udp.zig          UDP datagram
-    icmp.zig         ICMPv4 (echo, unreachable, time exceeded)
-    dhcp.zig         DHCPv4 packet format
-    dns.zig          DNS query/response
+  wire/                  Protocol wire formats (parse + serialize)
+    checksum.zig         IP/TCP/UDP internet checksum (RFC 1071)
+    ethernet.zig         Ethernet II frame
+    ip.zig               Generic Ip comptime contract, Cidr(Ip), Endpoint(Ip)
+    arp.zig              ARP request/reply (Ethernet+IPv4)
+    ipv4.zig             IPv4 header, Address, Protocol enum
+    ipv6.zig             IPv6 header, Address, Protocol enum
+    ipv6option.zig       IPv6 extension header TLV options
+    ipv6ext_header.zig   Generic extension header base (next_header + length)
+    ipv6fragment.zig     Fragment extension header (RFC 8200)
+    ipv6routing.zig      Routing extension header (Type 2, RPL)
+    ipv6hbh.zig          Hop-by-Hop options header
+    tcp.zig              TCP header + options (MSS, window scale, SACK, timestamps)
+    udp.zig              UDP datagram
+    icmp.zig             ICMPv4 (echo, unreachable, time exceeded)
+    icmpv6.zig           ICMPv6 (echo, NDP, MLD, RPL dispatch)
+    ndisc.zig            NDP (RFC 4861): RS/RA/NS/NA/Redirect
+    ndiscoption.zig      NDP options (SLLA, TLLA, PrefixInfo, MTU)
+    mld.zig              MLDv2 (RFC 3810): multicast listener query/report
+    igmp.zig             IGMPv1/v2 multicast group management
+    dhcp.zig             DHCPv4 packet format
+    dns.zig              DNS query/response (RFC 1035)
+    ipsec_esp.zig        IPsec ESP header (RFC 4303)
+    ipsec_ah.zig         IPsec AH header (RFC 4302)
+    ieee802154.zig       IEEE 802.15.4 MAC frame
+    sixlowpan.zig        6LoWPAN IPHC/NHC compression (RFC 6282)
+    sixlowpan_frag.zig   6LoWPAN fragmentation (FRAG1/FRAGN)
+    rpl.zig              RPL wire format (RFC 6550): DIS/DIO/DAO
 
-  socket/            Protocol state machines
-    tcp.zig          TCP FSM (RFC 793), congestion control, retransmit
-    udp.zig          Stateless datagram send/recv
-    icmp.zig         Ping request/response tracking
-    dhcp.zig         DHCP client (DISCOVER/OFFER/REQUEST/ACK)
-    dns.zig          DNS resolver client
+  socket/                Protocol state machines
+    tcp.zig              TCP FSM (RFC 793), congestion control (Reno/Cubic)
+    udp.zig              UDP datagram send/recv
+    icmp.zig             ICMP/ICMPv6 echo request/response tracking
+    raw.zig              Raw IP socket (bind to protocol number)
+    dhcp.zig             DHCPv4 client (DISCOVER/OFFER/REQUEST/ACK)
+    dns.zig              DNS/mDNS resolver client
 
-  storage/           Data structures
-    ring_buffer.zig  Generic ring buffer (TX/RX queues)
-    assembler.zig    TCP out-of-order segment reassembly
+  storage/               Data structures
+    ring_buffer.zig      Generic ring buffer (TX/RX queues)
+    assembler.zig        TCP/IP out-of-order segment reassembly
+    packet_buffer.zig    Dual-ring datagram store (UDP/ICMP/DNS)
 
-  iface.zig          Network interface (packet routing, neighbor cache)
-  stack.zig          Top-level poll loop, socket set management
-  time.zig           Timestamp/duration types
-  root.zig           Library entry point (public API)
+  iface.zig              Network interface: ARP/NDP cache, ICMP auto-reply,
+                         MLD/IGMP multicast, SLAAC, medium dispatch
+  stack.zig              Top-level poll loop: protocol demux, socket dispatch,
+                         fragmentation, 6LoWPAN, egress serialization
+  fragmentation.zig      IPv4/IPv6/6LoWPAN fragmentation and reassembly
+  phy.zig                PHY middleware: Tracer, FaultInjector, PcapWriter
+  rpl.zig                RPL state machine (RFC 6550/6552/6206)
+  time.zig               Timestamp/Duration types (i64 microseconds)
+  root.zig               Library entry point (public API)
 ```
 
 ## Building
@@ -92,11 +132,14 @@ zig build -Dtarget=aarch64-freestanding-none
 zig build
 ```
 
+Zig version: 0.15.2
+
 ## Testing
 
-Tests are transliterated from smoltcp's test suite (see SPEC.md for the full
-conformance testing methodology). The smoltcp source is included as a git
-submodule under `ref/smoltcp/` for reference.
+818 tests passing across all modules. Tests are transliterated from smoltcp's
+test suite where applicable (see SPEC.md for the conformance testing
+methodology and tests/CONFORMANCE.md for per-test tracking). The smoltcp
+source is included as a git submodule under `ref/smoltcp/` for reference.
 
 **Tests are diagnostic tools, not success criteria.** A passing suite does not
 mean the code is good. A failing test does not mean the code is wrong. Tests
@@ -140,13 +183,13 @@ exe.root_module.addImport("zmoltcp", zmoltcp_dep.module("zmoltcp"));
 In Laminae, zmoltcp is consumed as a package. The kernel-specific glue
 (ICC message dispatch, shared memory with the NIC driver, event loop) lives
 in `laminae/user/programs/zmoltcp/` and is roughly 200 lines of code. The
-protocol logic -- TCP state machines, checksums, ARP tables, everything
+protocol logic -- TCP state machines, checksums, neighbor tables, everything
 that makes networking work -- lives here.
 
 ```
 Laminae container (main.zig, netif.zig)    <-- kernel-specific, ~200 LOC
   |
-  imports zmoltcp                          <-- this repo, ~3000+ LOC
+  imports zmoltcp                          <-- this repo, ~31,000 LOC
   |
   zmoltcp.stack.poll(timestamp)
   |
@@ -158,8 +201,8 @@ Laminae container (main.zig, netif.zig)    <-- kernel-specific, ~200 LOC
 
 ## Status
 
-Early development. See SPEC.md for the implementation plan and conformance
-testing methodology.
+Feature-complete dual-stack IPv4/IPv6 TCP/IP stack with full smoltcp feature
+parity. See `docs/20260224_plan.md` for the development plan and phase history.
 
 ## License
 
