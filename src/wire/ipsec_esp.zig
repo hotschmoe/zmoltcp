@@ -2,6 +2,8 @@
 //
 // Reference: RFC 4303, smoltcp src/wire/ipsec_esp.rs
 
+const checksum = @import("checksum.zig");
+
 pub const HEADER_LEN: usize = 8;
 
 pub const Repr = struct {
@@ -12,30 +14,19 @@ pub const Repr = struct {
 pub fn parse(data: []const u8) error{Truncated}!Repr {
     if (data.len < HEADER_LEN) return error.Truncated;
     return .{
-        .spi = readU32(data[0..4]),
-        .sequence_number = readU32(data[4..8]),
+        .spi = checksum.readU32(data[0..4]),
+        .sequence_number = checksum.readU32(data[4..8]),
     };
 }
 
 pub fn emit(repr: Repr, buf: []u8) error{Truncated}!void {
     if (buf.len < HEADER_LEN) return error.Truncated;
-    writeU32(buf[0..4], repr.spi);
-    writeU32(buf[4..8], repr.sequence_number);
+    checksum.writeU32(buf[0..4], repr.spi);
+    checksum.writeU32(buf[4..8], repr.sequence_number);
 }
 
 pub fn bufferLen(_: Repr) usize {
     return HEADER_LEN;
-}
-
-fn readU32(b: *const [4]u8) u32 {
-    return @as(u32, b[0]) << 24 | @as(u32, b[1]) << 16 | @as(u32, b[2]) << 8 | b[3];
-}
-
-fn writeU32(b: *[4]u8, v: u32) void {
-    b[0] = @truncate(v >> 24);
-    b[1] = @truncate(v >> 16);
-    b[2] = @truncate(v >> 8);
-    b[3] = @truncate(v);
 }
 
 // -------------------------------------------------------------------------

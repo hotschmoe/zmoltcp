@@ -62,23 +62,16 @@ pub fn PacketBuffer(comptime H: type) type {
             if (size > self.payload.capacity()) return error.Full;
             if (self.payload.window() < size) return error.Full;
 
-            // When payload ring is empty, enqueueMany resets the write
-            // pointer so the full capacity is contiguous.
             var contig = if (self.payload.isEmpty())
                 self.payload.capacity()
             else
                 self.payload.contiguousWindow();
             if (contig < size) {
-                // Need padding to wrap. Check that we have a metadata slot
-                // for the padding entry AND the real entry, plus enough total
-                // payload space (padding consumes the tail fragment).
                 if (self.metadata.window() < 2) return error.Full;
                 if (self.payload.window() - contig < size) return error.Full;
 
-                // Insert padding entry to consume tail space
                 const pad = self.metadata.enqueueOne() catch return error.Full;
                 pad.* = .{ .size = contig, .header = null };
-                // Advance payload ring past the padding
                 _ = self.payload.enqueueMany(contig);
                 contig = self.payload.contiguousWindow();
             }
@@ -86,8 +79,7 @@ pub fn PacketBuffer(comptime H: type) type {
             if (self.metadata.isFull()) return error.Full;
             const meta = self.metadata.enqueueOne() catch return error.Full;
             meta.* = .{ .size = size, .header = header };
-            const buf = self.payload.enqueueMany(size);
-            return buf;
+            return self.payload.enqueueMany(size);
         }
 
         pub fn dequeue(self: *Self) error{Empty}!struct { header: H, payload: []u8 } {

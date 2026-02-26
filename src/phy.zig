@@ -124,7 +124,6 @@ pub fn PcapWriter(comptime Device: type) type {
 
         pub const medium: iface_mod.Medium = if (@hasDecl(Device, "medium")) Device.medium else .ethernet;
 
-        // Pcap link types
         const LINKTYPE_ETHERNET: u32 = 1;
         const LINKTYPE_RAW: u32 = 101;
 
@@ -139,20 +138,12 @@ pub fn PcapWriter(comptime Device: type) type {
 
         pub fn receive(self: *Self) ?[]const u8 {
             const frame = self.inner.receive() orelse return null;
-            if (self.mode == .both or self.mode == .rx_only) {
-                self.writeGlobalHeader();
-                self.writeRecordHeader(frame.len);
-                self.write_fn(frame);
-            }
+            if (self.mode != .tx_only) self.writeRecord(frame);
             return frame;
         }
 
         pub fn transmit(self: *Self, frame: []const u8) void {
-            if (self.mode == .both or self.mode == .tx_only) {
-                self.writeGlobalHeader();
-                self.writeRecordHeader(frame.len);
-                self.write_fn(frame);
-            }
+            if (self.mode != .rx_only) self.writeRecord(frame);
             self.inner.transmit(frame);
         }
 
@@ -160,16 +151,22 @@ pub fn PcapWriter(comptime Device: type) type {
             return delegateCapabilities(Device);
         }
 
+        fn writeRecord(self: *Self, frame: []const u8) void {
+            self.writeGlobalHeader();
+            self.writeRecordHeader(frame.len);
+            self.write_fn(frame);
+        }
+
         fn writeGlobalHeader(self: *Self) void {
             if (self.header_written) return;
             self.header_written = true;
             var hdr: [24]u8 = undefined;
-            writeLeU32(hdr[0..4], 0xa1b2c3d4); // magic
-            writeLeU16(hdr[4..6], 2); // version major
-            writeLeU16(hdr[6..8], 4); // version minor
-            writeLeU32(hdr[8..12], 0); // thiszone
-            writeLeU32(hdr[12..16], 0); // sigfigs
-            writeLeU32(hdr[16..20], 65535); // snaplen
+            writeLeU32(hdr[0..4], 0xa1b2c3d4);
+            writeLeU16(hdr[4..6], 2);
+            writeLeU16(hdr[6..8], 4);
+            writeLeU32(hdr[8..12], 0);
+            writeLeU32(hdr[12..16], 0);
+            writeLeU32(hdr[16..20], 65535);
             const linktype: u32 = if (medium == .ethernet) LINKTYPE_ETHERNET else LINKTYPE_RAW;
             writeLeU32(hdr[20..24], linktype);
             self.write_fn(&hdr);
@@ -177,11 +174,11 @@ pub fn PcapWriter(comptime Device: type) type {
 
         fn writeRecordHeader(self: *Self, frame_len: usize) void {
             var rec: [16]u8 = undefined;
-            writeLeU32(rec[0..4], 0); // ts_sec
-            writeLeU32(rec[4..8], 0); // ts_usec
             const len: u32 = @intCast(frame_len);
-            writeLeU32(rec[8..12], len); // incl_len
-            writeLeU32(rec[12..16], len); // orig_len
+            writeLeU32(rec[0..4], 0);
+            writeLeU32(rec[4..8], 0);
+            writeLeU32(rec[8..12], len);
+            writeLeU32(rec[12..16], len);
             self.write_fn(&rec);
         }
     };

@@ -298,17 +298,10 @@ pub fn Socket(comptime Ip: type) type {
                 if (pq.timeout_at == null) pq.timeout_at = now.add(RETRANSMIT_TIMEOUT);
 
                 if (pq.timeout_at.?.lessThan(now)) {
-                    if (pq.mdns) {
-                        // mDNS: just reset retransmit, no server rotation
-                        pq.timeout_at = now.add(RETRANSMIT_TIMEOUT);
-                        pq.retransmit_at = Instant.ZERO;
-                        pq.delay = RETRANSMIT_DELAY;
-                    } else {
-                        pq.timeout_at = now.add(RETRANSMIT_TIMEOUT);
-                        pq.retransmit_at = Instant.ZERO;
-                        pq.delay = RETRANSMIT_DELAY;
-                        pq.server_idx += 1;
-                    }
+                    pq.timeout_at = now.add(RETRANSMIT_TIMEOUT);
+                    pq.retransmit_at = Instant.ZERO;
+                    pq.delay = RETRANSMIT_DELAY;
+                    if (!pq.mdns) pq.server_idx += 1;
                 }
 
                 if (!pq.mdns and pq.server_idx >= self.server_count) {

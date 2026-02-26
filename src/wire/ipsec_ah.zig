@@ -3,6 +3,7 @@
 // Reference: RFC 4302, smoltcp src/wire/ipsec_ah.rs
 
 const ipv4 = @import("ipv4.zig");
+const checksum = @import("checksum.zig");
 
 pub const MIN_HEADER_LEN: usize = 12;
 
@@ -20,8 +21,8 @@ pub fn parse(data: []const u8) error{Truncated}!Repr {
     if (data.len < total) return error.Truncated;
     return .{
         .next_header = @enumFromInt(data[0]),
-        .spi = readU32(data[4..8]),
-        .sequence_number = readU32(data[8..12]),
+        .spi = checksum.readU32(data[4..8]),
+        .sequence_number = checksum.readU32(data[8..12]),
         .icv_len = (@as(usize, payload_len) + 2) * 4 - MIN_HEADER_LEN,
     };
 }
@@ -34,8 +35,8 @@ pub fn emit(repr: Repr, icv: []const u8, buf: []u8) error{Truncated}!void {
     buf[1] = @intCast((total / 4) - 2);
     buf[2] = 0; // reserved
     buf[3] = 0;
-    writeU32(buf[4..8], repr.spi);
-    writeU32(buf[8..12], repr.sequence_number);
+    checksum.writeU32(buf[4..8], repr.spi);
+    checksum.writeU32(buf[8..12], repr.sequence_number);
     @memcpy(buf[12..][0..icv.len], icv);
 }
 
@@ -45,17 +46,6 @@ pub fn bufferLen(repr: Repr) usize {
 
 pub fn headerLen(data: []const u8) usize {
     return (@as(usize, data[1]) + 2) * 4;
-}
-
-fn readU32(b: *const [4]u8) u32 {
-    return @as(u32, b[0]) << 24 | @as(u32, b[1]) << 16 | @as(u32, b[2]) << 8 | b[3];
-}
-
-fn writeU32(b: *[4]u8, v: u32) void {
-    b[0] = @truncate(v >> 24);
-    b[1] = @truncate(v >> 16);
-    b[2] = @truncate(v >> 8);
-    b[3] = @truncate(v);
 }
 
 // -------------------------------------------------------------------------
