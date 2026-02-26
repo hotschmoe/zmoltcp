@@ -30,10 +30,11 @@ const TestStack = stack_mod.Stack(Device, Sockets);
 const STEP = Duration.fromMillis(1);
 const MAX_ITERS: usize = 200;
 const MESSAGE = "Hello, zmoltcp!";
-const LOCAL_MAC: ethernet.Address = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
-const LOCAL_IP: ipv4.Address = .{ 127, 0, 0, 1 };
 const SERVER_PORT: u16 = 1234;
 const CLIENT_PORT: u16 = 65000;
+
+const LOCAL_MAC: ethernet.Address = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+const LOCAL_IP: ipv4.Address = .{ 127, 0, 0, 1 };
 
 test "TCP loopback echo" {
     var server_rx: [256]u8 = .{0} ** 256;

@@ -9,7 +9,7 @@
 // Architecture:
 //
 //   Stack A (sender)                   Stack B (receiver)
-//   [UDP socket]                       [UDP socket :9000]
+//   [UDP socket :8000]                 [UDP socket :9000]
 //        |                                  |
 //   SmallMtuDevice A               LoopbackDevice B
 //   (MTU=576, fragments)           (MTU=1514, reassembles)
@@ -46,15 +46,32 @@ fn SmallMtuDevice(comptime max_frames: usize) type {
 const UdpSock = udp_socket.Socket(ipv4);
 const SenderDevice = SmallMtuDevice(16);
 const ReceiverDevice = stack_mod.LoopbackDevice(16);
-const PAYLOAD_LEN: usize = 600;
 
 const STEP = Duration.fromMillis(1);
 const MAX_ITERS: usize = 200;
+const PAYLOAD_LEN: usize = 600;
 
 const MAC_A: ethernet.Address = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
 const MAC_B: ethernet.Address = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 };
 const IP_A: ipv4.Address = .{ 10, 0, 0, 1 };
 const IP_B: ipv4.Address = .{ 10, 0, 0, 2 };
+
+fn generatePattern(buf: []u8) void {
+    for (buf, 0..) |*b, i| b.* = @truncate(i);
+}
+
+fn shuttleCross(dev_a: *SenderDevice, dev_b: *ReceiverDevice) void {
+    while (dev_a.inner.dequeueTx()) |frame| dev_b.enqueueRx(frame);
+    while (dev_b.dequeueTx()) |frame| dev_a.inner.enqueueRx(frame);
+}
+
+fn earliestPollTime(a: ?Instant, b: ?Instant) ?Instant {
+    if (a) |va| {
+        if (b) |vb| return if (va.lessThan(vb)) va else vb;
+        return va;
+    }
+    return b;
+}
 
 test "large UDP datagram fragmented and reassembled" {
     const SenderSockets = struct { udp4_sockets: []*UdpSock };
@@ -65,7 +82,6 @@ test "large UDP datagram fragmented and reassembled" {
     var dev_a: SenderDevice = .{};
     var dev_b: ReceiverDevice = .{};
 
-    // Sender socket (Stack A) -- only needs TX capacity for the payload.
     var a_rx_meta: [1]UdpSock.PacketMeta = .{.{}};
     var a_rx_payload: [64]u8 = undefined;
     var a_tx_meta: [1]UdpSock.PacketMeta = .{.{}};
@@ -73,7 +89,6 @@ test "large UDP datagram fragmented and reassembled" {
     var sock_a = UdpSock.init(&a_rx_meta, &a_rx_payload, &a_tx_meta, &a_tx_payload);
     try sock_a.bind(.{ .port = 8000 });
 
-    // Receiver socket (Stack B) -- needs RX capacity for the full datagram.
     var b_rx_meta: [1]UdpSock.PacketMeta = .{.{}};
     var b_rx_payload: [1024]u8 = undefined;
     var b_tx_meta: [1]UdpSock.PacketMeta = .{.{}};
@@ -88,9 +103,8 @@ test "large UDP datagram fragmented and reassembled" {
     stack_a.iface.v4.addIpAddr(.{ .address = IP_A, .prefix_len = 24 });
     stack_b.iface.v4.addIpAddr(.{ .address = IP_B, .prefix_len = 24 });
 
-    // Build a recognizable payload pattern.
     var send_data: [PAYLOAD_LEN]u8 = undefined;
-    for (&send_data, 0..) |*b, i| b.* = @truncate(i);
+    generatePattern(&send_data);
 
     try sock_a.sendSlice(&send_data, .{
         .endpoint = .{ .addr = IP_B, .port = 9000 },
@@ -102,15 +116,8 @@ test "large UDP datagram fragmented and reassembled" {
     var iter: usize = 0;
     while (iter < MAX_ITERS) : (iter += 1) {
         _ = stack_a.poll(cur_time, &dev_a);
-
-        // Shuttle fragments (and ARP) from A to B and vice versa.
-        while (dev_a.inner.dequeueTx()) |frame| dev_b.enqueueRx(frame);
-        while (dev_b.dequeueTx()) |frame| dev_a.inner.enqueueRx(frame);
-
         _ = stack_b.poll(cur_time, &dev_b);
-
-        // Shuttle again for any B responses (ARP replies).
-        while (dev_b.dequeueTx()) |frame| dev_a.inner.enqueueRx(frame);
+        shuttleCross(&dev_a, &dev_b);
 
         if (!received and sock_b.canRecv()) {
             var buf: [1024]u8 = undefined;
@@ -121,7 +128,12 @@ test "large UDP datagram fragmented and reassembled" {
         }
 
         if (received) break;
-        cur_time = cur_time.add(STEP);
+
+        if (earliestPollTime(stack_a.pollAt(), stack_b.pollAt())) |next| {
+            cur_time = if (next.greaterThanOrEqual(cur_time)) next else cur_time.add(STEP);
+        } else {
+            cur_time = cur_time.add(STEP);
+        }
     }
 
     try std.testing.expect(received);

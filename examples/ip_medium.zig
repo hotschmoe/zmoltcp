@@ -46,7 +46,6 @@ const IpStack = stack_mod.Stack(Device, Sockets);
 const STEP = Duration.fromMillis(1);
 const MAX_ITERS: usize = 200;
 
-// MAC is still needed for Stack.init but is unused for IP medium.
 const MAC_A: ethernet.Address = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
 const MAC_B: ethernet.Address = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 };
 const IP_A: ipv4.Address = .{ 10, 0, 0, 1 };

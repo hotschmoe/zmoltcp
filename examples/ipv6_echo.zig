@@ -36,16 +36,13 @@ const Device = stack_mod.LoopbackDevice(16);
 const STEP = Duration.fromMillis(1);
 const MAX_ITERS: usize = 300;
 const MESSAGE = "Hello, IPv6!";
+const SERVER_PORT: u16 = 4000;
+const CLIENT_PORT: u16 = 50000;
 
 const MAC_A: ethernet.Address = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
 const MAC_B: ethernet.Address = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 };
-
-// Link-local addresses matching EUI-64 derivation from the MACs.
 const IP_A: ipv6.Address = iface_mod.Interface.linkLocalFromMac(MAC_A);
 const IP_B: ipv6.Address = iface_mod.Interface.linkLocalFromMac(MAC_B);
-
-const SERVER_PORT: u16 = 4000;
-const CLIENT_PORT: u16 = 50000;
 
 fn shuttleFrames(dev_a: *Device, dev_b: *Device) void {
     while (dev_a.dequeueTx()) |frame| dev_b.enqueueRx(frame);
@@ -86,7 +83,6 @@ test "TCP6 echo between two stacks" {
     stack_a.iface.setIpv6Addrs(&.{.{ .address = IP_A, .prefix_len = 64 }});
     stack_b.iface.setIpv6Addrs(&.{.{ .address = IP_B, .prefix_len = 64 }});
 
-    // Pre-seed neighbor caches so the demo focuses on TCP, not NDP.
     stack_a.iface.neighbor_cache_v6.fill(IP_B, MAC_B, Instant.ZERO);
     stack_b.iface.neighbor_cache_v6.fill(IP_A, MAC_A, Instant.ZERO);
 
@@ -165,8 +161,6 @@ test "ICMPv6 ping with NDP discovery" {
     var stack_b = NoSocketStack.init(MAC_B, {});
     stack_a.iface.setIpv6Addrs(&.{.{ .address = IP_A, .prefix_len = 64 }});
     stack_b.iface.setIpv6Addrs(&.{.{ .address = IP_B, .prefix_len = 64 }});
-
-    // No neighbor cache pre-seeding -- NDP resolves naturally via shuttle.
 
     const echo_data = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF };
     const repr: icmpv6_wire.Repr = .{ .echo_request = .{

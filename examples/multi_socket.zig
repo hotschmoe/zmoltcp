@@ -59,7 +59,6 @@ fn earliestPollTime(a: ?Instant, b: ?Instant) ?Instant {
 }
 
 test "TCP + UDP + ICMP concurrent exchange" {
-    // --- Stack A sockets: TCP server + UDP + ICMP ---
     var tcp_srv_rx: [256]u8 = .{0} ** 256;
     var tcp_srv_tx: [256]u8 = .{0} ** 256;
     var tcp_srv = TcpSock.init(&tcp_srv_rx, &tcp_srv_tx);
@@ -80,7 +79,6 @@ test "TCP + UDP + ICMP concurrent exchange" {
     var icmp_a = IcmpSock.init(&icmp_rx_meta, &icmp_rx_pay, &icmp_tx_meta, &icmp_tx_pay);
     try icmp_a.bind(.{ .ident = 0x1234 });
 
-    // --- Stack B sockets: TCP client + UDP ---
     var tcp_cli_rx: [256]u8 = .{0} ** 256;
     var tcp_cli_tx: [256]u8 = .{0} ** 256;
     var tcp_cli = TcpSock.init(&tcp_cli_rx, &tcp_cli_tx);
@@ -94,7 +92,6 @@ test "TCP + UDP + ICMP concurrent exchange" {
     var udp_b = UdpSock.init(&udp_b_rx_meta, &udp_b_rx_pay, &udp_b_tx_meta, &udp_b_tx_pay);
     try udp_b.bind(.{ .port = 6000 });
 
-    // --- Build stacks ---
     const SocketsA = struct {
         tcp4_sockets: []*TcpSock,
         udp4_sockets: []*UdpSock,
@@ -128,7 +125,6 @@ test "TCP + UDP + ICMP concurrent exchange" {
     stack_a.iface.v4.addIpAddr(.{ .address = IP_A, .prefix_len = 24 });
     stack_b.iface.v4.addIpAddr(.{ .address = IP_B, .prefix_len = 24 });
 
-    // --- Pre-enqueue UDP and ICMP sends ---
     try udp_b.sendSlice("udp-ping", .{
         .endpoint = .{ .addr = IP_A, .port = 5000 },
     });
@@ -144,16 +140,13 @@ test "TCP + UDP + ICMP concurrent exchange" {
     }, &echo_payload, &icmp_buf) catch unreachable;
     try icmp_a.sendSlice(&icmp_buf, IP_B);
 
-    // --- Poll loop ---
     var cur_time = Instant.ZERO;
-
     var tcp_cli_sent = false;
     var tcp_srv_echoed = false;
     var tcp_cli_received = false;
     var udp_a_received = false;
     var udp_b_received = false;
     var icmp_got_reply = false;
-
     var recv_buf: [64]u8 = undefined;
 
     var iter: usize = 0;
@@ -162,7 +155,6 @@ test "TCP + UDP + ICMP concurrent exchange" {
         _ = stack_b.poll(cur_time, &dev_b);
         shuttleFrames(&dev_a, &dev_b);
 
-        // --- TCP: client sends, server echoes ---
         if (!tcp_cli_sent and tcp_cli.getState() == .established and tcp_cli.canSend()) {
             _ = tcp_cli.sendSlice("zmoltcp") catch 0;
             tcp_cli_sent = true;
@@ -187,7 +179,6 @@ test "TCP + UDP + ICMP concurrent exchange" {
             }
         }
 
-        // --- UDP: A receives ping, sends pong ---
         if (!udp_a_received and udp_a.canRecv()) {
             const result = udp_a.recvSlice(&recv_buf) catch continue;
             try std.testing.expectEqualSlices(u8, "udp-ping", recv_buf[0..result.data_len]);
@@ -201,7 +192,6 @@ test "TCP + UDP + ICMP concurrent exchange" {
             udp_b_received = true;
         }
 
-        // --- ICMP: A receives echo reply ---
         if (!icmp_got_reply and icmp_a.canRecv()) {
             const result = icmp_a.recvSlice(&recv_buf) catch continue;
             const reply = icmp_wire.parse(recv_buf[0..result.data_len]) catch continue;
@@ -215,7 +205,6 @@ test "TCP + UDP + ICMP concurrent exchange" {
             }
         }
 
-        // All three protocols complete?
         if (tcp_cli_received and udp_b_received and icmp_got_reply) {
             const s_done = tcp_srv.getState() == .closed or tcp_srv.getState() == .time_wait;
             const c_done = tcp_cli.getState() == .closed or tcp_cli.getState() == .time_wait;

@@ -6,7 +6,7 @@
 // Part 1: UDP echo -- Stack B sends "ping" to Stack A, Stack A replies "pong"
 // Part 2: ICMP ping -- Stack A sends echo request, Stack B auto-replies
 //
-// Architecture (same back-to-back as Demo 2):
+// Architecture:
 //
 //   Stack A                            Stack B
 //   [UDP socket] [ICMP socket]         [UDP socket]
@@ -33,26 +33,22 @@ const Device = stack_mod.LoopbackDevice(16);
 const STEP = Duration.fromMillis(1);
 const MAX_ITERS: usize = 200;
 
-fn earliestPollTime(a: ?Instant, b: ?Instant) ?Instant {
-    if (a) |va| {
-        if (b) |vb| return if (va.lessThan(vb)) va else vb;
-        return va;
-    }
-    return b;
-}
-
 const MAC_A: ethernet.Address = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
 const MAC_B: ethernet.Address = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 };
 const IP_A: ipv4.Address = .{ 10, 0, 0, 1 };
 const IP_B: ipv4.Address = .{ 10, 0, 0, 2 };
 
 fn shuttleFrames(dev_a: *Device, dev_b: *Device) void {
-    while (dev_a.dequeueTx()) |frame| {
-        dev_b.enqueueRx(frame);
+    while (dev_a.dequeueTx()) |frame| dev_b.enqueueRx(frame);
+    while (dev_b.dequeueTx()) |frame| dev_a.enqueueRx(frame);
+}
+
+fn earliestPollTime(a: ?Instant, b: ?Instant) ?Instant {
+    if (a) |va| {
+        if (b) |vb| return if (va.lessThan(vb)) va else vb;
+        return va;
     }
-    while (dev_b.dequeueTx()) |frame| {
-        dev_a.enqueueRx(frame);
-    }
+    return b;
 }
 
 test "UDP echo between two stacks" {

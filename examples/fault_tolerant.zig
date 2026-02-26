@@ -112,7 +112,6 @@ test "TCP data transfer over lossy link" {
         _ = stack_b.poll(cur_time, &dev_b);
         shuttleFrames(&dev_a, &dev_b);
 
-        // Client sends data as the connection allows.
         if (client_total_sent < DATA_LEN and
             client_sock.getState() == .established and client_sock.canSend())
         {
@@ -120,7 +119,6 @@ test "TCP data transfer over lossy link" {
             client_total_sent += n;
         }
 
-        // Server receives data.
         if (!transfer_done and
             server_sock.getState() == .established and server_sock.canRecv())
         {

@@ -41,18 +41,12 @@ const IP_A: ipv4.Address = .{ 10, 0, 0, 1 };
 const IP_B: ipv4.Address = .{ 10, 0, 0, 2 };
 
 fn generatePattern(buf: []u8) void {
-    for (buf, 0..) |*b, i| {
-        b.* = @truncate(i);
-    }
+    for (buf, 0..) |*b, i| b.* = @truncate(i);
 }
 
 fn shuttleFrames(dev_a: *Device, dev_b: *Device) void {
-    while (dev_a.dequeueTx()) |frame| {
-        dev_b.enqueueRx(frame);
-    }
-    while (dev_b.dequeueTx()) |frame| {
-        dev_a.enqueueRx(frame);
-    }
+    while (dev_a.dequeueTx()) |frame| dev_b.enqueueRx(frame);
+    while (dev_b.dequeueTx()) |frame| dev_a.enqueueRx(frame);
 }
 
 fn earliestPollTime(a: ?Instant, b: ?Instant) ?Instant {
