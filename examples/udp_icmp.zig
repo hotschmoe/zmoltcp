@@ -33,6 +33,14 @@ const Device = stack_mod.LoopbackDevice(16);
 const STEP = Duration.fromMillis(1);
 const MAX_ITERS: usize = 200;
 
+fn earliestPollTime(a: ?Instant, b: ?Instant) ?Instant {
+    if (a) |va| {
+        if (b) |vb| return if (va.lessThan(vb)) va else vb;
+        return va;
+    }
+    return b;
+}
+
 const MAC_A: ethernet.Address = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
 const MAC_B: ethernet.Address = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 };
 const IP_A: ipv4.Address = .{ 10, 0, 0, 1 };
@@ -107,7 +115,12 @@ test "UDP echo between two stacks" {
         }
 
         if (b_received_pong) break;
-        cur_time = cur_time.add(STEP);
+
+        if (earliestPollTime(stack_a.pollAt(), stack_b.pollAt())) |next| {
+            cur_time = if (next.greaterThanOrEqual(cur_time)) next else cur_time.add(STEP);
+        } else {
+            cur_time = cur_time.add(STEP);
+        }
     }
 
     try std.testing.expect(a_received_ping);
@@ -174,7 +187,12 @@ test "ICMP ping between two stacks" {
         }
 
         if (got_reply) break;
-        cur_time = cur_time.add(STEP);
+
+        if (earliestPollTime(stack_a.pollAt(), stack_b.pollAt())) |next| {
+            cur_time = if (next.greaterThanOrEqual(cur_time)) next else cur_time.add(STEP);
+        } else {
+            cur_time = cur_time.add(STEP);
+        }
     }
 
     try std.testing.expect(got_reply);

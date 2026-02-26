@@ -33,6 +33,11 @@ pub fn build(b: *std.Build) void {
         "examples/loopback_echo.zig",
         "examples/back_to_back.zig",
         "examples/udp_icmp.zig",
+        "examples/ipv6_echo.zig",
+        "examples/fault_tolerant.zig",
+        "examples/ip_medium.zig",
+        "examples/fragmentation.zig",
+        "examples/multi_socket.zig",
     }) |path| {
         const demo_mod = b.createModule(.{
             .root_source_file = b.path(path),
