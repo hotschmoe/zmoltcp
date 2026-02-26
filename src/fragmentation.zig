@@ -15,6 +15,8 @@ const ipv4 = @import("wire/ipv4.zig");
 const ipv6 = @import("wire/ipv6.zig");
 const ipv6fragment = @import("wire/ipv6fragment.zig");
 const ethernet = @import("wire/ethernet.zig");
+const ieee802154 = @import("wire/ieee802154.zig");
+const sixlowpan_frag = @import("wire/sixlowpan_frag.zig");
 const time = @import("time.zig");
 const Assembler = @import("storage/assembler.zig").Assembler;
 
@@ -176,6 +178,167 @@ pub const FragKeyV6 = struct {
 
 pub fn isFragmentV6(frag_repr: ipv6fragment.Repr) bool {
     return frag_repr.more_frags or frag_repr.frag_offset != 0;
+}
+
+/// Reassembly key for 6LoWPAN fragmented datagrams (RFC 4944 S5.3).
+/// Keyed by source LL address + datagram tag + datagram size.
+pub const FragKey6LoWPAN = struct {
+    datagram_tag: u16,
+    datagram_size: u16,
+    ll_src_addr: [8]u8, // normalized to EUI-64
+    ll_dst_addr: [8]u8,
+
+    pub fn eql(a: FragKey6LoWPAN, b: FragKey6LoWPAN) bool {
+        return a.datagram_tag == b.datagram_tag and
+            a.datagram_size == b.datagram_size and
+            std.mem.eql(u8, &a.ll_src_addr, &b.ll_src_addr) and
+            std.mem.eql(u8, &a.ll_dst_addr, &b.ll_dst_addr);
+    }
+
+    pub fn fromAddrs(
+        src: ieee802154.Address,
+        dst: ieee802154.Address,
+        tag: u16,
+        size: u16,
+    ) FragKey6LoWPAN {
+        return .{
+            .datagram_tag = tag,
+            .datagram_size = size,
+            .ll_src_addr = src.asEui64(),
+            .ll_dst_addr = dst.asEui64(),
+        };
+    }
+};
+
+/// Buffers one 6LoWPAN compressed payload for fragmented egress via
+/// IEEE 802.15.4 frames. First fragment uses FRAG1 header (4 bytes),
+/// subsequent fragments use FRAGN header (5 bytes).
+pub fn SixlowpanFragmenter(comptime buffer_size: usize) type {
+    return struct {
+        const Self = @This();
+
+        buffer: [buffer_size]u8 = undefined,
+        packet_len: usize = 0,
+        sent_bytes: usize = 0,
+        datagram_size: u16 = 0,
+        datagram_tag: u16 = 0,
+
+        // Saved from initial emission for subsequent fragments.
+        ll_src_addr: ieee802154.Address = .absent,
+        ll_dst_addr: ieee802154.Address = .absent,
+        pan_id: ?u16 = null,
+
+        // Header size difference (uncompressed - compressed) for offset math.
+        header_diff: usize = 0,
+
+        pub fn isEmpty(self: *const Self) bool {
+            return self.packet_len == 0;
+        }
+
+        pub fn finished(self: *const Self) bool {
+            return self.packet_len > 0 and self.sent_bytes >= self.packet_len;
+        }
+
+        pub fn reset(self: *Self) void {
+            self.packet_len = 0;
+            self.sent_bytes = 0;
+        }
+
+        /// Stage compressed 6LoWPAN payload for fragmented egress.
+        /// `datagram_size` is the uncompressed IPv6 datagram size.
+        /// `header_diff` = uncompressed_hdr_size - compressed_hdr_size.
+        pub fn stage(
+            self: *Self,
+            compressed: []const u8,
+            datagram_size: u16,
+            datagram_tag: u16,
+            header_diff: usize,
+            ll_src: ieee802154.Address,
+            ll_dst: ieee802154.Address,
+            pan_id: ?u16,
+        ) bool {
+            if (compressed.len > buffer_size) return false;
+            @memcpy(self.buffer[0..compressed.len], compressed);
+            self.packet_len = compressed.len;
+            self.sent_bytes = 0;
+            self.datagram_size = datagram_size;
+            self.datagram_tag = datagram_tag;
+            self.header_diff = header_diff;
+            self.ll_src_addr = ll_src;
+            self.ll_dst_addr = ll_dst;
+            self.pan_id = pan_id;
+            return true;
+        }
+
+        /// Emit the next fragment into buf. Writes the 802.15.4 MAC header,
+        /// 6LoWPAN fragment header, and payload. Returns bytes written.
+        pub fn emitNext(
+            self: *Self,
+            buf: []u8,
+            seq_no: u8,
+        ) ?usize {
+            if (self.isEmpty() or self.finished()) return null;
+
+            const is_first = self.sent_bytes == 0;
+            const frag_hdr_len: usize = if (is_first)
+                sixlowpan_frag.FIRST_FRAGMENT_HEADER_SIZE
+            else
+                sixlowpan_frag.NEXT_FRAGMENT_HEADER_SIZE;
+
+            // Build MAC header repr to compute its length.
+            const mac_repr = ieee802154.Repr{
+                .frame_type = .data,
+                .frame_version = .ieee802154_2003,
+                .security = false,
+                .frame_pending = false,
+                .ack_request = false,
+                .pan_id_compression = self.pan_id != null,
+                .sequence_number = seq_no,
+                .dst_pan_id = self.pan_id,
+                .dst_addr = self.ll_dst_addr,
+                .src_pan_id = if (self.pan_id != null) null else null,
+                .src_addr = self.ll_src_addr,
+            };
+            const mac_len = ieee802154.bufferLen(mac_repr);
+
+            // Max payload per fragment: align to 8 bytes.
+            const budget = ieee802154.MAX_FRAME_LEN - mac_len - frag_hdr_len;
+            const max_payload = budget - (budget % 8);
+
+            const remaining = self.packet_len - self.sent_bytes;
+            const this_payload = @min(remaining, max_payload);
+            const total = mac_len + frag_hdr_len + this_payload;
+            if (buf.len < total) return null;
+
+            // Emit MAC header.
+            var pos = ieee802154.emit(mac_repr, buf) catch return null;
+
+            // Emit fragment header.
+            if (is_first) {
+                const frag_repr = sixlowpan_frag.Repr{ .first_fragment = .{
+                    .datagram_size = self.datagram_size,
+                    .datagram_tag = self.datagram_tag,
+                } };
+                pos += sixlowpan_frag.emit(frag_repr, buf[pos..]) catch return null;
+            } else {
+                // Offset in 8-octet units. The offset accounts for the
+                // header size difference between compressed and uncompressed.
+                const byte_offset = self.sent_bytes + self.header_diff;
+                const frag_repr = sixlowpan_frag.Repr{ .next_fragment = .{
+                    .datagram_size = self.datagram_size,
+                    .datagram_tag = self.datagram_tag,
+                    .datagram_offset = @intCast(byte_offset / 8),
+                } };
+                pos += sixlowpan_frag.emit(frag_repr, buf[pos..]) catch return null;
+            }
+
+            // Copy payload.
+            @memcpy(buf[pos..][0..this_payload], self.buffer[self.sent_bytes..][0..this_payload]);
+            self.sent_bytes += this_payload;
+
+            return pos + this_payload;
+        }
+    };
 }
 
 pub const ReassemblerConfig = struct {
@@ -496,4 +659,76 @@ test "Fragmenter emit_ethernet=false raw IP output" {
     try testing.expect(f.finished());
 
     try testing.expect(f.emitNext(&frame_buf, hw, ip_mtu) == null);
+}
+
+test "FragKey6LoWPAN equality" {
+    const src = ieee802154.Address{ .extended = .{ 0x00, 0x12, 0x4b, 0x00, 0x14, 0xb5, 0xd9, 0xc7 } };
+    const dst = ieee802154.Address{ .extended = .{ 0x00, 0x12, 0x4b, 0x00, 0x06, 0x15, 0x9b, 0xbf } };
+
+    const key_a = FragKey6LoWPAN.fromAddrs(src, dst, 0x003f, 307);
+    const key_b = FragKey6LoWPAN.fromAddrs(src, dst, 0x003f, 307);
+    try testing.expect(key_a.eql(key_b));
+
+    const key_c = FragKey6LoWPAN.fromAddrs(src, dst, 0x0040, 307);
+    try testing.expect(!key_a.eql(key_c));
+
+    const key_d = FragKey6LoWPAN.fromAddrs(src, dst, 0x003f, 308);
+    try testing.expect(!key_a.eql(key_d));
+}
+
+test "FragKey6LoWPAN from short address" {
+    const src = ieee802154.Address{ .short = .{ 0xab, 0xcd } };
+    const key = FragKey6LoWPAN.fromAddrs(src, .absent, 42, 100);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0xff, 0xfe, 0, 0xab, 0xcd }, &key.ll_src_addr);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 }, &key.ll_dst_addr);
+}
+
+test "reassembler with 6LoWPAN keys" {
+    const TestReassembler6L = Reassembler(FragKey6LoWPAN, .{ .buffer_size = 256, .max_segments = 4 });
+    var r = TestReassembler6L{};
+    try testing.expect(r.isFree());
+
+    const src = ieee802154.Address{ .extended = .{ 0x00, 0x12, 0x4b, 0x00, 0x14, 0xb5, 0xd9, 0xc7 } };
+    const dst = ieee802154.Address{ .extended = .{ 0x00, 0x12, 0x4b, 0x00, 0x06, 0x15, 0x9b, 0xbf } };
+    const key = FragKey6LoWPAN.fromAddrs(src, dst, 0x003f, 12);
+
+    r.accept(key, time.Instant.fromSecs(60));
+    try testing.expect(!r.isFree());
+
+    r.setTotalSize(12);
+    try testing.expect(r.add("Hello ", 0));
+    try testing.expect(r.assemble() == null);
+
+    try testing.expect(r.add("World!", 6));
+    const result = r.assemble() orelse return error.ExpectedAssembly;
+    try testing.expectEqualSlices(u8, "Hello World!", result);
+    try testing.expect(r.isFree());
+}
+
+test "SixlowpanFragmenter stage and emit" {
+    const Frag = SixlowpanFragmenter(1500);
+    var f = Frag{};
+    try testing.expect(f.isEmpty());
+
+    var payload: [300]u8 = undefined;
+    for (&payload, 0..) |*b, i| b.* = @truncate(i);
+
+    const src_ll = ieee802154.Address{ .extended = .{ 0x00, 0x12, 0x4b, 0x00, 0x14, 0xb5, 0xd9, 0xc7 } };
+    const dst_ll = ieee802154.Address{ .short = .{ 0xff, 0xff } };
+
+    try testing.expect(f.stage(&payload, 340, 0x1234, 40, src_ll, dst_ll, 0xabcd));
+    try testing.expect(!f.isEmpty());
+    try testing.expect(!f.finished());
+
+    var frame_buf: [128]u8 = undefined;
+    var frag_count: usize = 0;
+
+    while (!f.finished()) {
+        const len = f.emitNext(&frame_buf, @truncate(frag_count)) orelse break;
+        try testing.expect(len <= ieee802154.MAX_FRAME_LEN);
+        frag_count += 1;
+    }
+
+    try testing.expect(frag_count >= 3);
+    try testing.expect(f.finished());
 }

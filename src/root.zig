@@ -27,6 +27,10 @@ pub const wire = struct {
     pub const mld = @import("wire/mld.zig");
     pub const ipsec_esp = @import("wire/ipsec_esp.zig");
     pub const ipsec_ah = @import("wire/ipsec_ah.zig");
+    pub const rpl = @import("wire/rpl.zig");
+    pub const ieee802154 = @import("wire/ieee802154.zig");
+    pub const sixlowpan = @import("wire/sixlowpan.zig");
+    pub const sixlowpan_frag = @import("wire/sixlowpan_frag.zig");
 };
 
 pub const storage = struct {
@@ -50,6 +54,7 @@ pub const iface = @import("iface.zig");
 pub const fragmentation = @import("fragmentation.zig");
 pub const stack = @import("stack.zig");
 pub const phy = @import("phy.zig");
+pub const rpl_state = @import("rpl.zig");
 
 test {
     // refAllDecls ensures all declarations compile but does NOT discover
@@ -89,8 +94,13 @@ test {
     _ = @import("wire/mld.zig");
     _ = @import("wire/ipsec_esp.zig");
     _ = @import("wire/ipsec_ah.zig");
+    _ = @import("wire/rpl.zig");
+    _ = @import("wire/ieee802154.zig");
+    _ = @import("wire/sixlowpan.zig");
+    _ = @import("wire/sixlowpan_frag.zig");
     _ = @import("iface.zig");
     _ = @import("fragmentation.zig");
     _ = @import("stack.zig");
     _ = @import("phy.zig");
+    _ = @import("rpl.zig");
 }

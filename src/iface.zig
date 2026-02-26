@@ -35,6 +35,8 @@ pub const Medium = enum {
     ethernet,
     /// Raw IP: no link-layer framing, point-to-point (TUN, PPP).
     ip,
+    /// IEEE 802.15.4: 6LoWPAN header compression over constrained radios.
+    ieee802154,
 };
 
 // -------------------------------------------------------------------------
@@ -953,6 +955,7 @@ pub const Interface = struct {
                 return self.processNdisc(ip_repr, ndisc_repr);
             },
             .mld => return null, // stack handles MLD queries
+            .rpl => return null, // stack handles RPL control messages
             .dst_unreachable, .pkt_too_big, .time_exceeded, .param_problem => return null, // deliver to sockets
             .echo_reply => return null,
         }

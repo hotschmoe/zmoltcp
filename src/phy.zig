@@ -126,6 +126,7 @@ pub fn PcapWriter(comptime Device: type) type {
 
         const LINKTYPE_ETHERNET: u32 = 1;
         const LINKTYPE_RAW: u32 = 101;
+        const LINKTYPE_IEEE802154_NOFCS: u32 = 195;
 
         inner: Device,
         write_fn: *const fn ([]const u8) void,
@@ -167,7 +168,11 @@ pub fn PcapWriter(comptime Device: type) type {
             writeLeU32(hdr[8..12], 0);
             writeLeU32(hdr[12..16], 0);
             writeLeU32(hdr[16..20], 65535);
-            const linktype: u32 = if (medium == .ethernet) LINKTYPE_ETHERNET else LINKTYPE_RAW;
+            const linktype: u32 = switch (medium) {
+                .ethernet => LINKTYPE_ETHERNET,
+                .ieee802154 => LINKTYPE_IEEE802154_NOFCS,
+                .ip => LINKTYPE_RAW,
+            };
             writeLeU32(hdr[20..24], linktype);
             self.write_fn(&hdr);
         }

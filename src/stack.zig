@@ -24,6 +24,9 @@ const raw_socket_mod = @import("socket/raw.zig");
 const igmp_wire = @import("wire/igmp.zig");
 const ipv6ext_header = @import("wire/ipv6ext_header.zig");
 const ipv6fragment = @import("wire/ipv6fragment.zig");
+const ieee802154 = @import("wire/ieee802154.zig");
+const sixlowpan = @import("wire/sixlowpan.zig");
+const sixlowpan_frag = @import("wire/sixlowpan_frag.zig");
 const iface_mod = @import("iface.zig");
 const frag_mod = @import("fragmentation.zig");
 const time = @import("time.zig");
@@ -103,6 +106,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
     const FRAG_BUFFER_SIZE = 4096;
     const REASSEMBLY_BUFFER_SIZE = 1500;
     const REASSEMBLY_MAX_SEGMENTS = 4;
+    const SIXLOWPAN_FRAG_BUF: usize = 1500;
 
     const device_caps: iface_mod.DeviceCapabilities = if (@hasDecl(Device, "capabilities"))
         Device.capabilities()
@@ -111,13 +115,19 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
 
     const medium: iface_mod.Medium = if (@hasDecl(Device, "medium")) Device.medium else .ethernet;
     const is_ethernet = medium == .ethernet;
+    const is_ieee802154 = medium == .ieee802154;
 
-    const LINK_HEADER_LEN: usize = if (is_ethernet) ethernet.HEADER_LEN else 0;
+    const LINK_HEADER_LEN: usize = switch (medium) {
+        .ethernet => ethernet.HEADER_LEN,
+        .ip, .ieee802154 => 0,
+    };
     const IP_MTU: usize = device_caps.max_transmission_unit - LINK_HEADER_LEN;
 
     comptime {
         if (has_dhcp and !is_ethernet)
             @compileError("DHCP requires Ethernet medium");
+        if (is_ieee802154 and (has_tcp4 or has_udp4 or has_icmp4 or has_raw4 or has_dns4))
+            @compileError("IEEE 802.15.4 medium is IPv6-only; IPv4 sockets are not supported");
     }
 
     return struct {
@@ -140,6 +150,26 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
         ipv4_id: u16 = 0,
         reassembly_timeout: time.Duration = DEFAULT_REASSEMBLY_TIMEOUT,
 
+        // 6LoWPAN fields -- only present for ieee802154 medium
+        sixlowpan_fragmenter: if (is_ieee802154) frag_mod.SixlowpanFragmenter(SIXLOWPAN_FRAG_BUF) else void =
+            if (is_ieee802154) .{} else {},
+        reassembler_6lowpan: if (is_ieee802154) frag_mod.Reassembler(frag_mod.FragKey6LoWPAN, .{
+            .buffer_size = REASSEMBLY_BUFFER_SIZE,
+            .max_segments = REASSEMBLY_MAX_SEGMENTS,
+        }) else void = if (is_ieee802154) .{} else {},
+        sixlowpan_decompress_buf: if (is_ieee802154) [REASSEMBLY_BUFFER_SIZE]u8 else void =
+            if (is_ieee802154) undefined else {},
+        sixlowpan_tag: if (is_ieee802154) u16 else void =
+            if (is_ieee802154) 1 else {},
+        sixlowpan_seq_no: if (is_ieee802154) u8 else void =
+            if (is_ieee802154) 0 else {},
+        sixlowpan_pan_id: if (is_ieee802154) ?u16 else void =
+            if (is_ieee802154) null else {},
+        sixlowpan_address_contexts: if (is_ieee802154) [4]?sixlowpan.AddressContext else void =
+            if (is_ieee802154) .{ null, null, null, null } else {},
+        sixlowpan_ll_addr: if (is_ieee802154) ieee802154.Address else void =
+            if (is_ieee802154) .absent else {},
+
         pub fn init(hw_addr: ethernet.Address, sockets: SocketConfig) Self {
             return .{
                 .iface = iface_mod.Interface.init(hw_addr),
@@ -151,6 +181,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             self.iface.now = timestamp;
             self.reassembler.removeExpired(timestamp);
             self.reassembler_v6.removeExpired(timestamp);
+            if (comptime is_ieee802154) self.reassembler_6lowpan.removeExpired(timestamp);
             if (comptime is_ethernet) self.iface.slaacMaintenance(timestamp);
             var activity = false;
 
@@ -170,6 +201,22 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     if (self.fragmenter.emitNext(&frame_buf, hw, IP_MTU)) |len| {
                         device.transmit(frame_buf[0..len]);
                         activity = true;
+                    }
+                }
+            }
+
+            if (comptime is_ieee802154) {
+                if (!self.sixlowpan_fragmenter.isEmpty()) {
+                    if (self.sixlowpan_fragmenter.finished()) {
+                        self.sixlowpan_fragmenter.reset();
+                    } else {
+                        var frag_buf: [ieee802154.MAX_FRAME_LEN]u8 = undefined;
+                        const seq = self.sixlowpan_seq_no;
+                        self.sixlowpan_seq_no +%= 1;
+                        if (self.sixlowpan_fragmenter.emitNext(&frag_buf, seq)) |len| {
+                            device.transmit(frag_buf[0..len]);
+                            activity = true;
+                        }
                     }
                 }
             }
@@ -325,6 +372,8 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     },
                     else => {},
                 }
+            } else if (comptime is_ieee802154) {
+                self.processIeee802154Ingress(timestamp, frame, device);
             } else {
                 // Medium::Ip -- raw IP packets, no Ethernet framing
                 if (frame.len < 1) return;
@@ -466,6 +515,177 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             }
             if (!self.reassembler_v6.add(frag_data, byte_offset)) return null;
             return self.reassembler_v6.assemble();
+        }
+
+        // -----------------------------------------------------------------
+        // IEEE 802.15.4 / 6LoWPAN ingress
+        // -----------------------------------------------------------------
+
+        fn processIeee802154Ingress(self: *Self, timestamp: Instant, frame: []const u8, device: *Device) void {
+            if (comptime !is_ieee802154) return;
+            const mac_repr = ieee802154.parse(frame) catch return;
+            if (mac_repr.frame_type != .data) return;
+            if (self.sixlowpan_pan_id) |our_pan| {
+                if (mac_repr.dst_pan_id) |dst_pan| {
+                    if (dst_pan != our_pan and dst_pan != 0xFFFF) return;
+                }
+            }
+            const payload = ieee802154.payloadSlice(frame) catch return;
+            if (payload.len == 0) return;
+            self.processSixlowpan(timestamp, mac_repr, payload, device);
+        }
+
+        fn processSixlowpan(self: *Self, timestamp: Instant, mac_repr: ieee802154.Repr, payload: []const u8, device: *Device) void {
+            if (comptime !is_ieee802154) return;
+            const dispatch = sixlowpan.dispatchType(payload[0]);
+            switch (dispatch) {
+                .iphc => {
+                    const ipv6_data = self.sixlowpanToIpv6(mac_repr, payload, null) orelse return;
+                    const ip_repr = ipv6.parse(ipv6_data) catch return;
+                    self.processIpv6Ingress(timestamp, ip_repr, ipv6_data, device);
+                },
+                .first_fragment, .next_fragment => {
+                    self.processSixlowpanFragment(timestamp, mac_repr, payload, device);
+                },
+                .unknown => return,
+            }
+        }
+
+        fn sixlowpanToIpv6(self: *Self, mac_repr: ieee802154.Repr, iphc_payload: []const u8, total_uncompressed_len: ?u16) ?[]u8 {
+            if (comptime !is_ieee802154) return null;
+
+            // Gather non-null address contexts
+            var ctx_storage: [4]sixlowpan.AddressContext = undefined;
+            var ctx_count: usize = 0;
+            for (self.sixlowpan_address_contexts) |maybe_ctx| {
+                if (maybe_ctx) |ctx| {
+                    ctx_storage[ctx_count] = ctx;
+                    ctx_count += 1;
+                }
+            }
+            const contexts = ctx_storage[0..ctx_count];
+
+            const parsed = sixlowpan.parseIphc(
+                iphc_payload,
+                mac_repr.src_addr,
+                mac_repr.dst_addr,
+                contexts,
+            ) catch return null;
+
+            const remaining = iphc_payload[parsed.consumed..];
+
+            // Determine actual next header protocol and payload
+            var next_proto: ipv6.Protocol = undefined;
+            var proto_payload: []const u8 = undefined;
+            var nhc_overhead: usize = 0;
+            var udp_hdr_buf: [8]u8 = undefined;
+            var udp_hdr_len: usize = 0;
+
+            switch (parsed.repr.next_header) {
+                .uncompressed => |proto| {
+                    next_proto = proto;
+                    proto_payload = remaining;
+                },
+                .compressed => {
+                    if (remaining.len == 0) return null;
+                    // Check for UDP NHC
+                    if (remaining[0] >> 3 == sixlowpan.DISPATCH_UDP_NHC) {
+                        next_proto = .udp;
+                        const udp_nhc = sixlowpan.parseUdpNhc(remaining) catch return null;
+                        nhc_overhead = udp_nhc.consumed;
+
+                        const udp_payload = remaining[udp_nhc.consumed..];
+                        const udp_total: u16 = @intCast(8 + udp_payload.len);
+
+                        // Build uncompressed UDP header
+                        const checksum_mod_ref = @import("wire/checksum.zig");
+                        checksum_mod_ref.writeU16(udp_hdr_buf[0..2], udp_nhc.repr.src_port);
+                        checksum_mod_ref.writeU16(udp_hdr_buf[2..4], udp_nhc.repr.dst_port);
+                        checksum_mod_ref.writeU16(udp_hdr_buf[4..6], udp_total);
+                        if (udp_nhc.repr.checksum) |ck| {
+                            checksum_mod_ref.writeU16(udp_hdr_buf[6..8], ck);
+                        } else {
+                            udp_hdr_buf[6] = 0;
+                            udp_hdr_buf[7] = 0;
+                        }
+                        udp_hdr_len = 8;
+                        proto_payload = udp_payload;
+                    } else {
+                        // Unknown NHC dispatch
+                        return null;
+                    }
+                },
+            }
+
+            // Build full IPv6 packet in decompress_buf
+            const payload_len = udp_hdr_len + proto_payload.len;
+            const total = ipv6.HEADER_LEN + payload_len;
+            if (total > self.sixlowpan_decompress_buf.len) return null;
+
+            // Determine actual payload_length for the IPv6 header.
+            // For fragmented datagrams, the uncompressed size tells us the
+            // full datagram size (IPv6 header excluded). For unfragmented,
+            // we compute from the decompressed payload.
+            const ipv6_payload_len: u16 = if (total_uncompressed_len) |tul|
+                tul - @as(u16, @intCast(ipv6.HEADER_LEN))
+            else
+                @intCast(payload_len);
+
+            // Emit IPv6 header
+            _ = ipv6.emit(.{
+                .payload_len = ipv6_payload_len,
+                .next_header = next_proto,
+                .hop_limit = parsed.repr.hop_limit,
+                .src_addr = parsed.repr.src_addr,
+                .dst_addr = parsed.repr.dst_addr,
+            }, &self.sixlowpan_decompress_buf) catch return null;
+
+            // Copy UDP header if present
+            if (udp_hdr_len > 0) {
+                @memcpy(self.sixlowpan_decompress_buf[ipv6.HEADER_LEN..][0..udp_hdr_len], udp_hdr_buf[0..udp_hdr_len]);
+            }
+
+            // Copy remaining payload
+            @memcpy(self.sixlowpan_decompress_buf[ipv6.HEADER_LEN + udp_hdr_len ..][0..proto_payload.len], proto_payload);
+
+            return self.sixlowpan_decompress_buf[0..total];
+        }
+
+        fn processSixlowpanFragment(self: *Self, timestamp: Instant, mac_repr: ieee802154.Repr, payload: []const u8, device: *Device) void {
+            if (comptime !is_ieee802154) return;
+            const frag_repr = sixlowpan_frag.parse(payload) catch return;
+            const frag_payload = sixlowpan_frag.payloadSlice(payload) catch return;
+
+            const tag = switch (frag_repr) {
+                .first_fragment => |f| f.datagram_tag,
+                .next_fragment => |f| f.datagram_tag,
+            };
+            const dgram_size = switch (frag_repr) {
+                .first_fragment => |f| f.datagram_size,
+                .next_fragment => |f| f.datagram_size,
+            };
+
+            const key = frag_mod.FragKey6LoWPAN.fromAddrs(mac_repr.src_addr, mac_repr.dst_addr, tag, dgram_size);
+            const expires = timestamp.add(self.reassembly_timeout);
+            self.reassembler_6lowpan.accept(key, expires);
+
+            switch (frag_repr) {
+                .first_fragment => |f| {
+                    self.reassembler_6lowpan.setTotalSize(f.datagram_size);
+                    // First fragment contains IPHC headers. Decompress them.
+                    const decompressed = self.sixlowpanToIpv6(mac_repr, frag_payload, f.datagram_size) orelse return;
+                    _ = self.reassembler_6lowpan.add(decompressed, 0);
+                },
+                .next_fragment => |f| {
+                    const byte_offset = @as(usize, f.datagram_offset) * 8;
+                    _ = self.reassembler_6lowpan.add(frag_payload, byte_offset);
+                },
+            }
+
+            if (self.reassembler_6lowpan.assemble()) |assembled| {
+                const ip_repr = ipv6.parse(assembled) catch return;
+                self.processIpv6Ingress(timestamp, ip_repr, assembled, device);
+            }
         }
 
         fn dispatchV6Payload(
@@ -1089,6 +1309,170 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             return .sent;
         }
 
+        fn emitIpv6Via6LoWPAN(
+            self: *Self,
+            src_addr: ipv6.Address,
+            dst_addr: ipv6.Address,
+            next_header: ipv6.Protocol,
+            hop_limit: u8,
+            payload_data: []const u8,
+            device: *Device,
+        ) EmitResult {
+            if (comptime !is_ieee802154) return .sent;
+
+            const src_ll = self.sixlowpan_ll_addr;
+            const dst_ll_addr: ieee802154.Address = if (ipv6.isMulticast(dst_addr))
+                .{ .short = .{ 0xff, 0xff } }
+            else
+                .{ .extended = dst_addr[8..16].* };
+
+            // Build IPHC + optional NHC into a local buffer
+            var compress_buf: [SIXLOWPAN_FRAG_BUF]u8 = undefined;
+
+            const iphc_repr = sixlowpan.IphcRepr{
+                .src_addr = src_addr,
+                .dst_addr = dst_addr,
+                .next_header = if (next_header == .udp)
+                    sixlowpan.NextHeader.compressed
+                else
+                    .{ .uncompressed = next_header },
+                .hop_limit = hop_limit,
+            };
+            const iphc_len = sixlowpan.emitIphc(iphc_repr, src_ll, dst_ll_addr, &compress_buf) catch return .sent;
+
+            var pos: usize = iphc_len;
+
+            if (next_header == .udp and payload_data.len >= 8) {
+                // Decompose the full UDP header to build a UDP NHC
+                const udp_src = @as(u16, payload_data[0]) << 8 | @as(u16, payload_data[1]);
+                const udp_dst = @as(u16, payload_data[2]) << 8 | @as(u16, payload_data[3]);
+                const udp_cksum = @as(u16, payload_data[6]) << 8 | @as(u16, payload_data[7]);
+
+                const nhc_repr = sixlowpan.UdpNhcRepr{
+                    .src_port = udp_src,
+                    .dst_port = udp_dst,
+                    .checksum = if (udp_cksum == 0) null else udp_cksum,
+                };
+                const nhc_len = sixlowpan.emitUdpNhc(nhc_repr, compress_buf[pos..]) catch return .sent;
+                pos += nhc_len;
+
+                // Copy UDP payload (skip 8-byte UDP header)
+                const udp_payload = payload_data[8..];
+                if (pos + udp_payload.len > compress_buf.len) return .sent;
+                @memcpy(compress_buf[pos..][0..udp_payload.len], udp_payload);
+                pos += udp_payload.len;
+            } else {
+                // Copy raw payload
+                if (pos + payload_data.len > compress_buf.len) return .sent;
+                @memcpy(compress_buf[pos..][0..payload_data.len], payload_data);
+                pos += payload_data.len;
+            }
+
+            // Build MAC header to check if single frame fits
+            const mac_repr = ieee802154.Repr{
+                .frame_type = .data,
+                .frame_version = .ieee802154_2003,
+                .security = false,
+                .frame_pending = false,
+                .ack_request = false,
+                .pan_id_compression = self.sixlowpan_pan_id != null,
+                .sequence_number = self.sixlowpan_seq_no,
+                .dst_pan_id = self.sixlowpan_pan_id,
+                .dst_addr = dst_ll_addr,
+                .src_pan_id = null,
+                .src_addr = src_ll,
+            };
+            const mac_len = ieee802154.bufferLen(mac_repr);
+
+            if (mac_len + pos <= ieee802154.MAX_FRAME_LEN) {
+                // Single frame
+                var frame_buf: [ieee802154.MAX_FRAME_LEN]u8 = undefined;
+                const mac_written = ieee802154.emit(mac_repr, &frame_buf) catch return .sent;
+                @memcpy(frame_buf[mac_written..][0..pos], compress_buf[0..pos]);
+                self.sixlowpan_seq_no +%= 1;
+                device.transmit(frame_buf[0 .. mac_written + pos]);
+            } else {
+                // Fragment: compute uncompressed datagram size = IPv6 hdr + payload
+                const uncompressed_hdr_size = ipv6.HEADER_LEN + (if (next_header == .udp) @as(usize, 8) else 0);
+                const compressed_hdr_size = iphc_len + (if (next_header == .udp)
+                    sixlowpan.udpNhcBufLen(.{
+                        .src_port = @as(u16, payload_data[0]) << 8 | @as(u16, payload_data[1]),
+                        .dst_port = @as(u16, payload_data[2]) << 8 | @as(u16, payload_data[3]),
+                        .checksum = blk: {
+                            const ck = @as(u16, payload_data[6]) << 8 | @as(u16, payload_data[7]);
+                            break :blk if (ck == 0) null else ck;
+                        },
+                    })
+                else
+                    @as(usize, 0));
+                const header_diff = uncompressed_hdr_size - compressed_hdr_size;
+                const datagram_size: u16 = @intCast(ipv6.HEADER_LEN + payload_data.len);
+
+                const tag = self.sixlowpan_tag;
+                self.sixlowpan_tag +%= 1;
+
+                if (!self.sixlowpan_fragmenter.stage(
+                    compress_buf[0..pos],
+                    datagram_size,
+                    tag,
+                    header_diff,
+                    src_ll,
+                    dst_ll_addr,
+                    self.sixlowpan_pan_id,
+                )) return .sent;
+
+                // Emit first fragment immediately
+                var frag_buf: [ieee802154.MAX_FRAME_LEN]u8 = undefined;
+                const seq = self.sixlowpan_seq_no;
+                self.sixlowpan_seq_no +%= 1;
+                if (self.sixlowpan_fragmenter.emitNext(&frag_buf, seq)) |len| {
+                    device.transmit(frag_buf[0..len]);
+                }
+            }
+            return .sent;
+        }
+
+        fn emit6LoWPANResponse(self: *Self, resp: iface_mod.Ipv6Response, device: *Device) void {
+            if (comptime !is_ieee802154) return;
+
+            var payload_buf: [IPV6_PAYLOAD_MAX]u8 = undefined;
+            const payload_len: usize = switch (resp.payload) {
+                .icmpv6_echo => |echo| icmpv6.emit(
+                    icmpv6.Repr{ .echo_reply = .{ .ident = echo.ident, .seq_no = echo.seq_no, .data = echo.data } },
+                    resp.ip.src_addr, resp.ip.dst_addr, &payload_buf,
+                ) catch return,
+                .icmpv6_dst_unreachable => |du| icmpv6.emit(
+                    icmpv6.Repr{ .dst_unreachable = .{ .reason = du.reason, .header = EMPTY_IPV6_HDR, .data = du.data[0..@min(du.data.len, iface_mod.ICMPV6_ERROR_MAX_DATA)] } },
+                    resp.ip.src_addr, resp.ip.dst_addr, &payload_buf,
+                ) catch return,
+                .icmpv6_pkt_too_big => |ptb| icmpv6.emit(
+                    icmpv6.Repr{ .pkt_too_big = .{ .mtu = ptb.mtu, .header = EMPTY_IPV6_HDR, .data = ptb.data[0..@min(ptb.data.len, iface_mod.ICMPV6_ERROR_MAX_DATA)] } },
+                    resp.ip.src_addr, resp.ip.dst_addr, &payload_buf,
+                ) catch return,
+                .icmpv6_param_problem => |pp| icmpv6.emit(
+                    icmpv6.Repr{ .param_problem = .{ .reason = pp.reason, .pointer = pp.pointer, .header = EMPTY_IPV6_HDR, .data = pp.data[0..@min(pp.data.len, iface_mod.ICMPV6_ERROR_MAX_DATA)] } },
+                    resp.ip.src_addr, resp.ip.dst_addr, &payload_buf,
+                ) catch return,
+                .ndisc => |ndisc_repr| icmpv6.emit(
+                    icmpv6.Repr{ .ndisc = ndisc_repr },
+                    resp.ip.src_addr, resp.ip.dst_addr, &payload_buf,
+                ) catch return,
+                .tcp => |tcp_repr| serializeTcpV6(
+                    tcp_repr, resp.ip.src_addr, resp.ip.dst_addr, &payload_buf,
+                    device_caps.checksum.tcp.shouldComputeTx(),
+                ) orelse return,
+            };
+
+            _ = self.emitIpv6Via6LoWPAN(
+                resp.ip.src_addr,
+                resp.ip.dst_addr,
+                resp.ip.protocol,
+                resp.ip.hop_limit,
+                payload_buf[0..payload_len],
+                device,
+            );
+        }
+
         fn emitNdpSolicit(self: *Self, target_ip: ipv6.Address, device: *Device) void {
             if (comptime !is_ethernet) return;
             const src_addr = self.iface.v6.getSourceAddress(target_ip) orelse
@@ -1351,6 +1735,20 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             return self.emitIpv4Frame(src_addr, result.dst_addr, result.ip_protocol, hop_limit, result.payload, device);
         }
 
+        fn emitV6(
+            self: *Self,
+            src_addr: ipv6.Address,
+            dst_addr: ipv6.Address,
+            next_header: ipv6.Protocol,
+            hop_limit: u8,
+            payload_data: []const u8,
+            device: *Device,
+        ) EmitResult {
+            if (comptime is_ieee802154)
+                return self.emitIpv6Via6LoWPAN(src_addr, dst_addr, next_header, hop_limit, payload_data, device);
+            return self.emitIpv6Frame(src_addr, dst_addr, next_header, hop_limit, payload_data, device);
+        }
+
         fn emitTcpV6Egress(
             self: *Self,
             src_addr: ipv6.Address,
@@ -1361,7 +1759,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
         ) EmitResult {
             var payload_buf: [IPV6_PAYLOAD_MAX]u8 = undefined;
             const total_tcp = serializeTcpV6(repr, src_addr, dst_addr, &payload_buf, device_caps.checksum.tcp.shouldComputeTx()) orelse return .sent;
-            return self.emitIpv6Frame(src_addr, dst_addr, .tcp, hop_limit, payload_buf[0..total_tcp], device);
+            return self.emitV6(src_addr, dst_addr, .tcp, hop_limit, payload_buf[0..total_tcp], device);
         }
 
         fn emitUdpV6Egress(self: *Self, result: anytype, device: *Device) EmitResult {
@@ -1385,14 +1783,14 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             // UDP checksum is mandatory over IPv6
             udp_wire.fillChecksumV6(payload_buf[0..total], src_addr, result.dst_addr);
             const hop_limit = result.hop_limit orelse iface_mod.DEFAULT_HOP_LIMIT;
-            return self.emitIpv6Frame(src_addr, result.dst_addr, .udp, hop_limit, payload_buf[0..total], device);
+            return self.emitV6(src_addr, result.dst_addr, .udp, hop_limit, payload_buf[0..total], device);
         }
 
         fn emitIcmpV6Egress(self: *Self, result: anytype, device: *Device) EmitResult {
             const src_addr = self.iface.v6.getSourceAddress(result.dst_addr) orelse
                 (self.iface.linkLocalIpv6Addr() orelse return .sent);
             const hop_limit = result.hop_limit orelse iface_mod.DEFAULT_HOP_LIMIT;
-            return self.emitIpv6Frame(src_addr, result.dst_addr, .icmpv6, hop_limit, result.payload, device);
+            return self.emitV6(src_addr, result.dst_addr, .icmpv6, hop_limit, result.payload, device);
         }
 
         fn emitDnsV6Egress(self: *Self, result: anytype, device: *Device) EmitResult {
@@ -1410,14 +1808,14 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
 
             const src_addr = self.iface.v6.getSourceAddress(result.dst_ip) orelse return .sent;
             udp_wire.fillChecksumV6(payload_buf[0..total], src_addr, result.dst_ip);
-            return self.emitIpv6Frame(src_addr, result.dst_ip, .udp, iface_mod.DEFAULT_HOP_LIMIT, payload_buf[0..total], device);
+            return self.emitV6(src_addr, result.dst_ip, .udp, iface_mod.DEFAULT_HOP_LIMIT, payload_buf[0..total], device);
         }
 
         fn emitRawV6Egress(self: *Self, result: anytype, device: *Device) EmitResult {
             const src_addr = self.iface.v6.getSourceAddress(result.dst_addr) orelse
                 (self.iface.linkLocalIpv6Addr() orelse return .sent);
             const hop_limit = result.hop_limit orelse iface_mod.DEFAULT_HOP_LIMIT;
-            return self.emitIpv6Frame(src_addr, result.dst_addr, result.ip_protocol, hop_limit, result.payload, device);
+            return self.emitV6(src_addr, result.dst_addr, result.ip_protocol, hop_limit, result.payload, device);
         }
 
         fn emitTcpReply(self: *Self, orig_ip: ipv4.Repr, tcp_repr: tcp_socket.TcpRepr, device: *Device) void {
@@ -1447,8 +1845,12 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     device.transmit(frame);
                 },
                 .ipv6 => |resp| {
-                    const frame = self.serializeIpv6Response(resp, &buf) orelse return;
-                    device.transmit(frame);
+                    if (comptime is_ieee802154) {
+                        self.emit6LoWPANResponse(resp, device);
+                    } else {
+                        const frame = self.serializeIpv6Response(resp, &buf) orelse return;
+                        device.transmit(frame);
+                    }
                 },
             }
         }
@@ -5957,5 +6359,222 @@ test "Medium::Ip IPv4 fragmented ingress" {
     var recv_buf: [256]u8 = undefined;
     const recv = try sock.recvSlice(&recv_buf);
     try testing.expectEqualSlices(u8, &udp_payload, recv_buf[0..recv.data_len]);
+}
+
+// -------------------------------------------------------------------------
+// IEEE 802.15.4 / 6LoWPAN tests
+// -------------------------------------------------------------------------
+
+fn Ieee802154LoopbackDevice(comptime max_frames: usize) type {
+    return struct {
+        const Self = @This();
+        pub const medium: iface_mod.Medium = .ieee802154;
+        inner: LoopbackDevice(max_frames) = .{},
+
+        pub fn init() Self { return .{}; }
+        pub fn receive(self: *Self) ?[]const u8 { return self.inner.receive(); }
+        pub fn transmit(self: *Self, frame: []const u8) void { self.inner.transmit(frame); }
+        pub fn enqueueRx(self: *Self, data: []const u8) void { self.inner.enqueueRx(data); }
+        pub fn dequeueTx(self: *Self) ?[]const u8 { return self.inner.dequeueTx(); }
+        pub fn capabilities() iface_mod.DeviceCapabilities {
+            return .{ .max_transmission_unit = ieee802154.MAX_FRAME_LEN };
+        }
+    };
+}
+
+const Test802154Device = Ieee802154LoopbackDevice(8);
+const Test802154Stack = Stack(Test802154Device, void);
+
+const TEST_SRC_EXT = [8]u8{ 0x00, 0x12, 0x4b, 0x00, 0x14, 0xb5, 0xd9, 0xc7 };
+const TEST_DST_EXT = [8]u8{ 0x00, 0x12, 0x4b, 0x00, 0x06, 0x15, 0x9b, 0xbf };
+const TEST_PAN_ID: u16 = 0xabcd;
+
+fn test802154Stack() Test802154Stack {
+    var s = Test802154Stack.init(LOCAL_HW, {});
+    s.sixlowpan_pan_id = TEST_PAN_ID;
+    s.sixlowpan_ll_addr = .{ .extended = TEST_DST_EXT };
+    const ll_addr = (ieee802154.Address{ .extended = TEST_DST_EXT }).asLinkLocalAddress();
+    s.iface.setIpv6Addrs(&.{.{ .address = ll_addr, .prefix_len = 64 }});
+    return s;
+}
+
+fn buildIeee802154Frame(
+    buf: []u8,
+    src_ext: [8]u8,
+    dst_ext: [8]u8,
+    pan_id: u16,
+    seq: u8,
+    payload: []const u8,
+) []const u8 {
+    const mac_repr = ieee802154.Repr{
+        .frame_type = .data,
+        .frame_version = .ieee802154_2006,
+        .security = false,
+        .frame_pending = false,
+        .ack_request = false,
+        .pan_id_compression = true,
+        .sequence_number = seq,
+        .dst_pan_id = pan_id,
+        .dst_addr = .{ .extended = dst_ext },
+        .src_pan_id = null,
+        .src_addr = .{ .extended = src_ext },
+    };
+    const mac_len = ieee802154.emit(mac_repr, buf) catch unreachable;
+    @memcpy(buf[mac_len..][0..payload.len], payload);
+    return buf[0 .. mac_len + payload.len];
+}
+
+test "802.15.4 stack compiles and initializes" {
+    var device = Test802154Device.init();
+    var stack = test802154Stack();
+
+    const activity = stack.poll(Instant.ZERO, &device);
+    try testing.expect(!activity);
+    try testing.expectEqual(@as(?Instant, null), stack.pollAt());
+}
+
+test "802.15.4 IPHC ingress: ICMPv6 echo request produces reply" {
+    var device = Test802154Device.init();
+    var stack = test802154Stack();
+
+    const src_ll = ieee802154.Address{ .extended = TEST_SRC_EXT };
+    const dst_ll = ieee802154.Address{ .extended = TEST_DST_EXT };
+    const src_ipv6 = src_ll.asLinkLocalAddress();
+    const dst_ipv6 = dst_ll.asLinkLocalAddress();
+
+    // Build ICMPv6 echo request payload
+    const echo_data = [_]u8{ 0xDE, 0xAD };
+    var icmpv6_buf: [128]u8 = undefined;
+    const icmpv6_len = icmpv6.emit(
+        icmpv6.Repr{ .echo_request = .{ .ident = 0x1234, .seq_no = 1, .data = &echo_data } },
+        src_ipv6,
+        dst_ipv6,
+        &icmpv6_buf,
+    ) catch unreachable;
+
+    // Build IPHC: TF=11 NH=uncompressed HLIM=64 SAM=11 DAM=11
+    var iphc_payload: [256]u8 = undefined;
+    const iphc_repr = sixlowpan.IphcRepr{
+        .src_addr = src_ipv6,
+        .dst_addr = dst_ipv6,
+        .next_header = .{ .uncompressed = .icmpv6 },
+        .hop_limit = 64,
+    };
+    const iphc_len = sixlowpan.emitIphc(iphc_repr, src_ll, dst_ll, &iphc_payload) catch unreachable;
+    @memcpy(iphc_payload[iphc_len..][0..icmpv6_len], icmpv6_buf[0..icmpv6_len]);
+    const total_6lowpan = iphc_len + icmpv6_len;
+
+    // Wrap in 802.15.4 MAC frame
+    var frame_buf: [ieee802154.MAX_FRAME_LEN]u8 = undefined;
+    const frame = buildIeee802154Frame(
+        &frame_buf,
+        TEST_SRC_EXT,
+        TEST_DST_EXT,
+        TEST_PAN_ID,
+        1,
+        iphc_payload[0..total_6lowpan],
+    );
+
+    device.enqueueRx(frame);
+    const activity = stack.poll(Instant.ZERO, &device);
+    try testing.expect(activity);
+
+    // Should have produced a response (ICMPv6 echo reply via 6LoWPAN)
+    const tx_frame = device.dequeueTx() orelse return error.ExpectedTxFrame;
+
+    // Parse the 802.15.4 MAC header
+    const tx_mac = try ieee802154.parse(tx_frame);
+    try testing.expectEqual(ieee802154.FrameType.data, tx_mac.frame_type);
+
+    // Parse the payload as 6LoWPAN IPHC
+    const tx_payload = try ieee802154.payloadSlice(tx_frame);
+    try testing.expect(tx_payload.len > 0);
+    const dispatch = sixlowpan.dispatchType(tx_payload[0]);
+    try testing.expectEqual(sixlowpan.DispatchType.iphc, dispatch);
+
+    // Parse IPHC to verify it is an echo reply
+    const parsed = try sixlowpan.parseIphc(tx_payload, tx_mac.src_addr, tx_mac.dst_addr, &.{});
+    try testing.expectEqual(@as(u8, 64), parsed.repr.hop_limit);
+
+    switch (parsed.repr.next_header) {
+        .uncompressed => |proto| try testing.expectEqual(ipv6.Protocol.icmpv6, proto),
+        .compressed => return error.ExpectedUncompressedNH,
+    }
+
+    // The ICMPv6 payload starts after the IPHC header
+    const icmpv6_reply = tx_payload[parsed.consumed..];
+    try testing.expect(icmpv6_reply.len >= 8);
+    // Type should be 129 (echo reply)
+    try testing.expectEqual(@as(u8, 129), icmpv6_reply[0]);
+}
+
+test "802.15.4 PAN ID filtering drops wrong PAN" {
+    var device = Test802154Device.init();
+    var stack = test802154Stack();
+
+    const src_ll = ieee802154.Address{ .extended = TEST_SRC_EXT };
+    const dst_ll = ieee802154.Address{ .extended = TEST_DST_EXT };
+    const src_ipv6 = src_ll.asLinkLocalAddress();
+    const dst_ipv6 = dst_ll.asLinkLocalAddress();
+
+    var icmpv6_buf: [128]u8 = undefined;
+    const icmpv6_len = icmpv6.emit(
+        icmpv6.Repr{ .echo_request = .{ .ident = 1, .seq_no = 1, .data = &[_]u8{} } },
+        src_ipv6, dst_ipv6, &icmpv6_buf,
+    ) catch unreachable;
+
+    var iphc_payload: [256]u8 = undefined;
+    const iphc_len = sixlowpan.emitIphc(.{
+        .src_addr = src_ipv6,
+        .dst_addr = dst_ipv6,
+        .next_header = .{ .uncompressed = .icmpv6 },
+        .hop_limit = 64,
+    }, src_ll, dst_ll, &iphc_payload) catch unreachable;
+    @memcpy(iphc_payload[iphc_len..][0..icmpv6_len], icmpv6_buf[0..icmpv6_len]);
+
+    // Use wrong PAN ID (0x9999 instead of 0xabcd)
+    var frame_buf: [ieee802154.MAX_FRAME_LEN]u8 = undefined;
+    const frame = buildIeee802154Frame(
+        &frame_buf,
+        TEST_SRC_EXT,
+        TEST_DST_EXT,
+        0x9999,
+        1,
+        iphc_payload[0 .. iphc_len + icmpv6_len],
+    );
+
+    device.enqueueRx(frame);
+    _ = stack.poll(Instant.ZERO, &device);
+
+    // Should have been dropped -- no TX frame
+    try testing.expectEqual(@as(?[]const u8, null), device.dequeueTx());
+}
+
+test "802.15.4 non-data frame is dropped" {
+    var device = Test802154Device.init();
+    var stack = test802154Stack();
+
+    // Build an ACK frame (frame_type=2)
+    var buf: [16]u8 = undefined;
+    const mac_repr = ieee802154.Repr{
+        .frame_type = .ack,
+        .frame_version = .ieee802154_2006,
+        .security = false,
+        .frame_pending = false,
+        .ack_request = false,
+        .pan_id_compression = false,
+        .sequence_number = 0,
+        .dst_pan_id = null,
+        .dst_addr = .absent,
+        .src_pan_id = null,
+        .src_addr = .absent,
+    };
+    const mac_len = ieee802154.emit(mac_repr, &buf) catch unreachable;
+
+    device.enqueueRx(buf[0..mac_len]);
+    const activity = stack.poll(Instant.ZERO, &device);
+    try testing.expect(activity);
+
+    try testing.expectEqual(@as(?[]const u8, null), device.dequeueTx());
 }
 

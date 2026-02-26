@@ -5,6 +5,7 @@
 const ipv6 = @import("ipv6.zig");
 const ndisc = @import("ndisc.zig");
 const mld = @import("mld.zig");
+const rpl_mod = @import("rpl.zig");
 const checksum = @import("checksum.zig");
 
 const readU16 = checksum.readU16;
@@ -29,6 +30,7 @@ pub const Message = enum(u8) {
     neighbor_advert = 0x88,
     redirect = 0x89,
     mld_report = 0x8F,
+    rpl_control = 0x9b,
     _,
 };
 
@@ -90,6 +92,7 @@ pub const Repr = union(enum) {
     },
     ndisc: ndisc.Repr,
     mld: mld.Repr,
+    rpl: rpl_mod.Repr,
 };
 
 pub fn bufferLen(repr: Repr) usize {
@@ -103,6 +106,7 @@ pub fn bufferLen(repr: Repr) usize {
         .param_problem => |pp| clampError(4 + ipv6.HEADER_LEN + pp.data.len),
         .ndisc => |n| ndisc.bufferLen(n),
         .mld => |m| mld.bufferLen(m),
+        .rpl => |r| rpl_mod.bufferLen(r),
     };
 }
 
@@ -183,6 +187,10 @@ pub fn parse(
         .mld_query, .mld_report => {
             return .{ .mld = try mld.parse(@intFromEnum(msg_type), body) };
         },
+        .rpl_control => {
+            const rpl_repr = rpl_mod.parse(data[1], body) catch return error.Unrecognized;
+            return .{ .rpl = rpl_repr };
+        },
         _ => return error.Unrecognized,
     }
 }
@@ -240,6 +248,15 @@ pub fn emit(
             };
             buf[1] = 0;
         },
+        .rpl => |r| {
+            buf[0] = @intFromEnum(Message.rpl_control);
+            buf[1] = switch (r) {
+                .dis => @intFromEnum(rpl_mod.RplControlMessage.dis),
+                .dio => @intFromEnum(rpl_mod.RplControlMessage.dio),
+                .dao => @intFromEnum(rpl_mod.RplControlMessage.dao),
+                .dao_ack => @intFromEnum(rpl_mod.RplControlMessage.dao_ack),
+            };
+        },
     }
 
     // Body (after the 4-byte ICMPv6 header)
@@ -276,6 +293,9 @@ pub fn emit(
         },
         .mld => |m| {
             _ = mld.emit(m, body) catch return error.BufferTooSmall;
+        },
+        .rpl => |r| {
+            _ = rpl_mod.emit(r, body) catch return error.BufferTooSmall;
         },
     }
 
