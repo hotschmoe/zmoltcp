@@ -10,10 +10,6 @@ const checksum = @import("checksum.zig");
 const readU16 = checksum.readU16;
 const writeU16 = checksum.writeU16;
 
-// ---------------------------------------------------------------------------
-// InstanceId
-// ---------------------------------------------------------------------------
-
 pub const InstanceId = union(enum) {
     global: u7,
     local: struct {
@@ -22,27 +18,22 @@ pub const InstanceId = union(enum) {
     },
 
     pub fn fromByte(b: u8) InstanceId {
-        if (((b >> 7) & 1) == 0) {
-            return .{ .global = @truncate(b & 0x7F) };
-        } else {
-            return .{ .local = .{
-                .id = @truncate(b & 0x3F),
-                .dodag_is_destination = ((b >> 6) & 1) == 1,
-            } };
+        if (b & 0x80 == 0) {
+            return .{ .global = @truncate(b) };
         }
+        return .{ .local = .{
+            .id = @truncate(b & 0x3F),
+            .dodag_is_destination = b & 0x40 != 0,
+        } };
     }
 
     pub fn toByte(self: InstanceId) u8 {
         return switch (self) {
             .global => |v| @as(u8, v),
-            .local => |l| 0x80 | (@as(u8, if (l.dodag_is_destination) @as(u8, 0x40) else 0) | @as(u8, l.id)),
+            .local => |l| 0x80 | (if (l.dodag_is_destination) @as(u8, 0x40) else @as(u8, 0)) | @as(u8, l.id),
         };
     }
 };
-
-// ---------------------------------------------------------------------------
-// ModeOfOperation
-// ---------------------------------------------------------------------------
 
 pub const ModeOfOperation = enum(u2) {
     no_downward_routes = 0,
@@ -51,10 +42,6 @@ pub const ModeOfOperation = enum(u2) {
     storing_with_multicast = 3,
 };
 
-// ---------------------------------------------------------------------------
-// RplControlMessage
-// ---------------------------------------------------------------------------
-
 pub const RplControlMessage = enum(u8) {
     dis = 0x00,
     dio = 0x01,
@@ -62,10 +49,6 @@ pub const RplControlMessage = enum(u8) {
     dao_ack = 0x03,
     _,
 };
-
-// ---------------------------------------------------------------------------
-// Repr types
-// ---------------------------------------------------------------------------
 
 pub const DisRepr = struct {
     options: []const u8,
@@ -105,9 +88,16 @@ pub const Repr = union(enum) {
     dao_ack: DaoAckRepr,
 };
 
-// ---------------------------------------------------------------------------
-// Top-level parse/emit/bufferLen
-// ---------------------------------------------------------------------------
+/// Parses the optional DODAG ID at byte offset 4 when the D-flag is set.
+/// Used by both DAO and DAO-ACK. Returns the DODAG ID and the byte offset
+/// where trailing data begins.
+fn parseDodagId(flags_byte: u8, d_flag_bit: u8, data: []const u8) error{Truncated}!struct { ?[16]u8, usize } {
+    if (flags_byte & d_flag_bit != 0) {
+        if (data.len < 20) return error.Truncated;
+        return .{ data[4..20].*, 20 };
+    }
+    return .{ null, 4 };
+}
 
 pub fn parse(code: u8, data: []const u8) error{ Truncated, Malformed }!Repr {
     const msg: RplControlMessage = @enumFromInt(code);
@@ -123,8 +113,8 @@ pub fn parse(code: u8, data: []const u8) error{ Truncated, Malformed }!Repr {
                 .rpl_instance_id = InstanceId.fromByte(data[0]),
                 .version_number = data[1],
                 .rank = readU16(data[2..4]),
-                .grounded = (flags_byte & 0x80) != 0,
-                .mode_of_operation = @enumFromInt(@as(u2, @truncate((flags_byte >> 3) & 0x07))),
+                .grounded = flags_byte & 0x80 != 0,
+                .mode_of_operation = @enumFromInt(@as(u2, @truncate(flags_byte >> 3))),
                 .dodag_preference = @truncate(flags_byte & 0x07),
                 .dtsn = data[5],
                 .dodag_id = data[8..24].*,
@@ -133,54 +123,37 @@ pub fn parse(code: u8, data: []const u8) error{ Truncated, Malformed }!Repr {
         },
         .dao => {
             if (data.len < 4) return error.Truncated;
-            const flags_byte = data[1];
-            const expect_ack = (flags_byte & 0x80) != 0;
-            const d_flag = (flags_byte & 0x40) != 0;
-            if (d_flag) {
-                if (data.len < 20) return error.Truncated;
-                return .{ .dao = .{
-                    .rpl_instance_id = InstanceId.fromByte(data[0]),
-                    .expect_ack = expect_ack,
-                    .sequence = data[3],
-                    .dodag_id = data[4..20].*,
-                    .options = data[20..],
-                } };
-            } else {
-                return .{ .dao = .{
-                    .rpl_instance_id = InstanceId.fromByte(data[0]),
-                    .expect_ack = expect_ack,
-                    .sequence = data[3],
-                    .dodag_id = null,
-                    .options = data[4..],
-                } };
-            }
+            const dodag_id, const tail = try parseDodagId(data[1], 0x40, data);
+            return .{ .dao = .{
+                .rpl_instance_id = InstanceId.fromByte(data[0]),
+                .expect_ack = data[1] & 0x80 != 0,
+                .sequence = data[3],
+                .dodag_id = dodag_id,
+                .options = data[tail..],
+            } };
         },
         .dao_ack => {
             if (data.len < 4) return error.Truncated;
-            const d_flag = (data[1] & 0x80) != 0;
-            if (d_flag) {
-                if (data.len < 20) return error.Truncated;
-                return .{ .dao_ack = .{
-                    .rpl_instance_id = InstanceId.fromByte(data[0]),
-                    .sequence = data[2],
-                    .status = data[3],
-                    .dodag_id = data[4..20].*,
-                } };
-            } else {
-                return .{ .dao_ack = .{
-                    .rpl_instance_id = InstanceId.fromByte(data[0]),
-                    .sequence = data[2],
-                    .status = data[3],
-                    .dodag_id = null,
-                } };
-            }
+            const dodag_id, _ = try parseDodagId(data[1], 0x80, data);
+            return .{ .dao_ack = .{
+                .rpl_instance_id = InstanceId.fromByte(data[0]),
+                .sequence = data[2],
+                .status = data[3],
+                .dodag_id = dodag_id,
+            } };
         },
-        _ => {
-            const c: u8 = code;
-            if ((c >= 0x80 and c <= 0x83) or c == 0x8a) return error.Malformed;
-            return error.Malformed;
-        },
+        _ => return error.Malformed,
     }
+}
+
+/// Emits the optional DODAG ID at byte offset 4 when present. Returns
+/// the byte offset where trailing data should begin.
+fn emitDodagId(dodag_id: ?[16]u8, buf: []u8) usize {
+    if (dodag_id) |did| {
+        @memcpy(buf[4..20], &did);
+        return 20;
+    }
+    return 4;
 }
 
 pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
@@ -189,50 +162,40 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
 
     switch (repr) {
         .dis => |d| {
-            buf[0] = 0; // flags (reserved)
-            buf[1] = 0; // reserved
+            buf[0] = 0;
+            buf[1] = 0;
             @memcpy(buf[2 .. 2 + d.options.len], d.options);
         },
         .dio => |d| {
             buf[0] = d.rpl_instance_id.toByte();
             buf[1] = d.version_number;
             writeU16(buf[2..4], d.rank);
-            var flags: u8 = 0;
+            var flags: u8 = @as(u8, d.dodag_preference);
             if (d.grounded) flags |= 0x80;
             flags |= @as(u8, @intFromEnum(d.mode_of_operation)) << 3;
-            flags |= @as(u8, d.dodag_preference);
             buf[4] = flags;
             buf[5] = d.dtsn;
-            buf[6] = 0; // flags (reserved)
-            buf[7] = 0; // reserved
+            buf[6] = 0;
+            buf[7] = 0;
             @memcpy(buf[8..24], &d.dodag_id);
             @memcpy(buf[24 .. 24 + d.options.len], d.options);
         },
         .dao => |d| {
             buf[0] = d.rpl_instance_id.toByte();
-            var flags: u8 = 0;
+            var flags: u8 = if (d.dodag_id != null) @as(u8, 0x40) else @as(u8, 0);
             if (d.expect_ack) flags |= 0x80;
-            if (d.dodag_id != null) flags |= 0x40;
             buf[1] = flags;
-            buf[2] = 0; // reserved
+            buf[2] = 0;
             buf[3] = d.sequence;
-            if (d.dodag_id) |did| {
-                @memcpy(buf[4..20], &did);
-                @memcpy(buf[20 .. 20 + d.options.len], d.options);
-            } else {
-                @memcpy(buf[4 .. 4 + d.options.len], d.options);
-            }
+            const tail = emitDodagId(d.dodag_id, buf);
+            @memcpy(buf[tail .. tail + d.options.len], d.options);
         },
         .dao_ack => |d| {
             buf[0] = d.rpl_instance_id.toByte();
-            var d_flag: u8 = 0;
-            if (d.dodag_id != null) d_flag = 0x80;
-            buf[1] = d_flag;
+            buf[1] = if (d.dodag_id != null) @as(u8, 0x80) else @as(u8, 0);
             buf[2] = d.sequence;
             buf[3] = d.status;
-            if (d.dodag_id) |did| {
-                @memcpy(buf[4..20], &did);
-            }
+            _ = emitDodagId(d.dodag_id, buf);
         },
     }
     return len;
@@ -246,10 +209,6 @@ pub fn bufferLen(repr: Repr) usize {
         .dao_ack => |d| if (d.dodag_id != null) @as(usize, 20) else @as(usize, 4),
     };
 }
-
-// ---------------------------------------------------------------------------
-// RPL Options (TLV format within control messages)
-// ---------------------------------------------------------------------------
 
 pub const OptionType = enum(u8) {
     pad1 = 0x00,
@@ -294,10 +253,6 @@ pub const OptionIterator = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// DodagConfigurationOption
-// ---------------------------------------------------------------------------
-
 pub const DodagConfigurationOption = struct {
     authentication_enabled: bool,
     path_control_size: u3,
@@ -316,7 +271,7 @@ pub const DodagConfigurationOption = struct {
         if (data.len < WIRE_LEN) return error.Truncated;
         const flags_byte = data[0];
         return .{
-            .authentication_enabled = ((flags_byte >> 3) & 1) == 1,
+            .authentication_enabled = flags_byte & 0x08 != 0,
             .path_control_size = @truncate(flags_byte & 0x07),
             .dio_interval_doublings = data[1],
             .dio_interval_min = data[2],
@@ -341,16 +296,12 @@ pub const DodagConfigurationOption = struct {
         writeU16(buf[4..6], self.max_rank_increase);
         writeU16(buf[6..8], self.minimum_hop_rank_increase);
         writeU16(buf[8..10], self.objective_code_point);
-        buf[10] = 0; // reserved
+        buf[10] = 0;
         buf[11] = self.default_lifetime;
         writeU16(buf[12..14], self.lifetime_unit);
         return WIRE_LEN;
     }
 };
-
-// ---------------------------------------------------------------------------
-// RplTargetOption
-// ---------------------------------------------------------------------------
 
 pub const RplTargetOption = struct {
     prefix_length: u8,
@@ -360,9 +311,6 @@ pub const RplTargetOption = struct {
 
     pub fn parseOption(data: []const u8) error{Truncated}!RplTargetOption {
         if (data.len < 2) return error.Truncated;
-        // data[0] = flags (reserved), data[1] = prefix_length
-        const prefix_length = data[1];
-        _ = prefix_length;
         var prefix: [16]u8 = .{0} ** 16;
         const avail = @min(data.len - 2, 16);
         @memcpy(prefix[0..avail], data[2 .. 2 + avail]);
@@ -374,16 +322,12 @@ pub const RplTargetOption = struct {
 
     pub fn emit(self: RplTargetOption, buf: []u8) error{BufferTooSmall}!usize {
         if (buf.len < WIRE_LEN) return error.BufferTooSmall;
-        buf[0] = 0; // flags (reserved)
+        buf[0] = 0;
         buf[1] = self.prefix_length;
         @memcpy(buf[2..18], &self.prefix);
         return WIRE_LEN;
     }
 };
-
-// ---------------------------------------------------------------------------
-// TransitInformationOption
-// ---------------------------------------------------------------------------
 
 pub const TransitInformationOption = struct {
     external: bool,
@@ -394,26 +338,19 @@ pub const TransitInformationOption = struct {
 
     pub fn parseOption(data: []const u8) error{Truncated}!TransitInformationOption {
         if (data.len < 4) return error.Truncated;
-        const has_parent = data.len >= 20;
-        var parent: ?[16]u8 = null;
-        if (has_parent) {
-            parent = data[4..20].*;
-        }
         return .{
-            .external = (data[0] & 0x80) != 0,
+            .external = data[0] & 0x80 != 0,
             .path_control = data[1],
             .path_sequence = data[2],
             .path_lifetime = data[3],
-            .parent_address = parent,
+            .parent_address = if (data.len >= 20) data[4..20].* else null,
         };
     }
 
     pub fn emit(self: TransitInformationOption, buf: []u8) error{BufferTooSmall}!usize {
         const len = self.wireLen();
         if (buf.len < len) return error.BufferTooSmall;
-        var flags: u8 = 0;
-        if (self.external) flags |= 0x80;
-        buf[0] = flags;
+        buf[0] = if (self.external) @as(u8, 0x80) else @as(u8, 0);
         buf[1] = self.path_control;
         buf[2] = self.path_sequence;
         buf[3] = self.path_lifetime;
@@ -428,10 +365,7 @@ pub const TransitInformationOption = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// HopByHopRepr (RFC 6553 -- carried in IPv6 HBH extension header)
-// ---------------------------------------------------------------------------
-
+// RFC 6553 -- carried in IPv6 HBH extension header
 pub const HopByHopRepr = struct {
     down: bool,
     rank_error: bool,
@@ -443,10 +377,11 @@ pub const HopByHopRepr = struct {
 
     pub fn parseOption(data: []const u8) error{Truncated}!HopByHopRepr {
         if (data.len < WIRE_LEN) return error.Truncated;
+        const flags = data[0];
         return .{
-            .down = (data[0] & 0x80) != 0,
-            .rank_error = (data[0] & 0x40) != 0,
-            .forwarding_error = (data[0] & 0x20) != 0,
+            .down = flags & 0x80 != 0,
+            .rank_error = flags & 0x40 != 0,
+            .forwarding_error = flags & 0x20 != 0,
             .instance_id = InstanceId.fromByte(data[1]),
             .sender_rank = readU16(data[2..4]),
         };

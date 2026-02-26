@@ -29,15 +29,13 @@ pub const Repr = union(enum) {
 };
 
 pub fn parse(data: []const u8) error{ Truncated, Malformed }!Repr {
-    if (data.len < 2) return error.Truncated;
+    if (data.len < FIRST_FRAGMENT_HEADER_SIZE) return error.Truncated;
 
     const dispatch = data[0] >> 3;
+    const datagram_size = readU16(data[0..2]) & 0x7FF;
+    const datagram_tag = readU16(data[2..4]);
 
     if (dispatch == DISPATCH_FIRST_FRAGMENT) {
-        if (data.len < FIRST_FRAGMENT_HEADER_SIZE) return error.Truncated;
-        const size_word = readU16(data[0..2]);
-        const datagram_size = size_word & 0x7FF;
-        const datagram_tag = readU16(data[2..4]);
         return .{ .first_fragment = .{
             .datagram_size = datagram_size,
             .datagram_tag = datagram_tag,
@@ -46,9 +44,6 @@ pub fn parse(data: []const u8) error{ Truncated, Malformed }!Repr {
 
     if (dispatch == DISPATCH_NEXT_FRAGMENT) {
         if (data.len < NEXT_FRAGMENT_HEADER_SIZE) return error.Truncated;
-        const size_word = readU16(data[0..2]);
-        const datagram_size = size_word & 0x7FF;
-        const datagram_tag = readU16(data[2..4]);
         return .{ .next_fragment = .{
             .datagram_size = datagram_size,
             .datagram_tag = datagram_tag,
@@ -63,21 +58,23 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
     const needed = bufferLen(repr);
     if (buf.len < needed) return error.BufferTooSmall;
 
-    switch (repr) {
-        .first_fragment => |f| {
-            const val: u16 = (@as(u16, DISPATCH_FIRST_FRAGMENT) << 11) | (f.datagram_size & 0x7FF);
-            writeU16(buf[0..2], val);
-            writeU16(buf[2..4], f.datagram_tag);
-            return FIRST_FRAGMENT_HEADER_SIZE;
-        },
-        .next_fragment => |f| {
-            const val: u16 = (@as(u16, DISPATCH_NEXT_FRAGMENT) << 11) | (f.datagram_size & 0x7FF);
-            writeU16(buf[0..2], val);
-            writeU16(buf[2..4], f.datagram_tag);
-            buf[4] = f.datagram_offset;
-            return NEXT_FRAGMENT_HEADER_SIZE;
-        },
-    }
+    const dispatch: u16 = switch (repr) {
+        .first_fragment => DISPATCH_FIRST_FRAGMENT,
+        .next_fragment => DISPATCH_NEXT_FRAGMENT,
+    };
+    const size = switch (repr) {
+        inline else => |f| f.datagram_size,
+    };
+    const tag = switch (repr) {
+        inline else => |f| f.datagram_tag,
+    };
+
+    writeU16(buf[0..2], (dispatch << 11) | (size & 0x7FF));
+    writeU16(buf[2..4], tag);
+
+    if (repr == .next_fragment) buf[4] = repr.next_fragment.datagram_offset;
+
+    return needed;
 }
 
 pub fn bufferLen(repr: Repr) usize {
@@ -88,10 +85,7 @@ pub fn bufferLen(repr: Repr) usize {
 }
 
 pub fn payloadSlice(data: []const u8) error{ Truncated, Malformed }![]const u8 {
-    const repr = try parse(data);
-    const hdr_len = bufferLen(repr);
-    if (data.len < hdr_len) return error.Truncated;
-    return data[hdr_len..];
+    return data[bufferLen(try parse(data))..];
 }
 
 // -------------------------------------------------------------------------

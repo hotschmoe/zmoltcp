@@ -181,7 +181,6 @@ pub fn isFragmentV6(frag_repr: ipv6fragment.Repr) bool {
 }
 
 /// Reassembly key for 6LoWPAN fragmented datagrams (RFC 4944 S5.3).
-/// Keyed by source LL address + datagram tag + datagram size.
 pub const FragKey6LoWPAN = struct {
     datagram_tag: u16,
     datagram_size: u16,
@@ -211,8 +210,7 @@ pub const FragKey6LoWPAN = struct {
 };
 
 /// Buffers one 6LoWPAN compressed payload for fragmented egress via
-/// IEEE 802.15.4 frames. First fragment uses FRAG1 header (4 bytes),
-/// subsequent fragments use FRAGN header (5 bytes).
+/// IEEE 802.15.4 frames.
 pub fn SixlowpanFragmenter(comptime buffer_size: usize) type {
     return struct {
         const Self = @This();
@@ -223,13 +221,10 @@ pub fn SixlowpanFragmenter(comptime buffer_size: usize) type {
         datagram_size: u16 = 0,
         datagram_tag: u16 = 0,
 
-        // Saved from initial emission for subsequent fragments.
         ll_src_addr: ieee802154.Address = .absent,
         ll_dst_addr: ieee802154.Address = .absent,
         pan_id: ?u16 = null,
-
-        // Header size difference (uncompressed - compressed) for offset math.
-        header_diff: usize = 0,
+        header_diff: usize = 0, // uncompressed_hdr_size - compressed_hdr_size
 
         pub fn isEmpty(self: *const Self) bool {
             return self.packet_len == 0;
@@ -244,9 +239,6 @@ pub fn SixlowpanFragmenter(comptime buffer_size: usize) type {
             self.sent_bytes = 0;
         }
 
-        /// Stage compressed 6LoWPAN payload for fragmented egress.
-        /// `datagram_size` is the uncompressed IPv6 datagram size.
-        /// `header_diff` = uncompressed_hdr_size - compressed_hdr_size.
         pub fn stage(
             self: *Self,
             compressed: []const u8,
@@ -270,8 +262,6 @@ pub fn SixlowpanFragmenter(comptime buffer_size: usize) type {
             return true;
         }
 
-        /// Emit the next fragment into buf. Writes the 802.15.4 MAC header,
-        /// 6LoWPAN fragment header, and payload. Returns bytes written.
         pub fn emitNext(
             self: *Self,
             buf: []u8,
@@ -285,7 +275,6 @@ pub fn SixlowpanFragmenter(comptime buffer_size: usize) type {
             else
                 sixlowpan_frag.NEXT_FRAGMENT_HEADER_SIZE;
 
-            // Build MAC header repr to compute its length.
             const mac_repr = ieee802154.Repr{
                 .frame_type = .data,
                 .frame_version = .ieee802154_2003,
@@ -296,12 +285,11 @@ pub fn SixlowpanFragmenter(comptime buffer_size: usize) type {
                 .sequence_number = seq_no,
                 .dst_pan_id = self.pan_id,
                 .dst_addr = self.ll_dst_addr,
-                .src_pan_id = if (self.pan_id != null) null else null,
+                .src_pan_id = null,
                 .src_addr = self.ll_src_addr,
             };
             const mac_len = ieee802154.bufferLen(mac_repr);
 
-            // Max payload per fragment: align to 8 bytes.
             const budget = ieee802154.MAX_FRAME_LEN - mac_len - frag_hdr_len;
             const max_payload = budget - (budget % 8);
 
@@ -310,29 +298,22 @@ pub fn SixlowpanFragmenter(comptime buffer_size: usize) type {
             const total = mac_len + frag_hdr_len + this_payload;
             if (buf.len < total) return null;
 
-            // Emit MAC header.
             var pos = ieee802154.emit(mac_repr, buf) catch return null;
 
-            // Emit fragment header.
-            if (is_first) {
-                const frag_repr = sixlowpan_frag.Repr{ .first_fragment = .{
+            const frag_repr: sixlowpan_frag.Repr = if (is_first)
+                .{ .first_fragment = .{
                     .datagram_size = self.datagram_size,
                     .datagram_tag = self.datagram_tag,
-                } };
-                pos += sixlowpan_frag.emit(frag_repr, buf[pos..]) catch return null;
-            } else {
-                // Offset in 8-octet units. The offset accounts for the
-                // header size difference between compressed and uncompressed.
-                const byte_offset = self.sent_bytes + self.header_diff;
-                const frag_repr = sixlowpan_frag.Repr{ .next_fragment = .{
+                } }
+            else
+                .{ .next_fragment = .{
                     .datagram_size = self.datagram_size,
                     .datagram_tag = self.datagram_tag,
-                    .datagram_offset = @intCast(byte_offset / 8),
+                    // Offset accounts for header size difference (uncompressed - compressed).
+                    .datagram_offset = @intCast((self.sent_bytes + self.header_diff) / 8),
                 } };
-                pos += sixlowpan_frag.emit(frag_repr, buf[pos..]) catch return null;
-            }
+            pos += sixlowpan_frag.emit(frag_repr, buf[pos..]) catch return null;
 
-            // Copy payload.
             @memcpy(buf[pos..][0..this_payload], self.buffer[self.sent_bytes..][0..this_payload]);
             self.sent_bytes += this_payload;
 

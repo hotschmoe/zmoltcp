@@ -1,16 +1,8 @@
 // RPL state machine components (RFC 6550, RFC 6552, RFC 6206).
-//
-// Contains: SequenceCounter (lollipop), Rank, ObjectiveFunction0,
-// ParentSet, Relations routing table, TrickleTimer.
-//
 // Reference: smoltcp src/iface/rpl/
 
 const std = @import("std");
 const time = @import("time.zig");
-
-// ---------------------------------------------------------------------------
-// Constants (RFC 6550)
-// ---------------------------------------------------------------------------
 
 pub const SEQUENCE_WINDOW: u8 = 16;
 pub const DEFAULT_MIN_HOP_RANK_INCREASE: u16 = 256;
@@ -18,10 +10,7 @@ pub const DEFAULT_DIO_INTERVAL_MIN: u32 = 12;
 pub const DEFAULT_DIO_REDUNDANCY_CONSTANT: u8 = 10;
 pub const DEFAULT_DIO_INTERVAL_DOUBLINGS: u32 = 8;
 
-// ---------------------------------------------------------------------------
-// SequenceCounter (RFC 6550 S7.2 -- Lollipop Counter)
-// ---------------------------------------------------------------------------
-
+// SequenceCounter: Lollipop counter (RFC 6550 S7.2)
 pub const SequenceCounter = struct {
     value: u8,
 
@@ -32,7 +21,6 @@ pub const SequenceCounter = struct {
         self.value = if (self.value >= max_val) 0 else self.value + 1;
     }
 
-    /// Partial ordering per RFC 6550 S7.2.
     /// Returns null when values are uncomparable (too far apart in same region).
     pub fn order(a: SequenceCounter, b: SequenceCounter) ?std.math.Order {
         if (a.value == b.value) return .eq;
@@ -59,10 +47,6 @@ pub const SequenceCounter = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Rank (RFC 6550 S3.5.1)
-// ---------------------------------------------------------------------------
-
 pub const Rank = struct {
     value: u16,
     min_hop_rank_increase: u16,
@@ -78,10 +62,6 @@ pub const Rank = struct {
         return std.math.order(a.dagRank(), b.dagRank());
     }
 };
-
-// ---------------------------------------------------------------------------
-// Objective Function 0 (RFC 6552)
-// ---------------------------------------------------------------------------
 
 pub const ObjectiveFunction0 = struct {
     pub const OCP: u16 = 0;
@@ -112,10 +92,6 @@ pub const ObjectiveFunction0 = struct {
         return best_idx;
     }
 };
-
-// ---------------------------------------------------------------------------
-// ParentSet
-// ---------------------------------------------------------------------------
 
 pub const Parent = struct {
     rank: Rank,
@@ -200,10 +176,6 @@ pub fn ParentSet(comptime max_parents: usize) type {
     };
 }
 
-// ---------------------------------------------------------------------------
-// Relations (Routing Table)
-// ---------------------------------------------------------------------------
-
 pub const Relation = struct {
     destination: [16]u8,
     next_hop: [16]u8,
@@ -259,7 +231,7 @@ pub fn Relations(comptime max_relations: usize) type {
         pub fn purge(self: *Self, now: time.Instant) void {
             for (&self.entries) |*slot| {
                 if (slot.*) |r| {
-                    if (r.expiration.lessThan(now) or r.expiration.eql(now)) {
+                    if (now.greaterThanOrEqual(r.expiration)) {
                         slot.* = null;
                     }
                 }
@@ -275,10 +247,6 @@ pub fn Relations(comptime max_relations: usize) type {
         }
     };
 }
-
-// ---------------------------------------------------------------------------
-// TrickleTimer (RFC 6206)
-// ---------------------------------------------------------------------------
 
 pub const TrickleTimer = struct {
     i_min_exp: u32,
@@ -305,18 +273,12 @@ pub const TrickleTimer = struct {
     }
 
     pub fn poll(self: *TrickleTimer, now: time.Instant, rand: u32) bool {
-        var should_tx = false;
+        // Evaluate transmission before interval reset may clear counter.
+        const should_tx = now.greaterThanOrEqual(self.t_expiration) and
+            (self.k == 0 or self.counter < self.k);
 
-        if (self.t_expiration.lessThan(now) or self.t_expiration.eql(now)) {
-            if (self.k == 0 or self.counter < self.k) {
-                should_tx = true;
-            }
-        }
-
-        if (self.i_expiration.lessThan(now) or self.i_expiration.eql(now)) {
-            if (self.i_exp < self.i_max_exp) {
-                self.i_exp += 1;
-            }
+        if (now.greaterThanOrEqual(self.i_expiration)) {
+            if (self.i_exp < self.i_max_exp) self.i_exp += 1;
             self.counter = 0;
             self.resetInterval(now, rand);
         }
@@ -337,10 +299,7 @@ pub const TrickleTimer = struct {
     }
 
     pub fn pollAt(self: *const TrickleTimer) time.Instant {
-        if (self.t_expiration.lessThan(self.i_expiration))
-            return self.t_expiration
-        else
-            return self.i_expiration;
+        return if (self.t_expiration.lessThan(self.i_expiration)) self.t_expiration else self.i_expiration;
     }
 
     fn resetInterval(self: *TrickleTimer, now: time.Instant, rand: u32) void {
@@ -357,10 +316,6 @@ pub const TrickleTimer = struct {
     }
 };
 
-// -------------------------------------------------------------------------
-// Tests
-// -------------------------------------------------------------------------
-
 const testing = std.testing;
 
 fn testAddr(last_byte: u8) [16]u8 {
@@ -375,8 +330,6 @@ fn testParent(rank_value: u16) Parent {
         .dodag_id = .{0} ** 16,
     };
 }
-
-// -- SequenceCounter tests --
 
 // [smoltcp:lollipop.rs:sequence_counter_increment]
 test "sequence counter increment wraps linear 255 to 0" {
@@ -426,7 +379,6 @@ test "sequence counter ordering cross-region" {
     try testing.expectEqual(@as(?std.math.Order, .gt), SequenceCounter.order(.{ .value = 240 }, .{ .value = 5 }));
     // 250 is close to 5 in wrap distance: 256+5-250=11 <= 16, so 250 < 5
     try testing.expectEqual(@as(?std.math.Order, .lt), SequenceCounter.order(.{ .value = 250 }, .{ .value = 5 }));
-    // Reverse of above
     try testing.expectEqual(@as(?std.math.Order, .gt), SequenceCounter.order(.{ .value = 5 }, .{ .value = 250 }));
     // Cross-region: circular 127, linear 129: 256+127-129=254 > 16 => 127 < 129
     try testing.expectEqual(@as(?std.math.Order, .lt), SequenceCounter.order(.{ .value = 127 }, .{ .value = 129 }));
@@ -437,8 +389,6 @@ test "sequence counter ordering uncomparable" {
     // 130 and 241 are both in linear region, diff=111 > 16
     try testing.expectEqual(@as(?std.math.Order, null), SequenceCounter.order(.{ .value = 130 }, .{ .value = 241 }));
 }
-
-// -- Rank tests --
 
 // [smoltcp:rank.rs:calculate_rank]
 test "rank dagRank" {
@@ -458,8 +408,6 @@ test "rank ordering" {
     const r2 = Rank{ .value = 32, .min_hop_rank_increase = 16 };
     try testing.expectEqual(std.math.Order.lt, Rank.order(r1, r2));
 }
-
-// -- ObjectiveFunction0 tests --
 
 // [smoltcp:of0.rs:rank_increase]
 test "OF0 computeRank from root" {
@@ -495,8 +443,6 @@ test "OF0 preferredParent empty set" {
     const set: ParentSet(4) = .{};
     try testing.expectEqual(@as(?usize, null), ObjectiveFunction0.preferredParent(4, &set));
 }
-
-// -- ParentSet tests --
 
 // [smoltcp:parents.rs:add_parent]
 test "parent set add find remove" {
@@ -544,8 +490,6 @@ test "parent set eviction when full" {
     try testing.expect(set.find(testAddr(6)) != null);
     try testing.expect(set.find(testAddr(4)) == null);
 }
-
-// -- Relations tests --
 
 // [smoltcp:relations.rs:add_relation]
 test "relations add and find" {
@@ -602,8 +546,6 @@ test "relations upsert updates next hop" {
     try testing.expect(std.mem.eql(u8, &testAddr(3), &hop));
 }
 
-// -- TrickleTimer tests --
-
 // [smoltcp:trickle.rs:trickle_timer_intervals]
 test "trickle timer fires at t_expiration" {
     const now = time.Instant.ZERO;
@@ -615,10 +557,8 @@ test "trickle timer fires at t_expiration" {
         42,
     );
 
-    // Timer should not have fired yet at t=0 (t_expiration is in the future)
     try testing.expect(!timer.poll(now, 42));
 
-    // Advance to just past t_expiration
     const fire_time = timer.t_expiration;
     const fired = timer.poll(fire_time, 42);
     try testing.expect(fired);
@@ -629,7 +569,6 @@ test "trickle timer consistency suppresses transmission" {
     const now = time.Instant.ZERO;
     var timer = TrickleTimer.init(12, 8, 1, now, 42);
 
-    // Hear enough consistent messages to suppress
     timer.hearConsistent();
     try testing.expectEqual(@as(u8, 1), timer.counter);
 
@@ -643,13 +582,10 @@ test "trickle timer inconsistency resets to i_min" {
     const now = time.Instant.ZERO;
     var timer = TrickleTimer.init(12, 8, 10, now, 42);
 
-    // Manually double the interval a few times
     const far_future = now.add(time.Duration.fromSecs(1000));
     _ = timer.poll(far_future, 42);
-    const after_first = timer.i_exp;
-    try testing.expect(after_first > 12);
+    try testing.expect(timer.i_exp > 12);
 
-    // Hear inconsistency -- should reset
     timer.hearInconsistency(far_future, 99);
     try testing.expectEqual(@as(u32, 12), timer.i_exp);
     try testing.expectEqual(@as(u8, 0), timer.counter);
@@ -659,24 +595,19 @@ test "trickle timer inconsistency resets to i_min" {
 test "trickle timer interval doubling" {
     const now = time.Instant.ZERO;
     var timer = TrickleTimer.init(2, 4, 10, now, 0);
-    // i_min_exp=2, i_max_exp=6, so interval starts at 2^2=4ms
+    // i_min_exp=2, i_max_exp=6, interval starts at 2^2=4ms
     try testing.expectEqual(@as(u32, 2), timer.i_exp);
 
-    // Expire the first interval
     _ = timer.poll(timer.i_expiration, 0);
     try testing.expectEqual(@as(u32, 3), timer.i_exp);
-
-    // Expire again
     _ = timer.poll(timer.i_expiration, 0);
     try testing.expectEqual(@as(u32, 4), timer.i_exp);
-
-    // Keep expiring to reach max
     _ = timer.poll(timer.i_expiration, 0);
     try testing.expectEqual(@as(u32, 5), timer.i_exp);
     _ = timer.poll(timer.i_expiration, 0);
     try testing.expectEqual(@as(u32, 6), timer.i_exp);
 
-    // Should cap at i_max_exp
+    // Caps at i_max_exp
     _ = timer.poll(timer.i_expiration, 0);
     try testing.expectEqual(@as(u32, 6), timer.i_exp);
 }
@@ -685,7 +616,6 @@ test "trickle timer pollAt returns earliest expiration" {
     const now = time.Instant.ZERO;
     const timer = TrickleTimer.init(12, 8, 10, now, 42);
     const pa = timer.pollAt();
-    // pollAt should return the earlier of t_expiration and i_expiration
     if (timer.t_expiration.lessThan(timer.i_expiration)) {
         try testing.expect(pa.eql(timer.t_expiration));
     } else {

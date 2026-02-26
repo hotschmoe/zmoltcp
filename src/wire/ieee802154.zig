@@ -41,10 +41,7 @@ pub const Address = union(enum) {
         };
     }
 
-    /// Convert to EUI-64 identifier.
-    /// Extended: flip U/L bit (bit 1 of byte 0).
-    /// Short: pad with 0xff,0xfe in the middle per RFC 4944.
-    /// Absent: all zeros.
+    /// EUI-64: extended flips U/L bit, short pads with 0xff/0xfe per RFC 4944.
     pub fn asEui64(self: Address) [8]u8 {
         return switch (self) {
             .extended => |e| {
@@ -57,7 +54,6 @@ pub const Address = union(enum) {
         };
     }
 
-    /// Convert to link-local IPv6 address (fe80:: + EUI-64).
     pub fn asLinkLocalAddress(self: Address) [16]u8 {
         const eui = self.asEui64();
         return .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, eui[0], eui[1], eui[2], eui[3], eui[4], eui[5], eui[6], eui[7] };
@@ -101,8 +97,7 @@ const AddrPresentFlags = struct {
     src_mode: AddressingMode,
 };
 
-/// Determine which PAN IDs and addresses are present in the frame based on
-/// frame version, addressing modes, and PAN ID compression.
+/// PAN ID / address presence rules per IEEE 802.15.4-2015 Table 7-2.
 fn addrPresentFlags(
     frame_version: FrameVersion,
     dst_mode: AddressingMode,
@@ -114,38 +109,24 @@ fn addrPresentFlags(
             if (dst_mode == .absent and src_mode == .absent and pan_id_compression)
                 return error.Malformed;
 
-            const dst_is_absent = dst_mode == .absent;
-            const src_is_absent = src_mode == .absent;
+            const dst_present = dst_mode != .absent;
+            const src_present = src_mode != .absent;
 
-            if (dst_is_absent) {
-                return .{
-                    .dst_pan = false,
-                    .dst_mode = .absent,
-                    .src_pan = !src_is_absent,
-                    .src_mode = src_mode,
-                };
+            if (!dst_present) {
+                return .{ .dst_pan = false, .dst_mode = .absent, .src_pan = src_present, .src_mode = src_mode };
             }
-            if (src_is_absent) {
-                return .{
-                    .dst_pan = true,
-                    .dst_mode = dst_mode,
-                    .src_pan = false,
-                    .src_mode = .absent,
-                };
-            }
-            // Both present
             return .{
                 .dst_pan = true,
                 .dst_mode = dst_mode,
-                .src_pan = !pan_id_compression,
+                .src_pan = src_present and !pan_id_compression,
                 .src_mode = src_mode,
             };
         },
         .ieee802154 => {
-            const dst_absent = dst_mode == .absent;
-            const src_absent = src_mode == .absent;
+            const dst_present = dst_mode != .absent;
+            const src_present = src_mode != .absent;
 
-            if (dst_absent and src_absent) {
+            if (!dst_present and !src_present) {
                 return .{
                     .dst_pan = pan_id_compression,
                     .dst_mode = .absent,
@@ -153,7 +134,7 @@ fn addrPresentFlags(
                     .src_mode = .absent,
                 };
             }
-            if (dst_absent and !src_absent) {
+            if (!dst_present) {
                 return .{
                     .dst_pan = false,
                     .dst_mode = .absent,
@@ -161,7 +142,7 @@ fn addrPresentFlags(
                     .src_mode = src_mode,
                 };
             }
-            if (!dst_absent and src_absent) {
+            if (!src_present) {
                 return .{
                     .dst_pan = !pan_id_compression,
                     .dst_mode = dst_mode,
@@ -169,7 +150,6 @@ fn addrPresentFlags(
                     .src_mode = .absent,
                 };
             }
-            // Both present (neither absent)
             if (dst_mode == .extended and src_mode == .extended) {
                 return .{
                     .dst_pan = !pan_id_compression,
@@ -186,7 +166,6 @@ fn addrPresentFlags(
                     .src_mode = .short,
                 };
             }
-            // Mixed short/extended
             return .{
                 .dst_pan = true,
                 .dst_mode = dst_mode,
@@ -196,15 +175,6 @@ fn addrPresentFlags(
         },
         _ => return error.Malformed,
     }
-}
-
-fn addressingModeSize(mode: AddressingMode) error{Malformed}!usize {
-    return switch (mode) {
-        .absent => 0,
-        .short => 2,
-        .extended => 8,
-        _ => error.Malformed,
-    };
 }
 
 fn readU16Le(data: []const u8) u16 {
@@ -230,21 +200,17 @@ fn writeAddrReversed(buf: []u8, comptime len: usize, addr: [len]u8) void {
     }
 }
 
-/// Compute the length of the security header starting at the given position.
 fn securityHeaderLen(data: []const u8, offset: usize) error{Truncated}!usize {
     if (offset >= data.len) return error.Truncated;
 
     const security_ctrl = data[offset];
     var len: usize = 1;
 
-    // Frame counter: 4 bytes unless suppressed (bit 5)
-    if ((security_ctrl >> 5) & 1 == 0) {
-        len += 4;
-    }
+    // 4-byte frame counter unless suppressed (bit 5)
+    if ((security_ctrl >> 5) & 1 == 0) len += 4;
 
-    // Key identifier: length depends on key_id_mode (bits 4:3)
-    const key_id_mode = (security_ctrl >> 3) & 0b11;
-    len += switch (key_id_mode) {
+    // Key identifier length from key_id_mode (bits 4:3)
+    len += switch ((security_ctrl >> 3) & 0b11) {
         0 => @as(usize, 0),
         1 => @as(usize, 1),
         2 => @as(usize, 5),
@@ -255,7 +221,6 @@ fn securityHeaderLen(data: []const u8, offset: usize) error{Truncated}!usize {
     return len;
 }
 
-/// Compute the MIC length based on the security level.
 fn micLen(security_level: u8) usize {
     return switch (security_level & 0b111) {
         0, 4 => 0,
@@ -266,7 +231,58 @@ fn micLen(security_level: u8) usize {
     };
 }
 
-/// Parse an IEEE 802.15.4 MAC frame from raw bytes.
+/// Read an address from wire bytes at the given offset, advancing offset.
+fn readAddress(data: []const u8, offset: *usize, mode: AddressingMode) error{ Truncated, Malformed }!Address {
+    switch (mode) {
+        .absent => return .absent,
+        .short => {
+            if (offset.* + 2 > data.len) return error.Truncated;
+            const addr = readAddrReversed(data[offset.*..], 2);
+            offset.* += 2;
+            return .{ .short = addr };
+        },
+        .extended => {
+            if (offset.* + 8 > data.len) return error.Truncated;
+            const addr = readAddrReversed(data[offset.*..], 8);
+            offset.* += 8;
+            return .{ .extended = addr };
+        },
+        _ => return error.Malformed,
+    }
+}
+
+/// Write an address to wire bytes at the given offset, advancing offset.
+fn writeAddress(buf: []u8, offset: *usize, addr: Address) void {
+    switch (addr) {
+        .absent => {},
+        .short => |s| {
+            writeAddrReversed(buf[offset.*..], 2, s);
+            offset.* += 2;
+        },
+        .extended => |e| {
+            writeAddrReversed(buf[offset.*..], 8, e);
+            offset.* += 8;
+        },
+    }
+}
+
+/// Read an optional PAN ID from wire bytes at the given offset, advancing offset.
+fn readPanId(data: []const u8, offset: *usize, present: bool) error{Truncated}!?u16 {
+    if (!present) return null;
+    if (offset.* + 2 > data.len) return error.Truncated;
+    const pan = readU16Le(data[offset.* .. offset.* + 2]);
+    offset.* += 2;
+    return pan;
+}
+
+/// Write an optional PAN ID to wire bytes at the given offset, advancing offset.
+fn writePanId(buf: []u8, offset: *usize, pan_id: ?u16) void {
+    if (pan_id) |pan| {
+        writeU16Le(buf[offset.* .. offset.* + 2], pan);
+        offset.* += 2;
+    }
+}
+
 pub fn parse(data: []const u8) error{ Truncated, Malformed }!Repr {
     if (data.len < 3) return error.Truncated;
     if (data.len > MAX_FRAME_LEN) return error.Malformed;
@@ -283,82 +299,27 @@ pub fn parse(data: []const u8) error{ Truncated, Malformed }!Repr {
     const frame_version: FrameVersion = @enumFromInt(@as(u2, @truncate((fc >> 12) & 0b11)));
     const src_mode: AddressingMode = @enumFromInt(@as(u2, @truncate((fc >> 14) & 0b11)));
 
-    // Reject unknown addressing modes
     if (@intFromEnum(dst_mode) == 1 or @intFromEnum(src_mode) == 1)
         return error.Malformed;
-
-    // Reject unknown frame versions
     if (@intFromEnum(frame_version) == 3)
         return error.Malformed;
 
-    // Sequence number
     var offset: usize = 2;
     const sequence_number: ?u8 = blk: {
-        if (seq_suppressed and frame_version == .ieee802154) {
-            break :blk null;
-        }
+        if (seq_suppressed and frame_version == .ieee802154) break :blk null;
         if (offset >= data.len) return error.Truncated;
         const sn = data[offset];
         offset += 1;
         break :blk sn;
     };
 
-    // Determine addressing field layout
     const flags = try addrPresentFlags(frame_version, dst_mode, src_mode, pan_id_compression);
 
-    // Read destination PAN ID
-    var dst_pan_id: ?u16 = null;
-    if (flags.dst_pan) {
-        if (offset + 2 > data.len) return error.Truncated;
-        dst_pan_id = readU16Le(data[offset .. offset + 2]);
-        offset += 2;
-    }
+    const dst_pan_id = try readPanId(data, &offset, flags.dst_pan);
+    const dst_addr = try readAddress(data, &offset, flags.dst_mode);
+    const src_pan_id = try readPanId(data, &offset, flags.src_pan);
+    const src_addr = try readAddress(data, &offset, flags.src_mode);
 
-    // Read destination address
-    const dst_addr: Address = switch (flags.dst_mode) {
-        .absent => .absent,
-        .short => blk: {
-            if (offset + 2 > data.len) return error.Truncated;
-            const addr = readAddrReversed(data[offset..], 2);
-            offset += 2;
-            break :blk .{ .short = addr };
-        },
-        .extended => blk: {
-            if (offset + 8 > data.len) return error.Truncated;
-            const addr = readAddrReversed(data[offset..], 8);
-            offset += 8;
-            break :blk .{ .extended = addr };
-        },
-        _ => return error.Malformed,
-    };
-
-    // Read source PAN ID
-    var src_pan_id: ?u16 = null;
-    if (flags.src_pan) {
-        if (offset + 2 > data.len) return error.Truncated;
-        src_pan_id = readU16Le(data[offset .. offset + 2]);
-        offset += 2;
-    }
-
-    // Read source address
-    const src_addr: Address = switch (flags.src_mode) {
-        .absent => .absent,
-        .short => blk: {
-            if (offset + 2 > data.len) return error.Truncated;
-            const addr = readAddrReversed(data[offset..], 2);
-            offset += 2;
-            break :blk .{ .short = addr };
-        },
-        .extended => blk: {
-            if (offset + 8 > data.len) return error.Truncated;
-            const addr = readAddrReversed(data[offset..], 8);
-            offset += 8;
-            break :blk .{ .extended = addr };
-        },
-        _ => return error.Malformed,
-    };
-
-    // Validate security header is accessible
     if (security) {
         const sec_len = try securityHeaderLen(data, offset);
         if (offset + sec_len > data.len) return error.Truncated;
@@ -379,28 +340,20 @@ pub fn parse(data: []const u8) error{ Truncated, Malformed }!Repr {
     };
 }
 
-/// Compute the buffer length required to emit this Repr (header only, no payload).
 pub fn bufferLen(repr: Repr) usize {
-    var len: usize = 2; // frame control
-
+    var len: usize = 2;
     if (repr.sequence_number != null) len += 1;
-
     if (repr.dst_pan_id != null) len += 2;
     len += repr.dst_addr.size();
-
     if (repr.src_pan_id != null) len += 2;
     len += repr.src_addr.size();
-
     return len;
 }
 
-/// Serialize an IEEE 802.15.4 MAC frame header into a buffer.
-/// Returns the number of bytes written.
 pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
     const needed = bufferLen(repr);
     if (buf.len < needed) return error.BufferTooSmall;
 
-    // Build frame control word
     var fc: u16 = 0;
     fc |= @as(u16, @intFromEnum(repr.frame_type));
     if (repr.security) fc |= 1 << 3;
@@ -411,79 +364,28 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
     fc |= @as(u16, @intFromEnum(repr.dst_addr.addressingMode())) << 10;
     fc |= @as(u16, @intFromEnum(repr.frame_version)) << 12;
     fc |= @as(u16, @intFromEnum(repr.src_addr.addressingMode())) << 14;
-
     writeU16Le(buf[0..2], fc);
 
     var offset: usize = 2;
 
-    // Sequence number
     if (repr.sequence_number) |sn| {
         buf[offset] = sn;
         offset += 1;
     }
 
-    // Destination PAN ID
-    if (repr.dst_pan_id) |pan| {
-        writeU16Le(buf[offset .. offset + 2], pan);
-        offset += 2;
-    }
-
-    // Destination address
-    switch (repr.dst_addr) {
-        .absent => {},
-        .short => |s| {
-            writeAddrReversed(buf[offset..], 2, s);
-            offset += 2;
-        },
-        .extended => |e| {
-            writeAddrReversed(buf[offset..], 8, e);
-            offset += 8;
-        },
-    }
-
-    // Source PAN ID
-    if (repr.src_pan_id) |pan| {
-        writeU16Le(buf[offset .. offset + 2], pan);
-        offset += 2;
-    }
-
-    // Source address
-    switch (repr.src_addr) {
-        .absent => {},
-        .short => |s| {
-            writeAddrReversed(buf[offset..], 2, s);
-            offset += 2;
-        },
-        .extended => |e| {
-            writeAddrReversed(buf[offset..], 8, e);
-            offset += 8;
-        },
-    }
+    writePanId(buf, &offset, repr.dst_pan_id);
+    writeAddress(buf, &offset, repr.dst_addr);
+    writePanId(buf, &offset, repr.src_pan_id);
+    writeAddress(buf, &offset, repr.src_addr);
 
     return offset;
 }
 
-/// Returns the payload portion of a parsed frame (after all headers).
-/// For frames with security, skips the security header.
-/// Only data frames have payloads.
+/// Returns the payload portion of a parsed frame (after all headers, including security).
 pub fn payloadSlice(data: []const u8) error{ Truncated, Malformed }![]const u8 {
     const repr = try parse(data);
 
-    var offset: usize = 2; // frame control
-
-    if (repr.sequence_number != null) offset += 1;
-
-    // Determine addressing layout to compute offset past addressing fields
-    const flags = try addrPresentFlags(
-        repr.frame_version,
-        repr.dst_addr.addressingMode(),
-        repr.src_addr.addressingMode(),
-        repr.pan_id_compression,
-    );
-    if (flags.dst_pan) offset += 2;
-    offset += try addressingModeSize(flags.dst_mode);
-    if (flags.src_pan) offset += 2;
-    offset += try addressingModeSize(flags.src_mode);
+    var offset: usize = bufferLen(repr);
 
     if (repr.security) {
         const sec_len = try securityHeaderLen(data, offset);
@@ -493,10 +395,6 @@ pub fn payloadSlice(data: []const u8) error{ Truncated, Malformed }![]const u8 {
     if (offset > data.len) return error.Truncated;
     return data[offset..];
 }
-
-// -------------------------------------------------------------------------
-// Tests
-// -------------------------------------------------------------------------
 
 const testing = @import("std").testing;
 
@@ -686,18 +584,15 @@ test "broadcast detection" {
 }
 
 test "EUI-64 conversion" {
-    // Extended address: flip bit 1 of byte 0
     const ext = Address{ .extended = .{ 0x00, 0x12, 0x4b, 0x00, 0x14, 0xb5, 0xd9, 0xc7 } };
     const eui = ext.asEui64();
-    try testing.expectEqual(@as(u8, 0x02), eui[0]); // bit 1 flipped
+    try testing.expectEqual(@as(u8, 0x02), eui[0]);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x12, 0x4b, 0x00, 0x14, 0xb5, 0xd9, 0xc7 }, eui[1..]);
 
-    // Short address: padded with 0xff,0xfe
     const shrt = Address{ .short = .{ 0xab, 0xcd } };
     const eui_short = shrt.asEui64();
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x00, 0x00, 0xff, 0xfe, 0x00, 0xab, 0xcd }, &eui_short);
 
-    // Absent: all zeros
     const absent_addr: Address = .absent;
     const eui_absent = absent_addr.asEui64();
     try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 }, &eui_absent);
@@ -708,10 +603,8 @@ test "link-local address generation" {
     const ll = ext.asLinkLocalAddress();
     try testing.expectEqual(@as(u8, 0xfe), ll[0]);
     try testing.expectEqual(@as(u8, 0x80), ll[1]);
-    // bytes 2..7 are zero
     try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0, 0, 0 }, ll[2..8]);
-    // bytes 8..15 are EUI-64
-    try testing.expectEqual(@as(u8, 0x02), ll[8]); // bit 1 flipped
+    try testing.expectEqual(@as(u8, 0x02), ll[8]);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x12, 0x4b, 0x00, 0x14, 0xb5, 0xd9, 0xc7 }, ll[9..16]);
 }
 
