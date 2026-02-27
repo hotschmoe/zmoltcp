@@ -100,17 +100,14 @@ test "UDP over 6LoWPAN between two 802.15.4 stacks" {
     var stack_a = LpStack.init(MAC_A, .{ .udp6_sockets = &arr_a });
     var stack_b = LpStack.init(MAC_B, .{ .udp6_sockets = &arr_b });
 
-    // Configure 802.15.4 addressing.
     stack_a.sixlowpan_pan_id = PAN_ID;
     stack_a.sixlowpan_ll_addr = .{ .extended = EUI_A };
     stack_b.sixlowpan_pan_id = PAN_ID;
     stack_b.sixlowpan_ll_addr = .{ .extended = EUI_B };
 
-    // Configure IPv6 link-local addresses.
     stack_a.iface.setIpv6Addrs(&.{.{ .address = IP6_A, .prefix_len = 64 }});
     stack_b.iface.setIpv6Addrs(&.{.{ .address = IP6_B, .prefix_len = 64 }});
 
-    // Send from B to A.
     try sock_b.sendSlice("hello-6lowpan", .{
         .endpoint = .{ .addr = IP6_A, .port = 5000 },
     });

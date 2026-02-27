@@ -71,7 +71,6 @@ test "Raw IP socket exchange" {
     stack_a.iface.v4.addIpAddr(.{ .address = IP_A, .prefix_len = 24 });
     stack_b.iface.v4.addIpAddr(.{ .address = IP_B, .prefix_len = 24 });
 
-    // Pre-fill neighbor caches for determinism.
     stack_a.iface.neighbor_cache.fill(IP_B, MAC_B, Instant.ZERO);
     stack_b.iface.neighbor_cache.fill(IP_A, MAC_A, Instant.ZERO);
 

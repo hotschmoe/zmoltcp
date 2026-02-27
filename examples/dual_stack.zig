@@ -61,7 +61,6 @@ test "IPv4 TCP + IPv6 UDP concurrent on dual-stack" {
     };
     const DualStack = stack_mod.Stack(Device, Sockets);
 
-    // TCP4 sockets
     var srv_rx: [256]u8 = .{0} ** 256;
     var srv_tx: [256]u8 = .{0} ** 256;
     var cli_rx: [256]u8 = .{0} ** 256;
@@ -74,7 +73,6 @@ test "IPv4 TCP + IPv6 UDP concurrent on dual-stack" {
     try tcp_srv.listen(.{ .port = 4000 });
     try tcp_cli.connect(IP4_A, 4000, IP4_B, 50000);
 
-    // UDP6 sockets
     var ua_rx_meta: [2]UdpSock6.PacketMeta = .{ .{}, .{} };
     var ua_rx_pay: [256]u8 = undefined;
     var ua_tx_meta: [2]UdpSock6.PacketMeta = .{ .{}, .{} };
@@ -106,20 +104,16 @@ test "IPv4 TCP + IPv6 UDP concurrent on dual-stack" {
         .udp6_sockets = &udp_arr_b,
     });
 
-    // Configure IPv4
     stack_a.iface.v4.addIpAddr(.{ .address = IP4_A, .prefix_len = 24 });
     stack_b.iface.v4.addIpAddr(.{ .address = IP4_B, .prefix_len = 24 });
-    // Configure IPv6
     stack_a.iface.setIpv6Addrs(&.{.{ .address = IP6_A, .prefix_len = 64 }});
     stack_b.iface.setIpv6Addrs(&.{.{ .address = IP6_B, .prefix_len = 64 }});
 
-    // Pre-fill neighbor caches for determinism
     stack_a.iface.neighbor_cache.fill(IP4_B, MAC_B, Instant.ZERO);
     stack_b.iface.neighbor_cache.fill(IP4_A, MAC_A, Instant.ZERO);
     stack_a.iface.neighbor_cache_v6.fill(IP6_B, MAC_B, Instant.ZERO);
     stack_b.iface.neighbor_cache_v6.fill(IP6_A, MAC_A, Instant.ZERO);
 
-    // Queue UDP6 send
     try udp_b.sendSlice("dual-udp6", .{
         .endpoint = .{ .addr = IP6_A, .port = 5000 },
     });
@@ -138,13 +132,11 @@ test "IPv4 TCP + IPv6 UDP concurrent on dual-stack" {
         _ = stack_b.poll(cur_time, &dev_b);
         shuttleFrames(&dev_a, &dev_b);
 
-        // TCP4: client sends
         if (!tcp_cli_sent and tcp_cli.getState() == .established and tcp_cli.canSend()) {
             _ = tcp_cli.sendSlice("dual-tcp4") catch 0;
             tcp_cli_sent = true;
         }
 
-        // TCP4: server echoes
         if (!tcp_srv_echoed and tcp_srv.getState() == .established and tcp_srv.canRecv()) {
             const n = tcp_srv.recvSlice(&recv_buf) catch 0;
             if (n > 0) {
@@ -155,7 +147,6 @@ test "IPv4 TCP + IPv6 UDP concurrent on dual-stack" {
             }
         }
 
-        // TCP4: client receives echo
         if (tcp_cli_sent and !tcp_cli_received and tcp_cli.canRecv()) {
             const n = tcp_cli.recvSlice(&recv_buf) catch 0;
             if (n > 0) {
@@ -165,7 +156,6 @@ test "IPv4 TCP + IPv6 UDP concurrent on dual-stack" {
             }
         }
 
-        // UDP6: A receives and replies
         if (!udp_a_received and udp_a.canRecv()) {
             const result = udp_a.recvSlice(&recv_buf) catch continue;
             try std.testing.expectEqualSlices(u8, "dual-udp6", recv_buf[0..result.data_len]);
@@ -173,7 +163,6 @@ test "IPv4 TCP + IPv6 UDP concurrent on dual-stack" {
             try udp_a.sendSlice("dual-udp6-reply", .{ .endpoint = result.meta.endpoint });
         }
 
-        // UDP6: B receives reply
         if (udp_a_received and !udp_b_received and udp_b.canRecv()) {
             const result = udp_b.recvSlice(&recv_buf) catch continue;
             try std.testing.expectEqualSlices(u8, "dual-udp6-reply", recv_buf[0..result.data_len]);

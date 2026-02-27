@@ -109,7 +109,6 @@ test "DNS resolution through full stack" {
     var dev_a: Device = .{};
     var dev_b: Device = .{};
 
-    // DNS client socket.
     const S = struct {
         var slots: [4]DnsSock.QuerySlot = [_]DnsSock.QuerySlot{.{}} ** 4;
     };
@@ -118,7 +117,6 @@ test "DNS resolution through full stack" {
     var dns_sock = DnsSock.init(&S.slots, &servers);
     const handle = try dns_sock.startQuery("example.com", .a);
 
-    // UDP server socket on port 53.
     var b_rx_meta: [2]UdpSock.PacketMeta = .{ .{}, .{} };
     var b_rx_pay: [512]u8 = undefined;
     var b_tx_meta: [2]UdpSock.PacketMeta = .{ .{}, .{} };
@@ -134,7 +132,6 @@ test "DNS resolution through full stack" {
     stack_a.iface.v4.addIpAddr(.{ .address = IP_A, .prefix_len = 24 });
     stack_b.iface.v4.addIpAddr(.{ .address = IP_B, .prefix_len = 24 });
 
-    // Pre-fill neighbor caches.
     stack_a.iface.neighbor_cache.fill(IP_B, MAC_B, Instant.ZERO);
     stack_b.iface.neighbor_cache.fill(IP_A, MAC_A, Instant.ZERO);
 
@@ -148,7 +145,6 @@ test "DNS resolution through full stack" {
         _ = stack_b.poll(cur_time, &dev_b);
         shuttleFrames(&dev_a, &dev_b);
 
-        // Server: receive DNS query and respond.
         if (!server_replied and udp_srv.canRecv()) {
             var query_buf: [512]u8 = undefined;
             const result = udp_srv.recvSlice(&query_buf) catch continue;
@@ -157,14 +153,12 @@ test "DNS resolution through full stack" {
             var resp_buf: [512]u8 = undefined;
             const resp_len = buildDnsResponse(query, &resp_buf);
 
-            // Reply to sender on port 49152 (DNS socket's source port).
             try udp_srv.sendSlice(resp_buf[0..resp_len], .{
                 .endpoint = result.meta.endpoint,
             });
             server_replied = true;
         }
 
-        // Client: check for result.
         if (server_replied and !resolved) {
             const query_result = dns_sock.getQueryResult(handle) catch continue;
             try std.testing.expectEqual(@as(u8, 1), query_result.len);

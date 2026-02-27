@@ -87,10 +87,9 @@ fn earliestPollTime(a: ?Instant, b: ?Instant) ?Instant {
 }
 
 test "PHY middleware Tracer + PcapWriter composition" {
-    const SocketsA = struct { udp4_sockets: []*UdpSock };
-    const SocketsB = struct { udp4_sockets: []*UdpSock };
-    const StackA = stack_mod.Stack(CaptureDevice, SocketsA);
-    const StackB = stack_mod.Stack(DeviceB, SocketsB);
+    const UdpSockets = struct { udp4_sockets: []*UdpSock };
+    const StackA = stack_mod.Stack(CaptureDevice, UdpSockets);
+    const StackB = stack_mod.Stack(DeviceB, UdpSockets);
 
     TraceState.reset();
     PcapState.reset();
@@ -124,7 +123,6 @@ test "PHY middleware Tracer + PcapWriter composition" {
     stack_a.iface.v4.addIpAddr(.{ .address = IP_A, .prefix_len = 24 });
     stack_b.iface.v4.addIpAddr(.{ .address = IP_B, .prefix_len = 24 });
 
-    // Pre-fill caches for determinism.
     stack_a.iface.neighbor_cache.fill(IP_B, MAC_B, Instant.ZERO);
     stack_b.iface.neighbor_cache.fill(IP_A, MAC_A, Instant.ZERO);
 
@@ -170,21 +168,19 @@ test "PHY middleware Tracer + PcapWriter composition" {
     try std.testing.expect(b_received);
     try std.testing.expect(iter < MAX_ITERS);
 
-    // Verify Tracer fired: rx and tx counters should both be > 0.
     try std.testing.expect(TraceState.rx_count > 0);
     try std.testing.expect(TraceState.tx_count > 0);
 
-    // Verify PcapWriter produced valid output.
     const pcap = PcapState.buf[0..PcapState.pos];
     try std.testing.expect(pcap.len > 24);
 
-    // Pcap magic number (little-endian 0xa1b2c3d4).
+    // Pcap magic number: 0xa1b2c3d4 little-endian
     try std.testing.expectEqual(@as(u8, 0xd4), pcap[0]);
     try std.testing.expectEqual(@as(u8, 0xc3), pcap[1]);
     try std.testing.expectEqual(@as(u8, 0xb2), pcap[2]);
     try std.testing.expectEqual(@as(u8, 0xa1), pcap[3]);
 
-    // Linktype at offset 20: 1 = Ethernet.
+    // Linktype at offset 20: 1 = Ethernet
     try std.testing.expectEqual(@as(u8, 1), pcap[20]);
     try std.testing.expectEqual(@as(u8, 0), pcap[21]);
     try std.testing.expectEqual(@as(u8, 0), pcap[22]);

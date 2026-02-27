@@ -114,7 +114,6 @@ test "DHCP client full lifecycle" {
     var device: Device = .{};
     var sock = DhcpSock.init(MAC_CLIENT);
 
-    // Consume initial deconfigured event.
     const initial = sock.poll();
     try std.testing.expect(initial != null);
     switch (initial.?) {
@@ -126,28 +125,24 @@ test "DHCP client full lifecycle" {
     var stack = DhcpStack.init(MAC_CLIENT, .{ .dhcp_sockets = &sock_arr });
     stack.iface.any_ip = true;
 
-    // Phase 1: poll dispatches DISCOVER.
+    // DISCOVER
     _ = stack.poll(Instant.ZERO, &device);
     const discover_frame = device.dequeueTx();
     try std.testing.expect(discover_frame != null);
 
-    // Phase 2: inject OFFER.
+    // OFFER -> REQUEST
     var offer_buf: [1024]u8 = undefined;
     const offer_frame = buildDhcpFrame(&offer_buf, .offer, sock.transaction_id);
     device.enqueueRx(offer_frame);
     _ = stack.poll(Instant.ZERO, &device);
-
-    // Phase 3: stack dispatches REQUEST.
     const request_frame = device.dequeueTx();
     try std.testing.expect(request_frame != null);
 
-    // Phase 4: inject ACK.
+    // ACK -> configured
     var ack_buf: [1024]u8 = undefined;
     const ack_frame = buildDhcpFrame(&ack_buf, .ack, sock.transaction_id);
     device.enqueueRx(ack_frame);
     _ = stack.poll(Instant.ZERO, &device);
-
-    // Phase 5: socket should report configured.
     const event = sock.poll();
     try std.testing.expect(event != null);
     switch (event.?) {
@@ -160,7 +155,6 @@ test "DHCP client full lifecycle" {
         .deconfigured => return error.TestUnexpectedResult,
     }
 
-    // Apply configuration to interface.
     const cfg = switch (event.?) {
         .configured => |c| c,
         .deconfigured => unreachable,
