@@ -128,6 +128,12 @@ examples/                  End-to-end integration demos (zig build demo)
   ip_medium.zig          UDP echo over Medium::Ip (no Ethernet)
   fragmentation.zig      IPv4 fragmentation/reassembly (600B over 576 MTU)
   multi_socket.zig       TCP+UDP+ICMP concurrent on same stacks
+  raw_socket.zig         Raw IP socket (protocol 253, custom payload)
+  dual_stack.zig         IPv4 TCP + IPv6 UDP concurrent on dual-stack
+  dns_resolve.zig        DNS A-record resolution (client + mock server)
+  phy_middleware.zig     Tracer + PcapWriter PHY middleware composition
+  dhcp_client.zig        Full DHCP lifecycle (DISCOVER/OFFER/REQUEST/ACK)
+  sixlowpan.zig          UDP over 6LoWPAN/IEEE 802.15.4
 ```
 
 ## Building
@@ -168,7 +174,7 @@ zig build test -- --summary all
 
 ## Integration Demos
 
-Eight end-to-end demos exercise the full stack API (sockets -> Stack poll
+Fourteen end-to-end demos exercise the full stack API (sockets -> Stack poll
 loop -> Device) with no manual packet construction. They serve as both
 functional validation and usage documentation.
 
@@ -190,6 +196,12 @@ zig build demo -- --summary all
 | IP medium | `examples/ip_medium.zig` | UDP echo over Medium::Ip -- no Ethernet, no ARP, raw IP point-to-point |
 | Fragmentation | `examples/fragmentation.zig` | 600B UDP over 576B MTU: IPv4 fragmentation on egress, reassembly on ingress |
 | Multi-socket | `examples/multi_socket.zig` | TCP + UDP + ICMP active simultaneously, proving protocol demux under load |
+| Raw socket | `examples/raw_socket.zig` | Raw IP socket on protocol 253: bidirectional payload exchange |
+| Dual-stack | `examples/dual_stack.zig` | IPv4 TCP + IPv6 UDP running concurrently on same stacks |
+| DNS resolve | `examples/dns_resolve.zig` | DNS A-record resolution via DNS socket + mock UDP:53 server |
+| PHY middleware | `examples/phy_middleware.zig` | PcapWriter(Tracer(LoopbackDevice)) composition with callback validation |
+| DHCP client | `examples/dhcp_client.zig` | Full DHCP lifecycle: DISCOVER -> OFFER -> REQUEST -> ACK -> configured |
+| 6LoWPAN | `examples/sixlowpan.zig` | UDP over 6LoWPAN/802.15.4 with IPHC compression and EUI-64 addressing |
 
 ## Using in Your Project
 
