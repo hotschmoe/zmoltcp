@@ -38,6 +38,12 @@ pub fn build(b: *std.Build) void {
         "examples/ip_medium.zig",
         "examples/fragmentation.zig",
         "examples/multi_socket.zig",
+        "examples/raw_socket.zig",
+        "examples/dual_stack.zig",
+        "examples/dns_resolve.zig",
+        "examples/phy_middleware.zig",
+        "examples/dhcp_client.zig",
+        "examples/sixlowpan.zig",
     }) |path| {
         const demo_mod = b.createModule(.{
             .root_source_file = b.path(path),
