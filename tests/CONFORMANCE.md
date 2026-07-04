@@ -182,7 +182,7 @@ plus the fuzz target smoke tests tracked in `tests/FUZZING.md`.
 | wire/ipsec_ah.rs:test_emit | "AH emit repr" | PASS |
 | wire/ipsec_ah.rs:test_header_len | "AH header length from wire" | PASS |
 | wire/ipsec_ah.rs:test_check_len | "AH truncated packet rejected" | PASS |
-| (regression) | "AH rejects payload length below minimum header size" | PASS |
+| (original) | "AH parse rejects undersized payload length" | PASS |
 | (original) | "AH roundtrip parse then emit" | PASS |
 
 ### wire/dhcp.zig
