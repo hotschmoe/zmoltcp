@@ -10,36 +10,14 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  version-check:
-    name: Version Bump Check
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Check version bump
-        run: |
-          PR_VERSION=$(sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' build.zig.zon)
-          git fetch origin master
-          MASTER_VERSION=$(git show origin/master:build.zig.zon | sed -n 's/.*\.version = "\([^"]*\)".*/\1/p')
-          echo "PR version:     $PR_VERSION"
-          echo "Master version: $MASTER_VERSION"
-          if [ "$PR_VERSION" = "$MASTER_VERSION" ]; then
-            echo "::error::Version not bumped. Update .version in build.zig.zon before merging."
-            exit 1
-          fi
-          echo "Version bump verified: $MASTER_VERSION -> $PR_VERSION"
-
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           submodules: true
 
-      - uses: mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
 

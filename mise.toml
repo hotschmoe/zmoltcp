@@ -33,3 +33,7 @@ run = [
 [tasks.ci]
 description = "Alias for check"
 run = "mise run check"
+
+[tasks.release]
+description = "Prepare a release version-bump branch and commit"
+run = "scripts/release.sh"
