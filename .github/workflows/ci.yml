@@ -56,8 +56,11 @@ jobs:
 
       - name: Run bounded fuzz smoke
         env:
+          FUZZ_SMOKE_LIMIT: "1K"
+          FUZZ_SMOKE_WALL_TIMEOUT: "90s"
+          FUZZ_SMOKE_COVERAGE_RETRIES: "1"
           ZIG_FUZZ_ALLOW_COVERAGE_FALLBACK: "1"
-        run: bash scripts/fuzz-smoke.sh
+        run: /bin/bash scripts/fuzz-smoke.sh
 
       - name: Cross-compile check (aarch64-freestanding)
         run: zig build -Dtarget=aarch64-freestanding-none

@@ -174,7 +174,7 @@ fn initIfaceAddresses(comptime Stack: type, st: *Stack) void {
     _ = st.iface.joinMulticastGroupV6(ipv6.LINK_LOCAL_ALL_NODES);
 }
 
-fn fuzzDnsParsing(_: void, s: *std.testing.Smith) !void {
+pub fn fuzzDnsParsing(_: void, s: *std.testing.Smith) !void {
     var buf: [512]u8 = undefined;
     const len = s.slice(&buf);
     const data = buf[0..len];
@@ -196,11 +196,7 @@ fn fuzzDnsParsing(_: void, s: *std.testing.Smith) !void {
     _ = dns.parseName(data, start) catch {};
 }
 
-test "fuzz P0 DNS parsing" {
-    try testing.fuzz({}, fuzzDnsParsing, .{});
-}
-
-fn fuzzTcpHeaderParsing(_: void, s: *std.testing.Smith) !void {
+pub fn fuzzTcpHeaderParsing(_: void, s: *std.testing.Smith) !void {
     var buf: [128]u8 = undefined;
     const len = s.slice(&buf);
     const data = buf[0..len];
@@ -215,11 +211,7 @@ fn fuzzTcpHeaderParsing(_: void, s: *std.testing.Smith) !void {
     _ = try tcp_wire.parse(out[0..emitted]);
 }
 
-test "fuzz P0 TCP header parsing" {
-    try testing.fuzz({}, fuzzTcpHeaderParsing, .{});
-}
-
-fn fuzzIpHeaderParsing(_: void, s: *std.testing.Smith) !void {
+pub fn fuzzIpHeaderParsing(_: void, s: *std.testing.Smith) !void {
     var buf: [2048]u8 = undefined;
     const len = s.slice(&buf);
     const data = buf[0..len];
@@ -247,11 +239,7 @@ fn fuzzIpHeaderParsing(_: void, s: *std.testing.Smith) !void {
     }
 }
 
-test "fuzz P0 IP header parsing" {
-    try testing.fuzz({}, fuzzIpHeaderParsing, .{});
-}
-
-fn fuzzIpv6ExtensionParsing(_: void, s: *std.testing.Smith) !void {
+pub fn fuzzIpv6ExtensionParsing(_: void, s: *std.testing.Smith) !void {
     var buf: [2048]u8 = undefined;
     const len = s.slice(&buf);
     const data = buf[0..len];
@@ -285,11 +273,7 @@ fn fuzzIpv6ExtensionParsing(_: void, s: *std.testing.Smith) !void {
     } else |_| {}
 }
 
-test "fuzz P0 IPv6 extension parsing" {
-    try testing.fuzz({}, fuzzIpv6ExtensionParsing, .{});
-}
-
-fn fuzzStackIngress(_: void, s: *std.testing.Smith) !void {
+pub fn fuzzStackIngress(_: void, s: *std.testing.Smith) !void {
     const EthernetDevice = stack_mod.LoopbackDevice(4);
     const EthernetStack = stack_mod.Stack(EthernetDevice, void);
     var eth_stack = EthernetStack.init(LOCAL_HW, {});
@@ -322,10 +306,6 @@ fn fuzzStackIngress(_: void, s: *std.testing.Smith) !void {
     lowpan_device.enqueueRx(lowpan_frame[0..lowpan_len]);
     _ = lowpan_stack.poll(fuzzInstant(s), &lowpan_device);
     try drainTx(LowpanDevice, &lowpan_device, ieee802154.MAX_FRAME_LEN);
-}
-
-test "fuzz P0 stack ingress" {
-    try testing.fuzz({}, fuzzStackIngress, .{});
 }
 
 fn fuzzReassemblerV4(s: *std.testing.Smith) !void {
@@ -414,17 +394,13 @@ fn fuzzReassembler6lowpan(s: *std.testing.Smith) !void {
     }
 }
 
-fn fuzzReassembly(_: void, s: *std.testing.Smith) !void {
+pub fn fuzzReassembly(_: void, s: *std.testing.Smith) !void {
     try fuzzReassemblerV4(s);
     try fuzzReassemblerV6(s);
     try fuzzReassembler6lowpan(s);
 }
 
-test "fuzz P0 fragment reassembly" {
-    try testing.fuzz({}, fuzzReassembly, .{});
-}
-
-fn fuzzProtocolParsers(_: void, s: *std.testing.Smith) !void {
+pub fn fuzzProtocolParsers(_: void, s: *std.testing.Smith) !void {
     var buf: [1024]u8 = undefined;
     const len = s.slice(&buf);
     const data = buf[0..len];
@@ -508,10 +484,6 @@ fn fuzzProtocolParsers(_: void, s: *std.testing.Smith) !void {
     _ = rpl_wire.RplTargetOption.parseOption(data) catch {};
     _ = rpl_wire.TransitInformationOption.parseOption(data) catch {};
     _ = rpl_wire.HopByHopRepr.parseOption(data) catch {};
-}
-
-test "fuzz P1 protocol parsers" {
-    try testing.fuzz({}, fuzzProtocolParsers, .{});
 }
 
 fn fuzzRingBuffer(s: *std.testing.Smith) !void {
@@ -620,14 +592,10 @@ fn fuzzAssembler(s: *std.testing.Smith) !void {
     }
 }
 
-fn fuzzStorageStreams(_: void, s: *std.testing.Smith) !void {
+pub fn fuzzStorageStreams(_: void, s: *std.testing.Smith) !void {
     try fuzzRingBuffer(s);
     try fuzzPacketBuffer(s);
     try fuzzAssembler(s);
-}
-
-test "fuzz P2 storage operation streams" {
-    try testing.fuzz({}, fuzzStorageStreams, .{});
 }
 
 fn fuzzUdpSocket(s: *std.testing.Smith, payload: []const u8) !void {
@@ -760,7 +728,7 @@ fn fuzzTcpSocket(s: *std.testing.Smith, payload: []const u8) !void {
     _ = sock.pollAt();
 }
 
-fn fuzzSocketStateMachines(_: void, s: *std.testing.Smith) !void {
+pub fn fuzzSocketStateMachines(_: void, s: *std.testing.Smith) !void {
     var buf: [64]u8 = undefined;
     const len = s.slice(&buf);
     const payload = buf[0..len];
@@ -773,11 +741,7 @@ fn fuzzSocketStateMachines(_: void, s: *std.testing.Smith) !void {
     try fuzzTcpSocket(s, payload);
 }
 
-test "fuzz P2 socket state machines" {
-    try testing.fuzz({}, fuzzSocketStateMachines, .{});
-}
-
-fn fuzzRplState(_: void, s: *std.testing.Smith) !void {
+pub fn fuzzRplState(_: void, s: *std.testing.Smith) !void {
     const Parents = rpl_state.ParentSet(4);
     const Relations = rpl_state.Relations(4);
     var parents = Parents{};
@@ -826,10 +790,6 @@ fn fuzzRplState(_: void, s: *std.testing.Smith) !void {
     }
 }
 
-test "fuzz P1 RPL state" {
-    try testing.fuzz({}, fuzzRplState, .{});
-}
-
 var fuzz_rng_value: u32 = 0;
 
 fn fuzzRng() u32 {
@@ -838,7 +798,7 @@ fn fuzzRng() u32 {
 
 fn discardWrite(_: []const u8) void {}
 
-fn fuzzPhyMiddleware(_: void, s: *std.testing.Smith) !void {
+pub fn fuzzPhyMiddleware(_: void, s: *std.testing.Smith) !void {
     const Base = stack_mod.LoopbackDevice(4);
     var frame: [stack_mod.MAX_FRAME_LEN]u8 = undefined;
     const len = s.slice(&frame);
@@ -860,8 +820,4 @@ fn fuzzPhyMiddleware(_: void, s: *std.testing.Smith) !void {
     const Pcap = phy.PcapWriter(Base);
     var pcap = Pcap.init(Base.init(), discardWrite, .both);
     pcap.transmit(frame[0..len]);
-}
-
-test "fuzz P2 PHY middleware" {
-    try testing.fuzz({}, fuzzPhyMiddleware, .{});
 }
