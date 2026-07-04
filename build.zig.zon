@@ -1,6 +1,6 @@
 .{
     .name = .zmoltcp,
-    .version = "0.1.5",
+    .version = "0.1.8",
     .fingerprint = 0x46a16d6c419cca00,
     .minimum_zig_version = "0.16.0",
     .paths = .{

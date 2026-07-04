@@ -162,6 +162,9 @@ mise run demo
 
 # Run a bounded native fuzz pass
 mise run fuzz
+
+# Run longer local fuzz campaigns with preserved logs/caches
+mise run fuzz-long
 ```
 
 ## Integration Demos
