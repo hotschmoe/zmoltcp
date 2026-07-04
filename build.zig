@@ -55,6 +55,7 @@ pub fn build(b: *std.Build) void {
         "examples/ip_medium.zig",
         "examples/fragmentation.zig",
         "examples/multi_socket.zig",
+        "examples/tcp_forwarder_gateway.zig",
         "examples/raw_socket.zig",
         "examples/dual_stack.zig",
         "examples/dns_resolve.zig",

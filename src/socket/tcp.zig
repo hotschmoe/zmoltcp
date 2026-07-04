@@ -110,6 +110,39 @@ pub fn rstReply(repr: TcpRepr) TcpRepr {
     return reply;
 }
 
+pub fn ForwardRequest(comptime Ip: type) type {
+    comptime ip_generic.assertIsIp(Ip);
+    return struct {
+        pub const Endpoint = ip_generic.Endpoint(Ip);
+
+        /// The packet destination that this stack is being asked to terminate.
+        local: Endpoint,
+        /// The packet source that initiated the connection.
+        remote: Endpoint,
+    };
+}
+
+pub fn Forwarder(comptime Ip: type, comptime TcpSock: type, comptime Context: type) type {
+    comptime ip_generic.assertIsIp(Ip);
+    return struct {
+        const Self = @This();
+        pub const Request = ForwardRequest(Ip);
+        pub const AcceptFn = *const fn (*Context, Request) ?*TcpSock;
+
+        context: *Context,
+        accept_fn: AcceptFn,
+
+        pub fn init(context: *Context, accept_fn: AcceptFn) Self {
+            return .{ .context = context, .accept_fn = accept_fn };
+        }
+
+        /// Return a caller-owned TCP socket to accept the SYN, or null to drop it.
+        pub fn offer(self: *Self, request: Request) ?*TcpSock {
+            return self.accept_fn(self.context, request);
+        }
+    };
+}
+
 // -------------------------------------------------------------------------
 // State enum (RFC 793)
 // -------------------------------------------------------------------------
@@ -903,6 +936,27 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
             self.remote_last_seq = seq;
         }
 
+        pub const AcceptSynError = error{ InvalidState, Unaddressable, InvalidSegment };
+
+        /// Accept an explicit passive-open tuple from a SYN that was not
+        /// matched by listen(). The caller owns socket selection and policy.
+        pub fn acceptSyn(
+            self: *Self,
+            timestamp: Instant,
+            local: Endpoint,
+            remote: Endpoint,
+            repr: TcpRepr,
+        ) AcceptSynError!void {
+            if (self.isOpen()) return error.InvalidState;
+            if (local.port == 0 or remote.port == 0) return error.Unaddressable;
+            if (Ip.isUnspecified(local.addr) or Ip.isUnspecified(remote.addr)) return error.Unaddressable;
+            if (repr.control != .syn or repr.ack_number != null) return error.InvalidSegment;
+            if (repr.dst_port != local.port or repr.src_port != remote.port) return error.InvalidSegment;
+
+            self.reset();
+            if (!self.acceptSynOpen(timestamp, local, remote, repr)) return error.InvalidSegment;
+        }
+
         fn nextInitialSequence(self: *Self, local: Endpoint, remote: Endpoint) SeqNumber {
             self.isn_counter +%= 64000;
 
@@ -1220,24 +1274,10 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
                 .listen => switch (control) {
                     .rst => return null,
                     .syn => {
-                        if (repr.max_seg_size) |mss| {
-                            if (mss == 0) return null;
-                            self.remote_mss = mss;
-                            self.congestion_controller.setMss(mss);
-                        }
-                        self.tuple = .{
-                            .local = .{ .addr = dst_addr, .port = repr.dst_port },
-                            .remote = .{ .addr = src_addr, .port = repr.src_port },
-                        };
-                        self.local_seq_no = self.nextInitialSequence(self.tuple.?.local, self.tuple.?.remote);
-                        self.remote_seq_no = repr.seq_number.add(1);
-                        self.remote_last_seq = self.local_seq_no;
-                        self.remote_has_sack = repr.sack_permitted;
-                        self.remote_win_scale = repr.window_scale;
-                        if (self.remote_win_scale == null) self.remote_win_shift = 0;
-                        if (repr.timestamp == null) self.tsval_generator = null;
-                        self.state = .syn_received;
-                        self.timer.setForIdle(timestamp, self.keep_alive);
+                        const local = Endpoint{ .addr = dst_addr, .port = repr.dst_port };
+                        const remote = Endpoint{ .addr = src_addr, .port = repr.src_port };
+                        if (!self.acceptSynOpen(timestamp, local, remote, repr)) return null;
+                        return null;
                     },
                     else => return null,
                 },
@@ -1475,6 +1515,35 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
             }
 
             return null;
+        }
+
+        fn acceptSynOpen(self: *Self, timestamp: Instant, local: Endpoint, remote: Endpoint, repr: TcpRepr) bool {
+            if (repr.max_seg_size) |mss| {
+                if (mss == 0) return false;
+                self.remote_mss = mss;
+                self.congestion_controller.setMss(mss);
+            }
+            self.tuple = .{
+                .local = local,
+                .remote = remote,
+            };
+            self.local_seq_no = self.nextInitialSequence(local, remote);
+            self.remote_seq_no = repr.seq_number.add(1);
+            self.remote_last_seq = self.local_seq_no;
+            self.remote_last_ts = timestamp;
+            self.remote_has_sack = repr.sack_permitted;
+            self.remote_win_scale = repr.window_scale;
+            self.remote_win_len = repr.window_len;
+            self.congestion_controller.setRemoteWindow(repr.window_len);
+            if (self.remote_win_scale == null) self.remote_win_shift = 0;
+            if (repr.timestamp) |ts| {
+                self.last_remote_tsval = ts.tsval;
+            } else {
+                self.tsval_generator = null;
+            }
+            self.state = .syn_received;
+            self.timer.setForIdle(timestamp, self.keep_alive);
+            return true;
         }
 
         // -- Dispatch (generate outgoing packets) --
@@ -1828,6 +1897,7 @@ const LOCAL_SEQ = SeqNumber{ .value = 10000 };
 const REMOTE_SEQ = SeqNumber{ .value = -10001 };
 const LOCAL_ADDR = ipv4.Address{ 192, 168, 1, 1 };
 const REMOTE_ADDR = ipv4.Address{ 192, 168, 1, 2 };
+const FORWARD_ADDR = ipv4.Address{ 93, 184, 216, 34 };
 const TEST_ISN_SECRET: u64 = 0x1234_5678_9abc_def0;
 
 const LISTEN_END = TestSocket.ListenEndpoint{ .port = LOCAL_PORT };
@@ -2167,6 +2237,36 @@ test "listen receives SYN -> SYN-RECEIVED" {
     expected.local_seq_no = s.local_seq_no;
     expected.remote_last_seq = s.local_seq_no;
     try expectSanity(s, expected);
+}
+
+test "acceptSyn accepts explicit passive-open tuple" {
+    var s = socketNew();
+    try s.acceptSyn(
+        Instant.ZERO,
+        .{ .addr = FORWARD_ADDR, .port = LOCAL_PORT },
+        .{ .addr = REMOTE_ADDR, .port = REMOTE_PORT },
+        TcpRepr{
+            .src_port = REMOTE_PORT,
+            .dst_port = LOCAL_PORT,
+            .control = .syn,
+            .seq_number = REMOTE_SEQ,
+            .window_len = 256,
+        },
+    );
+
+    try testing.expectEqual(State.syn_received, s.state);
+    const local = s.localEndpoint() orelse return error.TestUnexpectedResult;
+    const remote = s.remoteEndpoint() orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(FORWARD_ADDR, local.addr);
+    try testing.expectEqual(@as(u16, LOCAL_PORT), local.port);
+    try testing.expectEqual(REMOTE_ADDR, remote.addr);
+    try testing.expectEqual(@as(u16, REMOTE_PORT), remote.port);
+
+    const syn_ack = recvAt0(&s) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u16, LOCAL_PORT), syn_ack.src_port);
+    try testing.expectEqual(@as(u16, REMOTE_PORT), syn_ack.dst_port);
+    try testing.expectEqual(Control.syn, syn_ack.control);
+    try testing.expect((syn_ack.ack_number orelse return error.TestUnexpectedResult).eql(REMOTE_SEQ.add(1)));
 }
 
 // [smoltcp:socket/tcp.rs:test_listen_syn_reject_ack]

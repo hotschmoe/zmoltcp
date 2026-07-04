@@ -79,6 +79,7 @@ fn serializeTcp(
 ///   raw4_sockets:  []*SomeRawSocket(ipv4, ...)
 ///   dns4_sockets:  []*SomeDnsSocket(ipv4, ...)
 ///   dhcp_sockets:  []*SomeDhcpSocket
+///   tcp4_forwarder: *SomeTcpForwarder(ipv4, SomeTcpSocket, ...)
 ///   tcp6_sockets:  []*SomeTcpSocket(ipv6, ...)
 ///   udp6_sockets:  []*SomeUdpSocket(ipv6, ...)
 ///   icmp6_sockets: []*SomeIcmpSocket(ipv6, ...)
@@ -96,6 +97,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
     const has_dhcp = SocketConfig != void and @hasField(SocketConfig, "dhcp_sockets");
     const has_dns4 = SocketConfig != void and @hasField(SocketConfig, "dns4_sockets");
     const has_raw4 = SocketConfig != void and @hasField(SocketConfig, "raw4_sockets");
+    const has_tcp4_forwarder = SocketConfig != void and @hasField(SocketConfig, "tcp4_forwarder");
 
     const has_tcp6 = SocketConfig != void and @hasField(SocketConfig, "tcp6_sockets");
     const has_udp6 = SocketConfig != void and @hasField(SocketConfig, "udp6_sockets");
@@ -126,6 +128,8 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
     comptime {
         if (has_dhcp and !is_ethernet)
             @compileError("DHCP requires Ethernet medium");
+        if (has_tcp4_forwarder and !has_tcp4)
+            @compileError("tcp4_forwarder requires tcp4_sockets so accepted sockets can route and dispatch");
         if (is_ieee802154 and (has_tcp4 or has_udp4 or has_icmp4 or has_raw4 or has_dns4))
             @compileError("IEEE 802.15.4 medium is IPv6-only; IPv4 sockets are not supported");
     }
@@ -408,7 +412,10 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
         fn processIpv4Ingress(self: *Self, timestamp: Instant, ip_repr: ipv4.Repr, data: []const u8, device: *Device) void {
             const is_broadcast = self.iface.isBroadcast(ip_repr.dst_addr);
             const is_multicast = ipv4.isMulticast(ip_repr.dst_addr) and self.iface.hasMulticastGroup(ip_repr.dst_addr);
-            if (!is_broadcast and !is_multicast and !self.iface.v4.hasIpAddr(ip_repr.dst_addr)) return;
+            const is_local_destination = is_broadcast or is_multicast or self.iface.v4.hasIpAddr(ip_repr.dst_addr);
+            const is_unicast_destination = !is_broadcast and !ipv4.isMulticast(ip_repr.dst_addr);
+            const may_forward_tcp = has_tcp4_forwarder and is_unicast_destination and ip_repr.protocol == .tcp;
+            if (!is_local_destination and !may_forward_tcp) return;
 
             const raw_payload = ipv4.payloadSlice(data) catch return;
 
@@ -452,12 +459,14 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                 },
                 .tcp => {
                     const tcp_ingress = parseTcp4Ingress(ip_repr, ip_payload) orelse return;
-                    const result = self.routeToTcpSockets(timestamp, ip_repr, tcp_ingress);
+                    const result = self.routeToTcpSockets(timestamp, ip_repr, tcp_ingress, !is_local_destination);
                     if (result.reply) |reply| {
                         self.emitTcpReply(ip_repr, reply, device);
                     }
-                    if (self.iface.processTcp(ip_repr, tcp_ingress, result.handled)) |response| {
-                        self.emitResponse(response, device);
+                    if (is_local_destination) {
+                        if (self.iface.processTcp(ip_repr, tcp_ingress, result.handled)) |response| {
+                            self.emitResponse(response, device);
+                        }
                     }
                 },
                 .ipsec_esp, .ipsec_ah, _ => {
@@ -737,10 +746,49 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             handled: bool = false,
         };
 
-        fn routeToTcpSockets(self: *Self, timestamp: Instant, ip_repr: ipv4.Repr, tcp_data: []const u8) TcpRouteResult {
+        const TcpForwardRouteResult = enum {
+            not_applicable,
+            handled,
+        };
+
+        fn tcpTupleMatches(
+            sock: anytype,
+            src_addr: ipv4.Address,
+            dst_addr: ipv4.Address,
+            repr: tcp_socket.TcpRepr,
+        ) bool {
+            const local = sock.localEndpoint() orelse return false;
+            const remote = sock.remoteEndpoint() orelse return false;
+            return std.mem.eql(u8, &dst_addr, &local.addr) and
+                repr.dst_port == local.port and
+                std.mem.eql(u8, &src_addr, &remote.addr) and
+                repr.src_port == remote.port;
+        }
+
+        fn routeToTcpSockets(
+            self: *Self,
+            timestamp: Instant,
+            ip_repr: ipv4.Repr,
+            tcp_data: []const u8,
+            allow_forward: bool,
+        ) TcpRouteResult {
             if (comptime !has_tcp4) return .{};
 
             const sock_repr = tcp_socket.TcpRepr.fromWireBytes(tcp_data) orelse return .{};
+
+            for (self.sockets.tcp4_sockets) |sock| {
+                if (tcpTupleMatches(sock, ip_repr.src_addr, ip_repr.dst_addr, sock_repr)) {
+                    const reply = sock.process(timestamp, ip_repr.src_addr, ip_repr.dst_addr, sock_repr);
+                    return .{ .reply = reply, .handled = true };
+                }
+            }
+
+            if (allow_forward) {
+                switch (self.routeToTcpForwarder(timestamp, ip_repr, sock_repr)) {
+                    .not_applicable => {},
+                    .handled => return .{ .handled = true },
+                }
+            }
 
             for (self.sockets.tcp4_sockets) |sock| {
                 if (sock.accepts(ip_repr.src_addr, ip_repr.dst_addr, sock_repr)) {
@@ -756,6 +804,24 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             if (device_caps.checksum.tcp.shouldVerifyRx() and
                 !tcp_wire.verifyChecksum(ip_repr.src_addr, ip_repr.dst_addr, raw_tcp)) return null;
             return raw_tcp;
+        }
+
+        fn routeToTcpForwarder(
+            self: *Self,
+            timestamp: Instant,
+            ip_repr: ipv4.Repr,
+            sock_repr: tcp_socket.TcpRepr,
+        ) TcpForwardRouteResult {
+            if (comptime !has_tcp4_forwarder) return .not_applicable;
+            if (sock_repr.control != .syn or sock_repr.ack_number != null) return .not_applicable;
+
+            const request = tcp_socket.ForwardRequest(ipv4){
+                .local = .{ .addr = ip_repr.dst_addr, .port = sock_repr.dst_port },
+                .remote = .{ .addr = ip_repr.src_addr, .port = sock_repr.src_port },
+            };
+            const sock = self.sockets.tcp4_forwarder.offer(request) orelse return .handled;
+            sock.acceptSyn(timestamp, request.local, request.remote, sock_repr) catch return .handled;
+            return .handled;
         }
 
         fn parseUdp4Ingress(ip_repr: ipv4.Repr, raw_udp: []const u8) ?UdpIngress {
@@ -2071,6 +2137,28 @@ const LOCAL_HW: ethernet.Address = .{ 0x02, 0x02, 0x02, 0x02, 0x02, 0x02 };
 const REMOTE_HW: ethernet.Address = .{ 0x52, 0x54, 0x00, 0x00, 0x00, 0x00 };
 const LOCAL_IP: ipv4.Address = .{ 10, 0, 0, 1 };
 const REMOTE_IP: ipv4.Address = .{ 10, 0, 0, 2 };
+const PUBLIC_IP: ipv4.Address = .{ 93, 184, 216, 34 };
+const PUBLIC_PORT: u16 = 8080;
+
+const ForwardTcpSock = tcp_socket.Socket(ipv4, 4);
+const ForwardRequest = tcp_socket.ForwardRequest(ipv4);
+const ForwardPolicy = struct {
+    sock: *ForwardTcpSock,
+    accept: bool = true,
+    requested: ?ForwardRequest = null,
+
+    fn offer(self: *ForwardPolicy, request: ForwardRequest) ?*ForwardTcpSock {
+        self.requested = request;
+        if (!self.accept) return null;
+        return self.sock;
+    }
+};
+const Forwarder = tcp_socket.Forwarder(ipv4, ForwardTcpSock, ForwardPolicy);
+const ForwardSockets = struct {
+    tcp4_sockets: []*ForwardTcpSock,
+    tcp4_forwarder: *Forwarder,
+};
+const ForwardStack = Stack(TestDevice, ForwardSockets);
 
 fn testStack() TestStack {
     var s = TestStack.init(LOCAL_HW, {});
@@ -2201,6 +2289,7 @@ test "stack loopback device round-trip" {
     try testing.expectEqual(@as(?[]const u8, null), device.dequeueTx());
 }
 
+
 test "stack pollAt returns null with no sockets" {
     var stack = testStack();
     try testing.expectEqual(@as(?Instant, null), stack.pollAt());
@@ -2322,6 +2411,170 @@ test "stack TCP SYN no listener produces RST" {
         ip_repr.dst_addr,
         tcp_data,
     ));
+}
+
+test "stack drops non-local TCP SYN without forwarder" {
+    var device = TestDevice.init();
+    var stack = testStack();
+
+    var tcp_buf: [tcp_wire.HEADER_LEN]u8 = undefined;
+    const tcp_segment = buildTcpSegment(&tcp_buf, 4242, PUBLIC_PORT, 1000, null, .{ .syn = true }, &.{});
+
+    var frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv4FrameFrom(&frame_buf, REMOTE_IP, PUBLIC_IP, .tcp, tcp_segment));
+    const processed = stack.poll(Instant.ZERO, &device);
+    try testing.expect(processed);
+    try testing.expectEqual(@as(?[]const u8, null), device.dequeueTx());
+}
+
+test "stack TCP forwarder denial drops without socket state" {
+    var device = TestDevice.init();
+
+    var rx_buf: [256]u8 = .{0} ** 256;
+    var tx_buf: [256]u8 = .{0} ** 256;
+    var sock = ForwardTcpSock.init(&rx_buf, &tx_buf);
+    sock.ack_delay = null;
+    var sock_arr = [_]*ForwardTcpSock{&sock};
+    var policy = ForwardPolicy{ .sock = &sock, .accept = false };
+    var forwarder = Forwarder.init(&policy, ForwardPolicy.offer);
+    var stack = ForwardStack.init(LOCAL_HW, .{
+        .tcp4_sockets = &sock_arr,
+        .tcp4_forwarder = &forwarder,
+    });
+    stack.iface.v4.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    var tcp_buf: [tcp_wire.HEADER_LEN]u8 = undefined;
+    const tcp_segment = buildTcpSegment(&tcp_buf, 4242, PUBLIC_PORT, 1000, null, .{ .syn = true }, &.{});
+
+    var frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv4FrameFrom(&frame_buf, REMOTE_IP, PUBLIC_IP, .tcp, tcp_segment));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    try testing.expect(policy.requested != null);
+    try testing.expectEqual(tcp_socket.State.closed, sock.getState());
+    try testing.expectEqual(@as(?[]const u8, null), device.dequeueTx());
+}
+
+test "stack TCP forwarder handles non-local SYN before wildcard listener" {
+    var device = TestDevice.init();
+
+    var listen_rx_buf: [256]u8 = .{0} ** 256;
+    var listen_tx_buf: [256]u8 = .{0} ** 256;
+    var listener = ForwardTcpSock.init(&listen_rx_buf, &listen_tx_buf);
+    listener.ack_delay = null;
+    try listener.listen(.{ .port = PUBLIC_PORT });
+
+    var forward_rx_buf: [256]u8 = .{0} ** 256;
+    var forward_tx_buf: [256]u8 = .{0} ** 256;
+    var forward_sock = ForwardTcpSock.init(&forward_rx_buf, &forward_tx_buf);
+    forward_sock.ack_delay = null;
+
+    var sock_arr = [_]*ForwardTcpSock{ &listener, &forward_sock };
+    var policy = ForwardPolicy{ .sock = &forward_sock };
+    var forwarder = Forwarder.init(&policy, ForwardPolicy.offer);
+    var stack = ForwardStack.init(LOCAL_HW, .{
+        .tcp4_sockets = &sock_arr,
+        .tcp4_forwarder = &forwarder,
+    });
+    stack.iface.v4.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    const client_seq: u32 = 2000;
+    var syn_buf: [tcp_wire.HEADER_LEN]u8 = undefined;
+    const syn_segment = buildTcpSegment(
+        &syn_buf,
+        4242,
+        PUBLIC_PORT,
+        client_seq,
+        null,
+        .{ .syn = true },
+        &.{},
+    );
+
+    var syn_frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv4FrameFrom(&syn_frame_buf, REMOTE_IP, PUBLIC_IP, .tcp, syn_segment));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    const request = policy.requested orelse return error.ExpectedForwardRequest;
+    try testing.expectEqual(PUBLIC_IP, request.local.addr);
+    try testing.expectEqual(@as(u16, PUBLIC_PORT), request.local.port);
+    try testing.expectEqual(tcp_socket.State.listen, listener.getState());
+    try testing.expectEqual(tcp_socket.State.syn_received, forward_sock.getState());
+
+    const synack_frame = device.dequeueTx() orelse return error.ExpectedSynAck;
+    const synack_ip_data = try ethernet.payload(synack_frame);
+    const synack_ip = try ipv4.parse(synack_ip_data);
+    try testing.expectEqual(PUBLIC_IP, synack_ip.src_addr);
+    try testing.expectEqual(REMOTE_IP, synack_ip.dst_addr);
+
+    const synack_tcp_data = try ipv4.payloadSlice(synack_ip_data);
+    const synack_tcp = try tcp_wire.parse(synack_tcp_data);
+    try testing.expect(synack_tcp.flags.syn);
+    try testing.expect(synack_tcp.flags.ack);
+    try testing.expectEqual(client_seq + 1, synack_tcp.ack_number);
+}
+
+test "stack TCP forwarder accepts non-local SYN and routes tuple traffic" {
+    var device = TestDevice.init();
+
+    var rx_buf: [256]u8 = .{0} ** 256;
+    var tx_buf: [256]u8 = .{0} ** 256;
+    var sock = ForwardTcpSock.init(&rx_buf, &tx_buf);
+    sock.ack_delay = null;
+    var sock_arr = [_]*ForwardTcpSock{&sock};
+    var policy = ForwardPolicy{ .sock = &sock };
+    var forwarder = Forwarder.init(&policy, ForwardPolicy.offer);
+    var stack = ForwardStack.init(LOCAL_HW, .{
+        .tcp4_sockets = &sock_arr,
+        .tcp4_forwarder = &forwarder,
+    });
+    stack.iface.v4.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+
+    const client_seq: u32 = 1000;
+    var syn_buf: [tcp_wire.HEADER_LEN]u8 = undefined;
+    const syn_segment = buildTcpSegment(&syn_buf, 4242, PUBLIC_PORT, client_seq, null, .{ .syn = true }, &.{});
+
+    var syn_frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv4FrameFrom(&syn_frame_buf, REMOTE_IP, PUBLIC_IP, .tcp, syn_segment));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    const request = policy.requested orelse return error.ExpectedForwardRequest;
+    try testing.expectEqual(PUBLIC_IP, request.local.addr);
+    try testing.expectEqual(@as(u16, PUBLIC_PORT), request.local.port);
+    try testing.expectEqual(REMOTE_IP, request.remote.addr);
+    try testing.expectEqual(@as(u16, 4242), request.remote.port);
+
+    const synack_frame = device.dequeueTx() orelse return error.ExpectedSynAck;
+    const eth = try ethernet.parse(synack_frame);
+    try testing.expectEqual(REMOTE_HW, eth.dst_addr);
+    const synack_ip_data = try ethernet.payload(synack_frame);
+    const synack_ip = try ipv4.parse(synack_ip_data);
+    try testing.expectEqual(PUBLIC_IP, synack_ip.src_addr);
+    try testing.expectEqual(REMOTE_IP, synack_ip.dst_addr);
+    const synack_tcp_data = try ipv4.payloadSlice(synack_ip_data);
+    const synack_tcp = try tcp_wire.parse(synack_tcp_data);
+    try testing.expect(synack_tcp.flags.syn);
+    try testing.expect(synack_tcp.flags.ack);
+    try testing.expectEqual(client_seq + 1, synack_tcp.ack_number);
+    const server_seq = synack_tcp.seq_number;
+
+    var ack_buf: [tcp_wire.HEADER_LEN]u8 = undefined;
+    const ack_segment = buildTcpSegment(&ack_buf, 4242, PUBLIC_PORT, client_seq + 1, server_seq + 1, .{ .ack = true }, &.{});
+    var ack_frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv4FrameFrom(&ack_frame_buf, REMOTE_IP, PUBLIC_IP, .tcp, ack_segment));
+    _ = stack.poll(Instant.ZERO, &device);
+    try testing.expectEqual(tcp_socket.State.established, sock.getState());
+
+    const payload = "Hi";
+    var data_buf: [tcp_wire.HEADER_LEN + payload.len]u8 = undefined;
+    const data_segment = buildTcpSegment(&data_buf, 4242, PUBLIC_PORT, client_seq + 1, server_seq + 1, .{ .ack = true, .psh = true }, payload);
+    var data_frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv4FrameFrom(&data_frame_buf, REMOTE_IP, PUBLIC_IP, .tcp, data_segment));
+    _ = stack.poll(Instant.ZERO, &device);
+
+    try testing.expect(sock.canRecv());
+    var recv_buf: [8]u8 = undefined;
+    const recv_len = try sock.recvSlice(&recv_buf);
+    try testing.expectEqualSlices(u8, payload, recv_buf[0..recv_len]);
 }
 
 test "stack UDP to bound socket delivers data" {
