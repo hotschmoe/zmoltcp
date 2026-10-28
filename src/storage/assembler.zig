@@ -47,12 +47,12 @@ pub fn Assembler(comptime max_segment_count: usize) type {
 
         pub fn init() Self {
             return .{
-                .contigs = [_]Contig{Contig.empty} ** max_segment_count,
+                .contigs = @splat(.empty),
             };
         }
 
         pub fn clear(self: *Self) void {
-            self.contigs = [_]Contig{Contig.empty} ** max_segment_count;
+            self.contigs = @splat(.empty);
         }
 
         pub fn isEmpty(self: Self) bool {
@@ -231,7 +231,7 @@ fn expectContigs(expected: []const [2]usize, asmb: *const TestAssembler) !void {
 
 fn collectIter(asmb: *const TestAssembler, offset: usize) [4][2]usize {
     var iter = asmb.iterData(offset);
-    var result: [4][2]usize = .{.{ 0, 0 }} ** 4;
+    var result: [4][2]usize = @splat(.{ 0, 0 });
     var i: usize = 0;
     while (iter.next()) |pair| {
         if (i < 4) {

@@ -229,7 +229,7 @@ test "enqueue and dequeue one" {
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_enqueue_many_with]
 test "enqueue many with wrap-around" {
-    var backing = [_]u8{'.'} ** 12;
+    var backing: [12]u8 = @splat('.');
     var ring = RingBufU8.init(&backing);
 
     {
@@ -290,7 +290,7 @@ test "enqueue many with wrap-around" {
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_enqueue_many]
 test "enqueue many contiguous" {
-    var backing = [_]u8{'.'} ** 12;
+    var backing: [12]u8 = @splat('.');
     var ring = RingBufU8.init(&backing);
 
     {
@@ -312,7 +312,7 @@ test "enqueue many contiguous" {
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_enqueue_slice]
 test "enqueue slice with wrap-around" {
-    var backing = [_]u8{'.'} ** 12;
+    var backing: [12]u8 = @splat('.');
     var ring = RingBufU8.init(&backing);
 
     try testing.expectEqual(@as(usize, 8), ring.enqueueSlice("abcdefgh"));
@@ -333,7 +333,7 @@ test "enqueue slice with wrap-around" {
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_dequeue_many_with]
 test "dequeue many with wrap-around" {
-    var backing = [_]u8{'.'} ** 12;
+    var backing: [12]u8 = @splat('.');
     var ring = RingBufU8.init(&backing);
 
     _ = ring.enqueueSlice("abcdefghijkl");
@@ -374,7 +374,7 @@ test "dequeue many with wrap-around" {
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_dequeue_many]
 test "dequeue many contiguous" {
-    var backing = [_]u8{'.'} ** 12;
+    var backing: [12]u8 = @splat('.');
     var ring = RingBufU8.init(&backing);
 
     _ = ring.enqueueSlice("abcdefghijkl");
@@ -398,7 +398,7 @@ test "dequeue many contiguous" {
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_dequeue_slice]
 test "dequeue slice with wrap-around" {
-    var backing = [_]u8{'.'} ** 12;
+    var backing: [12]u8 = @splat('.');
     var ring = RingBufU8.init(&backing);
 
     _ = ring.enqueueSlice("abcdefghijkl");
@@ -422,7 +422,7 @@ test "dequeue slice with wrap-around" {
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_get_unallocated]
 test "get unallocated with offset and wrap" {
-    var backing = [_]u8{'.'} ** 12;
+    var backing: [12]u8 = @splat('.');
     var ring = RingBufU8.init(&backing);
 
     // Offset past window returns empty
@@ -465,7 +465,7 @@ test "get unallocated with offset and wrap" {
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_write_unallocated]
 test "write unallocated with wrap" {
-    var backing = [_]u8{'.'} ** 12;
+    var backing: [12]u8 = @splat('.');
     var ring = RingBufU8.init(&backing);
     @memcpy(ring.enqueueMany(6), "abcdef");
     @memset(ring.dequeueMany(6), '.');
@@ -485,7 +485,7 @@ test "write unallocated with wrap" {
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_get_allocated]
 test "get allocated with offset and wrap" {
-    var backing = [_]u8{'.'} ** 12;
+    var backing: [12]u8 = @splat('.');
     var ring = RingBufU8.init(&backing);
 
     // Empty: offset past length returns empty
@@ -507,7 +507,7 @@ test "get allocated with offset and wrap" {
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_read_allocated]
 test "read allocated with wrap" {
-    var backing = [_]u8{'.'} ** 12;
+    var backing: [12]u8 = @splat('.');
     var ring = RingBufU8.init(&backing);
     @memcpy(ring.enqueueMany(12), "abcdefghijkl");
 
@@ -528,7 +528,7 @@ test "read allocated with wrap" {
     }
 
     {
-        var data = [_]u8{0} ** 6;
+        var data: [6]u8 = @splat(0);
         try testing.expectEqual(@as(usize, 3), ring.readAllocated(6, &data));
         try testing.expectEqualStrings("mno", data[0..3]);
     }
@@ -549,7 +549,7 @@ test "zero capacity buffer" {
 
 // [smoltcp:storage/ring_buffer.rs:test_buffer_write_wholly]
 test "empty buffer resets position for full write" {
-    var backing = [_]u8{'.'} ** 8;
+    var backing: [8]u8 = @splat('.');
     var ring = RingBufU8.init(&backing);
     @memcpy(ring.enqueueMany(2), "ab");
     @memcpy(ring.enqueueMany(2), "cd");

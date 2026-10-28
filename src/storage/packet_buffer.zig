@@ -129,11 +129,11 @@ const TestMeta = PacketMeta(void);
 
 fn buffer() struct { buf: TestBuffer, meta: *[4]TestMeta, payload: *[16]u8 } {
     const S = struct {
-        var meta: [4]TestMeta = .{TestMeta{}} ** 4;
-        var payload: [16]u8 = .{0} ** 16;
+        var meta: [4]TestMeta = @splat(.{});
+        var payload: [16]u8 = @splat(0);
     };
-    S.meta = .{TestMeta{}} ** 4;
-    S.payload = .{0} ** 16;
+    S.meta = @splat(.{});
+    S.payload = @splat(0);
     return .{
         .buf = TestBuffer.init(&S.meta, &S.payload),
         .meta = &S.meta,
@@ -313,11 +313,11 @@ test "PacketBuffer with typed header" {
     const PM = PacketMeta(Hdr);
 
     const S = struct {
-        var meta: [4]PM = .{PM{}} ** 4;
-        var payload: [32]u8 = .{0} ** 32;
+        var meta: [4]PM = @splat(.{});
+        var payload: [32]u8 = @splat(0);
     };
-    S.meta = .{PM{}} ** 4;
-    S.payload = .{0} ** 32;
+    S.meta = @splat(.{});
+    S.payload = @splat(0);
 
     var b = PB.init(&S.meta, &S.payload);
     const slice = try b.enqueue(5, .{ .port = 1234 });
