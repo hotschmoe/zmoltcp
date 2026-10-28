@@ -100,7 +100,7 @@ fn parseDodagId(flags_byte: u8, d_flag_bit: u8, data: []const u8) error{Truncate
 }
 
 pub fn parse(code: u8, data: []const u8) error{ Truncated, Malformed }!Repr {
-    const msg: RplControlMessage = @fromBackingInt(@intCast(code));
+    const msg: RplControlMessage = @fromBackingInt(code);
     switch (msg) {
         .dis => {
             if (data.len < 2) return error.Truncated;
@@ -114,7 +114,7 @@ pub fn parse(code: u8, data: []const u8) error{ Truncated, Malformed }!Repr {
                 .version_number = data[1],
                 .rank = readU16(data[2..4]),
                 .grounded = flags_byte & 0x80 != 0,
-                .mode_of_operation = @fromBackingInt(@intCast(@as(u2, @truncate(flags_byte >> 3)))),
+                .mode_of_operation = @fromBackingInt(@truncate(flags_byte >> 3)),
                 .dodag_preference = @truncate(flags_byte & 0x07),
                 .dtsn = data[5],
                 .dodag_id = data[8..24].*,
@@ -235,7 +235,7 @@ pub const OptionIterator = struct {
     pub fn next(self: *OptionIterator) ?struct { option_type: OptionType, value: []const u8 } {
         if (self.offset >= self.data.len) return null;
 
-        const typ: OptionType = @fromBackingInt(@intCast(self.data[self.offset]));
+        const typ: OptionType = @fromBackingInt(self.data[self.offset]);
         if (typ == .pad1) {
             self.offset += 1;
             return .{ .option_type = .pad1, .value = &.{} };

@@ -170,7 +170,7 @@ pub fn parseHeader(data: []const u8) error{ Truncated, BadVersion }!Repr {
     if (version != 6) return error.BadVersion;
 
     return .{
-        .next_header = @fromBackingInt(@intCast(data[6])),
+        .next_header = @fromBackingInt(data[6]),
         .hop_limit = data[7],
         .payload_len = @as(u16, data[4]) << 8 | @as(u16, data[5]),
         .src_addr = data[8..24].*,

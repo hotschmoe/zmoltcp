@@ -111,7 +111,7 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
 pub fn parseAddressRecord(data: []const u8) error{Truncated}!AddressRecordRepr {
     if (data.len < 20) return error.Truncated;
     const record = AddressRecordRepr{
-        .record_type = @fromBackingInt(@intCast(data[0])),
+        .record_type = @fromBackingInt(data[0]),
         .aux_data_len = data[1],
         .num_srcs = readU16(data[2..4]),
         .mcast_addr = data[4..20].*,

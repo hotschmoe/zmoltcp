@@ -289,7 +289,7 @@ pub fn parse(data: []const u8) error{ Truncated, Malformed, UnsupportedSecurity 
 
     const fc = readU16Le(data[0..2]);
 
-    const frame_type: FrameType = @fromBackingInt(@intCast(@as(u3, @truncate(fc & 0b111))));
+    const frame_type: FrameType = @fromBackingInt(@truncate(fc));
     const security: bool = (fc >> 3) & 1 == 1;
     if (security) return error.UnsupportedSecurity;
 
@@ -297,9 +297,9 @@ pub fn parse(data: []const u8) error{ Truncated, Malformed, UnsupportedSecurity 
     const ack_request: bool = (fc >> 5) & 1 == 1;
     const pan_id_compression: bool = (fc >> 6) & 1 == 1;
     const seq_suppressed: bool = (fc >> 8) & 1 == 1;
-    const dst_mode: AddressingMode = @fromBackingInt(@intCast(@as(u2, @truncate((fc >> 10) & 0b11))));
-    const frame_version: FrameVersion = @fromBackingInt(@intCast(@as(u2, @truncate((fc >> 12) & 0b11))));
-    const src_mode: AddressingMode = @fromBackingInt(@intCast(@as(u2, @truncate((fc >> 14) & 0b11))));
+    const dst_mode: AddressingMode = @fromBackingInt(@truncate(fc >> 10));
+    const frame_version: FrameVersion = @fromBackingInt(@truncate(fc >> 12));
+    const src_mode: AddressingMode = @fromBackingInt(@truncate(fc >> 14));
 
     if (@backingInt(dst_mode) == 1 or @backingInt(src_mode) == 1)
         return error.Malformed;

@@ -18,7 +18,7 @@ pub const FailureType = enum(u2) {
 };
 
 pub fn failureTypeFromOptionType(opt_type: u8) FailureType {
-    return @fromBackingInt(@intCast(@as(u2, @truncate(opt_type >> 6))));
+    return @fromBackingInt(@truncate(opt_type >> 6));
 }
 
 pub const RouterAlert = enum(u16) {
@@ -51,7 +51,7 @@ pub const Repr = union(enum) {
 pub fn parse(data: []const u8) error{ Truncated, BadOption }!Repr {
     if (data.len < 1) return error.Truncated;
 
-    const opt_type: Type = @fromBackingInt(@intCast(data[0]));
+    const opt_type: Type = @fromBackingInt(data[0]);
 
     if (opt_type == .pad1) return .pad1;
 
@@ -64,7 +64,7 @@ pub fn parse(data: []const u8) error{ Truncated, BadOption }!Repr {
         .router_alert => blk: {
             if (length != 2) break :blk error.BadOption;
             const val: u16 = @as(u16, data[2]) << 8 | @as(u16, data[3]);
-            break :blk .{ .router_alert = @fromBackingInt(@intCast(val)) };
+            break :blk .{ .router_alert = @fromBackingInt(val) };
         },
         else => .{ .unknown = .{
             .option_type = data[0],

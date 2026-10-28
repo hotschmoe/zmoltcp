@@ -339,7 +339,7 @@ fn fuzzReassemblerV4(s: *std.testing.Smith) !void {
             .id = s.value(u16),
             .src_addr = fuzzV4(s),
             .dst_addr = fuzzV4(s),
-            .protocol = @fromBackingInt(@intCast(s.value(u8))),
+            .protocol = @fromBackingInt(s.value(u8)),
         };
         switch (s.value(u8) % 5) {
             0 => r.accept(key, fuzzInstant(s)),
@@ -690,7 +690,7 @@ fn fuzzRawSocket(s: *std.testing.Smith, payload: []const u8) !void {
     var tx_store: [4]Sock.Packet = undefined;
     var sock = Sock.init(&rx_store, &tx_store);
 
-    const proto: ipv4.Protocol = @fromBackingInt(@intCast(s.value(u8)));
+    const proto: ipv4.Protocol = @fromBackingInt(s.value(u8));
     sock.bind(proto) catch {};
     if (sock.accepts(proto)) {
         sock.process(REMOTE_V4, proto, payload);

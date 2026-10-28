@@ -105,7 +105,7 @@ pub fn parse(data: []const u8) error{ Truncated, BadVersion, BadHeaderLen }!Repr
         .more_fragments = (flags_frag & 0x2000) != 0,
         .fragment_offset = @truncate(flags_frag & 0x1FFF),
         .ttl = data[8],
-        .protocol = @fromBackingInt(@intCast(data[9])),
+        .protocol = @fromBackingInt(data[9]),
         .checksum = @as(u16, data[10]) << 8 | @as(u16, data[11]),
         .src_addr = data[12..16].*,
         .dst_addr = data[16..20].*,

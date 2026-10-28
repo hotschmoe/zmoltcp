@@ -68,7 +68,7 @@ pub fn parse(data: []const u8) ParseError!Repr {
         return error.ChecksumError;
     }
 
-    const msg_type: MessageType = @fromBackingInt(@intCast(data[0]));
+    const msg_type: MessageType = @fromBackingInt(data[0]);
     const max_resp_code = data[1];
     const group_addr: ipv4.Address = data[4..8].*;
 

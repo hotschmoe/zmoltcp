@@ -1399,7 +1399,7 @@ test "handle IPv4 broadcast" {
 test "no ICMP for unknown protocol to broadcast" {
     var iface = testInterface();
 
-    const ip_repr = testIpv4Repr(@fromBackingInt(@intCast(0x0C)), LOCAL_IP, .{ 255, 255, 255, 255 }, 0);
+    const ip_repr = testIpv4Repr(@fromBackingInt(0x0C), LOCAL_IP, .{ 255, 255, 255, 255 }, 0);
 
     var frame_buf: [128]u8 = undefined;
     const frame = buildIpv4Frame(&frame_buf, ip_repr, &.{});
@@ -1412,7 +1412,7 @@ test "no ICMP for unknown protocol to broadcast" {
 test "ICMP error no payload" {
     var iface = testInterface();
 
-    const ip_repr = testIpv4Repr(@fromBackingInt(@intCast(0x0C)), REMOTE_IP, LOCAL_IP, 0);
+    const ip_repr = testIpv4Repr(@fromBackingInt(0x0C), REMOTE_IP, LOCAL_IP, 0);
 
     var frame_buf: [128]u8 = undefined;
     const frame = buildIpv4Frame(&frame_buf, ip_repr, &.{});
@@ -2472,7 +2472,7 @@ test "IPv6 param problem for unrecognized next header" {
     const frame = buildIpv6Frame(&buf, .{
         .src_addr = REMOTE_V6_LL,
         .dst_addr = LOCAL_V6_LL,
-        .next_header = @fromBackingInt(@intCast(253)), // experimental
+        .next_header = @fromBackingInt(253), // experimental
         .payload_len = unknown_payload.len,
         .hop_limit = 64,
     }, &unknown_payload);

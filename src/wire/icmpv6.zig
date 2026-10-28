@@ -124,7 +124,7 @@ pub fn parse(
 
     if (!verifyChecksum(data, src_addr, dst_addr)) return error.BadChecksum;
 
-    const msg_type: Message = @fromBackingInt(@intCast(data[0]));
+    const msg_type: Message = @fromBackingInt(data[0]);
     const body = data[HEADER_LEN..];
 
     switch (msg_type) {
@@ -148,7 +148,7 @@ pub fn parse(
             if (body.len < 4 + ipv6.HEADER_LEN) return error.Truncated;
             const inner = ipv6.parseHeader(body[4..]) catch return error.BadVersion;
             return .{ .dst_unreachable = .{
-                .reason = @fromBackingInt(@intCast(data[1])),
+                .reason = @fromBackingInt(data[1]),
                 .header = inner,
                 .data = body[4 + ipv6.HEADER_LEN ..],
             } };
@@ -166,7 +166,7 @@ pub fn parse(
             if (body.len < 4 + ipv6.HEADER_LEN) return error.Truncated;
             const inner = ipv6.parseHeader(body[4..]) catch return error.BadVersion;
             return .{ .time_exceeded = .{
-                .reason = @fromBackingInt(@intCast(data[1])),
+                .reason = @fromBackingInt(data[1]),
                 .header = inner,
                 .data = body[4 + ipv6.HEADER_LEN ..],
             } };
@@ -175,7 +175,7 @@ pub fn parse(
             if (body.len < 4 + ipv6.HEADER_LEN) return error.Truncated;
             const inner = ipv6.parseHeader(body[4..]) catch return error.BadVersion;
             return .{ .param_problem = .{
-                .reason = @fromBackingInt(@intCast(data[1])),
+                .reason = @fromBackingInt(data[1]),
                 .pointer = readU32(body[0..4]),
                 .header = inner,
                 .data = body[4 + ipv6.HEADER_LEN ..],

@@ -210,7 +210,7 @@ pub fn parse(data: []const u8) error{ Truncated, BadDataOffset }!Repr {
 fn parseOptions(options: []const u8, repr: *Repr) void {
     var i: usize = 0;
     while (i < options.len) {
-        const kind: OptionKind = @fromBackingInt(@intCast(options[i]));
+        const kind: OptionKind = @fromBackingInt(options[i]);
         switch (kind) {
             .end => return,
             .nop => {

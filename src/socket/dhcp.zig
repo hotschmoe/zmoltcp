@@ -549,7 +549,7 @@ fn dnsServers() wire.DnsServers {
 
 fn dhcpDefault() wire.Repr {
     return .{
-        .message_type = @fromBackingInt(@intCast(99)),
+        .message_type = @fromBackingInt(99),
         .transaction_id = TXID,
         .secs = 0,
         .client_hardware_address = MY_MAC,

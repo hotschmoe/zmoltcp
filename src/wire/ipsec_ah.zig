@@ -21,7 +21,7 @@ pub fn parse(data: []const u8) error{Truncated}!Repr {
     if (total < MIN_HEADER_LEN) return error.Truncated;
     if (data.len < total) return error.Truncated;
     return .{
-        .next_header = @fromBackingInt(@intCast(data[0])),
+        .next_header = @fromBackingInt(data[0]),
         .spi = checksum.readU32(data[4..8]),
         .sequence_number = checksum.readU32(data[8..12]),
         .icv_len = (@as(usize, payload_len) + 2) * 4 - MIN_HEADER_LEN,
@@ -72,7 +72,7 @@ const ICV2 = [_]u8{ 0xaf, 0xd2, 0xe7, 0xa1, 0x73, 0xd3, 0x29, 0x0b, 0xfe, 0x6b, 
 
 fn packetRepr1() Repr {
     return .{
-        .next_header = @fromBackingInt(@intCast(0x32)), // ipsec_esp = 50
+        .next_header = @fromBackingInt(0x32), // ipsec_esp = 50
         .spi = 0x8179b705,
         .sequence_number = 1,
         .icv_len = 12,
@@ -81,7 +81,7 @@ fn packetRepr1() Repr {
 
 fn packetRepr2() Repr {
     return .{
-        .next_header = @fromBackingInt(@intCast(0x32)),
+        .next_header = @fromBackingInt(0x32),
         .spi = 0xba8bd060,
         .sequence_number = 1,
         .icv_len = 12,

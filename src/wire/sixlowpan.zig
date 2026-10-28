@@ -254,7 +254,7 @@ pub fn parseIphc(
     var next_header: NextHeader = undefined;
     if (nh_flag == 0) {
         if (offset >= data.len) return error.Truncated;
-        next_header = .{ .uncompressed = @fromBackingInt(@intCast(data[offset])) };
+        next_header = .{ .uncompressed = @fromBackingInt(data[offset]) };
         offset += 1;
     } else {
         next_header = .compressed;
@@ -436,7 +436,7 @@ pub fn parseExtHeaderNhc(data: []const u8) error{ Truncated, Malformed }!struct 
     offset += 1;
 
     return .{
-        .repr = .{ .id = @fromBackingInt(@intCast(eid)), .next_header = nh, .length = length },
+        .repr = .{ .id = @fromBackingInt(eid), .next_header = nh, .length = length },
         .consumed = offset,
     };
 }
@@ -590,7 +590,7 @@ pub fn udpNhcBufLen(repr: UdpNhcRepr) usize {
 fn parseNextHeader(data: []const u8, offset: *usize, nh_bit: u1) error{Truncated}!NextHeader {
     if (nh_bit == 0) {
         if (offset.* >= data.len) return error.Truncated;
-        const proto: ipv6.Protocol = @fromBackingInt(@intCast(data[offset.*]));
+        const proto: ipv6.Protocol = @fromBackingInt(data[offset.*]);
         offset.* += 1;
         return .{ .uncompressed = proto };
     }

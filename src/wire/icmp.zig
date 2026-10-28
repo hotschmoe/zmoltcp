@@ -46,7 +46,7 @@ pub fn parse(data: []const u8) error{ Truncated, BadChecksum }!Repr {
     if (data.len < HEADER_LEN) return error.Truncated;
     if (!verifyChecksum(data)) return error.BadChecksum;
 
-    const icmp_type: Type = @fromBackingInt(@intCast(data[0]));
+    const icmp_type: Type = @fromBackingInt(data[0]);
     const code = data[1];
     const cksum: u16 = @as(u16, data[2]) << 8 | @as(u16, data[3]);
 

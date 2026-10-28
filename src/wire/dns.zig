@@ -72,13 +72,13 @@ pub fn flags(data: []const u8) ParseError!u16 {
 pub fn opcode(data: []const u8) ParseError!Opcode {
     if (data.len < HEADER_LEN) return error.Truncated;
     const f = readU16Be(data, 2);
-    return @fromBackingInt(@intCast(@as(u8, @truncate((f >> 11) & 0xF))));
+    return @fromBackingInt(@truncate((f >> 11) & 0xF));
 }
 
 pub fn rcode(data: []const u8) ParseError!Rcode {
     if (data.len < HEADER_LEN) return error.Truncated;
     const f = readU16Be(data, 2);
-    return @fromBackingInt(@intCast(@as(u8, @truncate(f & 0xF))));
+    return @fromBackingInt(@truncate(f & 0xF));
 }
 
 pub fn questionCount(data: []const u8) ParseError!u16 {
@@ -211,7 +211,7 @@ pub fn parseQuestion(bytes: []const u8) ParseError!struct { rest: []const u8, qu
         .rest = rest[4..],
         .question = .{
             .name = name,
-            .type_ = @fromBackingInt(@intCast(type_val)),
+            .type_ = @fromBackingInt(type_val),
         },
     };
 }
@@ -245,7 +245,7 @@ pub fn parseRecord(bytes: []const u8) ParseError!struct { rest: []const u8, reco
     if (after_fixed.len < rdlength) return error.Truncated;
 
     const rdata = after_fixed[0..rdlength];
-    const type_: Type = @fromBackingInt(@intCast(type_val));
+    const type_: Type = @fromBackingInt(type_val);
 
     if (type_ == .a and rdata.len != 4) return error.Truncated;
     if (type_ == .aaaa and rdata.len != 16) return error.Truncated;

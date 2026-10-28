@@ -68,7 +68,7 @@ pub fn parse(data: []const u8) error{ Truncated, BadLength }!Repr {
     if (data.len < 2) return error.Truncated;
     if (data[1] == 0) return error.BadLength;
 
-    const opt_type: Type = @fromBackingInt(@intCast(data[0]));
+    const opt_type: Type = @fromBackingInt(data[0]);
     const length = data[1];
     const total: usize = @as(usize, length) * 8;
     if (data.len < total) return error.Truncated;

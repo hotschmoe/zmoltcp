@@ -39,7 +39,7 @@ pub const MessageType = enum(u8) {
         return switch (self) {
             .discover, .inform, .request, .decline, .release => .request,
             .offer, .ack, .nak => .reply,
-            _ => @fromBackingInt(@intCast(0)),
+            _ => @fromBackingInt(0),
         };
     }
 };
@@ -121,7 +121,7 @@ pub fn parse(data: []const u8) ParseError!Repr {
 
     if (readU32Be(data, 236) != MAGIC_NUMBER) return error.InvalidMagic;
 
-    const op: OpCode = @fromBackingInt(@intCast(data[0]));
+    const op: OpCode = @fromBackingInt(data[0]);
     const transaction_id = readU32Be(data, 4);
     const secs = readU16Be(data, 8);
     const broadcast = (readU16Be(data, 10) & 0x8000) != 0;
@@ -156,7 +156,7 @@ pub fn parse(data: []const u8) ParseError!Repr {
         switch (kind) {
             OPT_DHCP_MESSAGE_TYPE => {
                 if (opt_data.len == 1) {
-                    const value: MessageType = @fromBackingInt(@intCast(opt_data[0]));
+                    const value: MessageType = @fromBackingInt(opt_data[0]);
                     if (value.opCode() == op) {
                         message_type = value;
                     }

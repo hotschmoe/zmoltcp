@@ -484,7 +484,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     .hop_by_hop, .routing, .destination => {
                         const remaining = raw_payload[payload_offset..];
                         const ext = ipv6ext_header.parse(remaining) catch return;
-                        next_header = @fromBackingInt(@intCast(ext.next_header));
+                        next_header = @fromBackingInt(ext.next_header);
                         payload_offset += ipv6ext_header.headerLen(ext.length);
                     },
                     .fragment => {
@@ -497,7 +497,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                             frag_repr,
                             frag_data,
                         ) orelse return;
-                        const final_nh: ipv6.Protocol = @fromBackingInt(@intCast(frag_repr.next_header));
+                        const final_nh: ipv6.Protocol = @fromBackingInt(frag_repr.next_header);
                         self.dispatchV6Payload(ip_repr, final_nh, ip_payload, is_multicast, timestamp, device);
                         return;
                     },
@@ -3876,7 +3876,7 @@ test "stack raw socket suppresses ICMP proto unreachable" {
     var tx_buf: [2]RawSock.Packet = undefined;
     var sock = RawSock.init(&rx_buf, &tx_buf);
     // Bind to protocol 253 (experimental).
-    try sock.bind(@fromBackingInt(@intCast(253)));
+    try sock.bind(@fromBackingInt(253));
 
     var sock_arr = [_]*RawSock{&sock};
     var stack = RawStack.init(LOCAL_HW, .{ .raw4_sockets = &sock_arr });
@@ -3891,7 +3891,7 @@ test "stack raw socket suppresses ICMP proto unreachable" {
     // Send a packet with protocol 253.
     const payload = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF };
     var frame_buf: [256]u8 = undefined;
-    device.enqueueRx(buildIpv4Frame(&frame_buf, @fromBackingInt(@intCast(253)), &payload));
+    device.enqueueRx(buildIpv4Frame(&frame_buf, @fromBackingInt(253), &payload));
     _ = stack.poll(Instant.ZERO, &device);
 
     // Raw socket should have received it.
@@ -4440,7 +4440,7 @@ test "stack v6 param problem for unknown next header" {
 
     const payload = [_]u8{ 0xAA, 0xBB, 0xCC, 0xDD };
     var req_buf: [256]u8 = undefined;
-    const unknown_proto: ipv6.Protocol = @fromBackingInt(@intCast(253));
+    const unknown_proto: ipv6.Protocol = @fromBackingInt(253);
     const frame = buildIpv6FrameFrom(&req_buf, REMOTE_V6, LOCAL_V6, unknown_proto, 64, &payload);
     device.enqueueRx(frame);
 
@@ -5654,7 +5654,7 @@ test "stack v6 raw socket suppresses ICMPv6 param problem" {
     var rx_buf: [2]RawSock.Packet = undefined;
     var tx_buf: [2]RawSock.Packet = undefined;
     var sock = RawSock.init(&rx_buf, &tx_buf);
-    try sock.bind(@fromBackingInt(@intCast(253)));
+    try sock.bind(@fromBackingInt(253));
 
     var sock_arr = [_]*RawSock{&sock};
     var stack = V6Stack.init(LOCAL_HW, .{ .raw6_sockets = &sock_arr });
@@ -5664,7 +5664,7 @@ test "stack v6 raw socket suppresses ICMPv6 param problem" {
     // Send unknown protocol 253 -- raw socket handles it
     const payload = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
     var frame_buf: [256]u8 = undefined;
-    device.enqueueRx(buildIpv6FrameFrom(&frame_buf, REMOTE_V6, LOCAL_V6, @fromBackingInt(@intCast(253)), 64, &payload));
+    device.enqueueRx(buildIpv6FrameFrom(&frame_buf, REMOTE_V6, LOCAL_V6, @fromBackingInt(253), 64, &payload));
     _ = stack.poll(Instant.ZERO, &device);
 
     // Raw socket received the payload

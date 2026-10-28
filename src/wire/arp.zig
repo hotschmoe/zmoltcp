@@ -47,7 +47,7 @@ pub fn parse(data: []const u8) error{ Truncated, UnsupportedHardware, Unsupporte
     if (operation != 1 and operation != 2) return error.UnsupportedOperation;
 
     return .{
-        .operation = @fromBackingInt(@intCast(operation)),
+        .operation = @fromBackingInt(operation),
         .source_hardware_addr = data[8..14].*,
         .source_protocol_addr = data[14..18].*,
         .target_hardware_addr = data[18..24].*,

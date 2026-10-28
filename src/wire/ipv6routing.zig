@@ -37,7 +37,7 @@ pub fn bufferLen(repr: Repr) usize {
 pub fn parse(data: []const u8) error{ Truncated, Unrecognized }!Repr {
     if (data.len < 2) return error.Truncated;
 
-    const routing_type: RoutingType = @fromBackingInt(@intCast(data[0]));
+    const routing_type: RoutingType = @fromBackingInt(data[0]);
     const segments_left = data[1];
 
     switch (routing_type) {

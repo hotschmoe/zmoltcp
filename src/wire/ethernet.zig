@@ -30,7 +30,7 @@ pub fn parse(data: []const u8) error{Truncated}!Repr {
     return .{
         .dst_addr = data[0..ADDR_LEN].*,
         .src_addr = data[ADDR_LEN..][0..ADDR_LEN].*,
-        .ethertype = @fromBackingInt(@intCast(@as(u16, data[12]) << 8 | @as(u16, data[13]))),
+        .ethertype = @fromBackingInt(@as(u16, data[12]) << 8 | data[13]),
     };
 }
 
