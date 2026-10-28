@@ -8,6 +8,7 @@
 // Reference: smoltcp src/iface/interface.rs, tests/ipv4.rs
 
 const std = @import("std");
+const zv = @import("zv");
 const ethernet = @import("wire/ethernet.zig");
 const arp = @import("wire/arp.zig");
 const ip_generic = @import("wire/ip.zig");
@@ -181,7 +182,12 @@ pub fn NeighborCache(comptime Ip: type) type {
             return !Ip.isUnspecified(entry.protocol_addr);
         }
 
+        /// Record a neighbor. Callers must have validated both addresses: an
+        /// unspecified, multicast or broadcast protocol address or a group MAC
+        /// would let any on-link host blackhole traffic.
         pub fn fill(self: *Self, ip: Ip.Address, mac: ethernet.Address, now: time.Instant) void {
+            zv.requires(!Ip.isUnspecified(ip) and !Ip.isMulticast(ip) and !Ip.isBroadcast(ip));
+            zv.requires(ethernet.isUnicast(mac));
             const expires = now.add(NEIGHBOR_LIFETIME);
             const new_entry = Entry{ .protocol_addr = ip, .hardware_addr = mac, .expires_at = expires };
 
@@ -206,6 +212,28 @@ pub fn NeighborCache(comptime Ip: type) type {
                 if (entry.expires_at.lessThan(oldest.expires_at)) oldest = entry;
             }
             oldest.* = new_entry;
+        }
+
+        /// Opportunistic learning from data packets, whose source addresses
+        /// nothing authenticates. Refreshes an entry with the same hardware
+        /// address, and may use a free or expired slot, but never overwrites a
+        /// live entry or evicts one, so forged sources cannot displace a real
+        /// neighbor.
+        pub fn learnIfFree(self: *Self, ip: Ip.Address, mac: ethernet.Address, now: time.Instant) void {
+            zv.requires(!Ip.isUnspecified(ip) and !Ip.isMulticast(ip) and !Ip.isBroadcast(ip));
+            zv.requires(ethernet.isUnicast(mac));
+            var free: ?*Entry = null;
+            for (&self.entries) |*entry| {
+                if (isOccupied(entry.*) and std.mem.eql(u8, &entry.protocol_addr, &ip)) {
+                    if (std.mem.eql(u8, &entry.hardware_addr, &mac) or entry.expires_at.lessThan(now)) {
+                        entry.hardware_addr = mac;
+                        entry.expires_at = now.add(NEIGHBOR_LIFETIME);
+                    }
+                    return;
+                }
+                if (free == null and (!isOccupied(entry.*) or entry.expires_at.lessThan(now))) free = entry;
+            }
+            if (free) |entry| entry.* = .{ .protocol_addr = ip, .hardware_addr = mac, .expires_at = now.add(NEIGHBOR_LIFETIME) };
         }
 
         pub fn lookup(self: *const Self, ip: Ip.Address, now: time.Instant) ?ethernet.Address {
@@ -835,6 +863,11 @@ pub const Interface = struct {
         const repr = arp.parse(data) catch return null;
         if (!self.any_ip and !self.v4.hasIpAddr(repr.target_protocol_addr)) return null;
 
+        const src = repr.source_protocol_addr;
+        if (ipv4.isUnspecified(src) or ipv4.isMulticast(src) or self.isBroadcast(src)) return null;
+        if (!ethernet.isUnicast(repr.source_hardware_addr)) return null;
+        if (!self.v4.inSameNetwork(src)) return null;
+
         self.neighbor_cache.fill(repr.source_protocol_addr, repr.source_hardware_addr, self.now);
 
         if (repr.operation == .request) {
@@ -1039,17 +1072,17 @@ pub const Interface = struct {
     pub fn processNdisc(self: *Interface, ip_repr: ipv6.Repr, ndisc_repr: ndisc.Repr) ?Response {
         switch (ndisc_repr) {
             .neighbor_solicit => |ns| {
-                if (ns.lladdr) |lladdr| {
-                    if (!ipv6.isUnspecified(ip_repr.src_addr)) {
-                        self.neighbor_cache_v6.fill(ip_repr.src_addr, lladdr, self.now);
-                    }
-                }
                 if (!self.v6.hasIpAddr(ns.target_addr)) return null;
                 // Multicast dst must be solicited-node for target
                 if (ipv6.isMulticast(ip_repr.dst_addr) and
                     !self.hasSolicitedNode(ip_repr.dst_addr))
                 {
                     return null;
+                }
+                if (ns.lladdr) |lladdr| {
+                    if (ipv6.isUnspecified(ip_repr.src_addr) or ipv6.isMulticast(ip_repr.src_addr)) return null;
+                    if (!ethernet.isUnicast(lladdr)) return null;
+                    self.neighbor_cache_v6.fill(ip_repr.src_addr, lladdr, self.now);
                 }
 
                 return .{ .ipv6 = .{
@@ -1075,9 +1108,10 @@ pub const Interface = struct {
             },
             .neighbor_advert => |na| {
                 if (na.lladdr) |lladdr| {
-                    if (na.flags.override_ or
-                        !self.neighbor_cache_v6.hasNeighbor(na.target_addr))
-                    {
+                    const target_ok = !ipv6.isUnspecified(na.target_addr) and !ipv6.isMulticast(na.target_addr);
+                    const acceptable = na.flags.override_ or
+                        (na.flags.solicited and !self.neighbor_cache_v6.hasNeighbor(na.target_addr));
+                    if (target_ok and acceptable and ethernet.isUnicast(lladdr)) {
                         self.neighbor_cache_v6.fill(na.target_addr, lladdr, self.now);
                     }
                 }
@@ -2421,7 +2455,7 @@ test "NA fills cache (override flag)" {
 
 test "NA does not overwrite without override" {
     var iface = testV6Interface();
-    const old_mac: ethernet.Address = .{ 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 };
+    const old_mac: ethernet.Address = .{ 0x12, 0x22, 0x33, 0x44, 0x55, 0x66 };
     iface.neighbor_cache_v6.fill(REMOTE_V6_LL, old_mac, time.Instant.ZERO);
 
     const new_mac: ethernet.Address = .{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF };

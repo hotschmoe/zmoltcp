@@ -363,16 +363,20 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     .ipv4 => {
                         const ip_repr = parseIpv4Ingress(payload_data) orelse return;
                         if (ipv4.isBroadcast(ip_repr.src_addr) or ipv4.isMulticast(ip_repr.src_addr)) return;
-                        if (!ipv4.isUnspecified(ip_repr.src_addr) and self.iface.v4.inSameNetwork(ip_repr.src_addr)) {
-                            self.iface.neighbor_cache.fill(ip_repr.src_addr, eth_repr.src_addr, self.iface.now);
+                        if (!ipv4.isUnspecified(ip_repr.src_addr) and ethernet.isUnicast(eth_repr.src_addr) and
+                            self.iface.v4.inSameNetwork(ip_repr.src_addr))
+                        {
+                            self.iface.neighbor_cache.learnIfFree(ip_repr.src_addr, eth_repr.src_addr, self.iface.now);
                         }
                         self.processIpv4Ingress(timestamp, ip_repr, payload_data, device);
                     },
                     .ipv6 => {
                         const ip_repr = ipv6.parse(payload_data) catch return;
                         if (ipv6.isMulticast(ip_repr.src_addr)) return;
-                        if (!ipv6.isUnspecified(ip_repr.src_addr) and self.iface.v6.inSameNetwork(ip_repr.src_addr)) {
-                            self.iface.neighbor_cache_v6.fill(ip_repr.src_addr, eth_repr.src_addr, self.iface.now);
+                        if (!ipv6.isUnspecified(ip_repr.src_addr) and ethernet.isUnicast(eth_repr.src_addr) and
+                            self.iface.v6.inSameNetwork(ip_repr.src_addr))
+                        {
+                            self.iface.neighbor_cache_v6.learnIfFree(ip_repr.src_addr, eth_repr.src_addr, self.iface.now);
                         }
                         self.processIpv6Ingress(timestamp, ip_repr, payload_data, device);
                     },

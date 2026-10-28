@@ -1149,6 +1149,107 @@ test "laws: tcp socket state machine" {
     try zv.checkLaws(tcp_state, .{ .iterations = 50_000, .seed = 6 });
 }
 
+// -------------------------------------------------------------------------
+// Neighbor cache integrity and ICMP reply rules.
+// -------------------------------------------------------------------------
+
+const iface_mod = @import("iface.zig");
+const ethernet_mod = @import("wire/ethernet.zig");
+
+fn lawInterface() iface_mod.Interface {
+    var iface = iface_mod.Interface.init(.{ 0x02, 0, 0, 0, 0, 1 });
+    iface.v4.addIpAddr(.{ .address = .{ 10, 0, 0, 1 }, .prefix_len = 24 });
+    return iface;
+}
+
+fn cacheIsClean(iface: *const iface_mod.Interface) bool {
+    for (iface.neighbor_cache.entries) |entry| {
+        if (ipv4.isUnspecified(entry.protocol_addr)) continue;
+        if (!ethernet_mod.isUnicast(entry.hardware_addr)) return false;
+        if (ipv4.isMulticast(entry.protocol_addr) or iface.isBroadcast(entry.protocol_addr)) return false;
+        if (!iface.v4.inSameNetwork(entry.protocol_addr)) return false;
+    }
+    return true;
+}
+
+pub const neighbors = struct {
+    /// Whatever ARP frames arrive, the cache only holds unicast on-link neighbors.
+    pub fn arpNeverPoisonsCache(frames: [6]ArpFrame) bool {
+        var iface = lawInterface();
+        for (frames) |f| {
+            var buf: [arp.HEADER_LEN]u8 = undefined;
+            const n = arp.emit(.{
+                .operation = if (f.reply) .reply else .request,
+                .source_hardware_addr = f.mac,
+                .source_protocol_addr = f.ip,
+                .target_hardware_addr = .{ 0, 0, 0, 0, 0, 0 },
+                .target_protocol_addr = if (f.to_us) .{ 10, 0, 0, 1 } else f.ip,
+            }, &buf) catch return false;
+            _ = iface.processArp(buf[0..n]);
+            if (!cacheIsClean(&iface)) return false;
+        }
+        return true;
+    }
+
+    /// Learning from unauthenticated data packets never displaces a live entry.
+    pub fn learningNeverEvictsLiveEntry(victim_last: u8, ops: [24]NeighborOp) bool {
+        var iface = lawInterface();
+        const victim_ip: ipv4.Address = .{ 10, 0, 0, @max(victim_last, 2) };
+        const victim_mac: ethernet_mod.Address = .{ 0x02, 0, 0, 0, 0, 0x99 };
+        iface.neighbor_cache.fill(victim_ip, victim_mac, time_mod.Instant.ZERO);
+        var now_ms: i64 = 0;
+        for (ops) |op| {
+            now_ms += op.dt;
+            const ip: ipv4.Address = .{ 10, 0, 0, @max(op.ip_last, 2) };
+            const mac: ethernet_mod.Address = .{ op.mac_first & 0xfe, 0, 0, 0, 0, op.mac_last };
+            iface.neighbor_cache.learnIfFree(ip, mac, time_mod.Instant.fromMillis(now_ms));
+            const found = iface.neighbor_cache.lookup(victim_ip, time_mod.Instant.fromMillis(now_ms));
+            if (found == null or !std.mem.eql(u8, &found.?, &victim_mac)) return false;
+        }
+        return true;
+    }
+};
+
+const ArpFrame = struct { reply: bool, to_us: bool, ip: ipv4.Address, mac: ethernet_mod.Address };
+const NeighborOp = struct { ip_last: u8, mac_first: u8, mac_last: u8, dt: u8 };
+
+pub const icmp_replies = struct {
+    /// Echo replies only go to unicast sources, from the address the request targeted.
+    pub fn echoReplyRules(src: ipv4.Address, dst: ipv4.Address, broadcast: bool) bool {
+        var iface = lawInterface();
+        if (!broadcast and !iface.v4.hasIpAddr(dst) and !ipv4.isMulticast(dst)) return true;
+        var msg: [icmp.HEADER_LEN]u8 = undefined;
+        _ = icmp.emitEcho(.{ .icmp_type = .echo_request, .code = 0, .checksum = 0, .identifier = 1, .sequence = 1 }, &.{}, &msg) catch return false;
+        const repr: ipv4.Repr = .{
+            .version = 4,
+            .ihl = 5,
+            .dscp_ecn = 0,
+            .total_length = ipv4.HEADER_LEN + msg.len,
+            .identification = 0,
+            .dont_fragment = false,
+            .more_fragments = false,
+            .fragment_offset = 0,
+            .ttl = 64,
+            .protocol = .icmp,
+            .checksum = 0,
+            .src_addr = src,
+            .dst_addr = dst,
+        };
+        const reply = iface.processIcmp(repr, &msg, broadcast) orelse return true;
+        const out = switch (reply) {
+            .ipv4 => |v| v.ip,
+            else => return false,
+        };
+        const src_ok = !ipv4.isUnspecified(src) and !ipv4.isMulticast(src) and !iface.isBroadcast(src);
+        return src_ok and !ipv4.isMulticast(out.src_addr) and !ipv4.isUnspecified(out.src_addr);
+    }
+};
+
+test "laws: neighbor cache and ICMP replies" {
+    try zv.checkLaws(neighbors, .{ .iterations = iterations, .seed = 8 });
+    try zv.checkLaws(icmp_replies, .{ .iterations = iterations, .seed = 9 });
+}
+
 test "laws: reach report" {
     std.debug.print("\nlaw reach (parser result counts)\n", .{});
     for (probes[0..probe_count]) |p| {

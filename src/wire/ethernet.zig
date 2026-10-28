@@ -8,6 +8,11 @@ pub const MIN_FRAME_LEN = 64;
 
 pub const Address = [ADDR_LEN]u8;
 
+/// A unicast address has the group bit (least significant bit of the first octet) clear.
+pub fn isUnicast(addr: Address) bool {
+    return addr[0] & 1 == 0;
+}
+
 pub const BROADCAST: Address = .{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
 pub const EtherType = enum(u16) {
