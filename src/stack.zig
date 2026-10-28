@@ -3,6 +3,7 @@
 // Reference: smoltcp src/iface/interface.rs (poll, socket_ingress, socket_egress)
 
 const std = @import("std");
+const zv = @import("zv");
 const ethernet = @import("wire/ethernet.zig");
 const arp = @import("wire/arp.zig");
 const ipv4 = @import("wire/ipv4.zig");
@@ -1635,7 +1636,11 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             device: *Device,
         ) EmitResult {
             var payload_buf: [IP_PAYLOAD_MAX]u8 = undefined;
-            const total_tcp = serializeTcp(repr, src_addr, dst_addr, &payload_buf, device_caps.checksum.tcp.shouldComputeTx()) orelse return .sent;
+            const total_tcp = serializeTcp(repr, src_addr, dst_addr, &payload_buf, device_caps.checksum.tcp.shouldComputeTx()) orelse {
+                // The socket sizes segments to the MTU and has already counted this one as sent.
+                zv.assume(false);
+                return .sent;
+            };
             return self.emitIpv4Frame(src_addr, dst_addr, .tcp, hop_limit, payload_buf[0..total_tcp], device);
         }
 
@@ -1738,7 +1743,11 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             device: *Device,
         ) EmitResult {
             var payload_buf: [IPV6_PAYLOAD_MAX]u8 = undefined;
-            const total_tcp = serializeTcpV6(repr, src_addr, dst_addr, &payload_buf, device_caps.checksum.tcp.shouldComputeTx()) orelse return .sent;
+            const total_tcp = serializeTcpV6(repr, src_addr, dst_addr, &payload_buf, device_caps.checksum.tcp.shouldComputeTx()) orelse {
+                // The socket sizes segments to the MTU and has already counted this one as sent.
+                zv.assume(false);
+                return .sent;
+            };
             return self.emitV6(src_addr, dst_addr, .tcp, hop_limit, payload_buf[0..total_tcp], device);
         }
 
