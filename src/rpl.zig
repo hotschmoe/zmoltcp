@@ -105,7 +105,7 @@ pub fn ParentSet(comptime max_parents: usize) type {
         const Self = @This();
         pub const Entry = struct { addr: [16]u8, parent: Parent };
 
-        entries: [max_parents]?Entry = .{null} ** max_parents,
+        entries: [max_parents]?Entry = @splat(null),
 
         pub fn add(self: *Self, addr: [16]u8, parent: Parent) bool {
             for (&self.entries) |*slot| {
@@ -186,7 +186,7 @@ pub fn Relations(comptime max_relations: usize) type {
     return struct {
         const Self = @This();
 
-        entries: [max_relations]?Relation = .{null} ** max_relations,
+        entries: [max_relations]?Relation = @splat(null),
 
         pub fn addRelation(self: *Self, dest: [16]u8, next_hop: [16]u8, exp: time.Instant) bool {
             for (&self.entries) |*slot| {
@@ -327,7 +327,7 @@ fn testParent(rank_value: u16) Parent {
         .rank = .{ .value = rank_value, .min_hop_rank_increase = DEFAULT_MIN_HOP_RANK_INCREASE },
         .preference = 0,
         .version_number = SequenceCounter.INIT,
-        .dodag_id = .{0} ** 16,
+        .dodag_id = @splat(0),
     };
 }
 
