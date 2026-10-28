@@ -30,11 +30,6 @@ const RETRANSMIT_DELAY = Duration.fromSecs(1);
 const MAX_RETRANSMIT_DELAY = Duration.fromSecs(10);
 const RETRANSMIT_TIMEOUT = Duration.fromSecs(10);
 
-pub const QueryHandle = struct {
-    index: usize,
-    generation: u32,
-};
-
 pub const StartQueryError = error{
     NoFreeSlot,
     InvalidName,
@@ -120,10 +115,11 @@ pub fn Socket(comptime Ip: type) type {
             failure,
         };
 
-        pub const QuerySlot = struct {
-            state: ?QueryState = null,
-            generation: u32 = 0,
-        };
+        /// Each socket type has its own brand, so handles and slots of other
+        /// sockets are different types.
+        const Table = zv.Slots(QueryState, struct {});
+        pub const QuerySlot = Table.Slot;
+        pub const QueryHandle = Table.Handle;
 
         pub const DispatchResult = struct {
             payload: []const u8,
@@ -132,7 +128,7 @@ pub fn Socket(comptime Ip: type) type {
             dst_port: u16 = DNS_PORT,
         };
 
-        queries: []QuerySlot,
+        queries: Table,
         servers: [MAX_SERVER_COUNT]Ip.Address = undefined,
         server_count: usize = 0,
         query_rng: std.Random.DefaultPrng,
@@ -147,13 +143,10 @@ pub fn Socket(comptime Ip: type) type {
 
         pub fn initWithSeed(queries: []QuerySlot, servers: []const Ip.Address, seed: u64) Self {
             var s = Self{
-                .queries = queries,
+                .queries = .init(queries),
                 .query_rng = std.Random.DefaultPrng.init(seed),
             };
             s.updateServers(servers);
-            for (queries) |*q| {
-                q.state = null;
-            }
             return s;
         }
 
@@ -169,15 +162,6 @@ pub fn Socket(comptime Ip: type) type {
             const count = @min(servers.len, MAX_SERVER_COUNT);
             @memcpy(self.servers[0..count], servers[0..count]);
             self.server_count = count;
-        }
-
-        fn findFreeSlot(self: *Self) ?QueryHandle {
-            for (self.queries, 0..) |*q, i| {
-                if (q.state == null) {
-                    return .{ .index = i, .generation = q.generation +% 1 };
-                }
-            }
-            return null;
         }
 
         pub fn startQuery(self: *Self, name: []const u8, type_: wire.Type) StartQueryError!QueryHandle {
@@ -218,9 +202,8 @@ pub fn Socket(comptime Ip: type) type {
 
             const handle = try self.startQueryRaw(raw_name[0..pos], type_);
             if (isLocalName(work_name)) {
-                var pq = self.queries[handle.index].state.?.pending;
-                pq.mdns = true;
-                self.queries[handle.index].state = .{ .pending = pq };
+                const state = self.queries.get(handle) catch unreachable;
+                state.pending.mdns = true;
             }
             return handle;
         }
@@ -233,7 +216,6 @@ pub fn Socket(comptime Ip: type) type {
         }
 
         pub fn startQueryRaw(self: *Self, raw_name: []const u8, type_: wire.Type) StartQueryError!QueryHandle {
-            const handle = self.findFreeSlot() orelse return error.NoFreeSlot;
             if (raw_name.len > MAX_NAME_SIZE) return error.NameTooLong;
 
             var pq = PendingQuery{
@@ -248,36 +230,25 @@ pub fn Socket(comptime Ip: type) type {
             };
             @memcpy(pq.name[0..raw_name.len], raw_name);
 
-            self.queries[handle.index].state = .{ .pending = pq };
-            self.queries[handle.index].generation = handle.generation;
-            return handle;
+            return self.queries.insert(.{ .pending = pq });
         }
 
         pub fn getQueryResult(self: *Self, handle: QueryHandle) GetQueryResultError!Addresses {
-            const slot = self.liveSlot(handle) orelse return error.StaleHandle;
-            const state = slot.state.?;
-            switch (state) {
+            switch ((try self.queries.get(handle)).*) {
                 .pending => return error.Pending,
                 .completed => |addrs| {
-                    slot.state = null;
+                    self.queries.free(handle) catch unreachable;
                     return addrs;
                 },
                 .failure => {
-                    slot.state = null;
+                    self.queries.free(handle) catch unreachable;
                     return error.Failed;
                 },
             }
         }
 
         pub fn cancelQuery(self: *Self, handle: QueryHandle) void {
-            if (self.liveSlot(handle)) |slot| slot.state = null;
-        }
-
-        fn liveSlot(self: *Self, handle: QueryHandle) ?*QuerySlot {
-            if (handle.index >= self.queries.len) return null;
-            const slot = &self.queries[handle.index];
-            if (slot.generation != handle.generation or slot.state == null) return null;
-            return slot;
+            self.queries.free(handle) catch {};
         }
 
         pub fn process(self: *Self, src_ip: Ip.Address, dst_port: u16, pkt_data: []const u8) void {
@@ -296,9 +267,9 @@ pub fn Socket(comptime Ip: type) type {
             const pkt_rcode = wire.rcode(pkt_data) catch return;
             const answer_count = wire.answerCount(pkt_data) catch return;
 
-            for (self.queries) |*slot| {
-                const state = slot.state orelse continue;
-                var pq = switch (state) {
+            var it = self.queries.iterator();
+            while (it.next()) |entry| {
+                var pq = switch (entry.value.*) {
                     .pending => |p| p,
                     else => continue,
                 };
@@ -315,7 +286,7 @@ pub fn Socket(comptime Ip: type) type {
                 if (!wire.eqNames(q_name, pq_name)) continue;
 
                 if (pkt_rcode == .nx_domain) {
-                    slot.state = .failure;
+                    entry.value.* = .failure;
                     return;
                 }
 
@@ -335,25 +306,25 @@ pub fn Socket(comptime Ip: type) type {
                         .cname => |cname_data| {
                             const cname_labels = wire.parseName(pkt_data, headerOffset(pkt_data, cname_data)) catch return;
                             pq.name_len = wire.copyName(&pq.name, cname_labels) catch return;
-                            slot.state = .{ .pending = pq };
+                            entry.value.* = .{ .pending = pq };
                         },
                         .other => {},
                     }
                 }
 
                 if (addresses.len > 0) {
-                    slot.state = .{ .completed = addresses };
+                    entry.value.* = .{ .completed = addresses };
                 } else {
-                    slot.state = .failure;
+                    entry.value.* = .failure;
                 }
                 return;
             }
         }
 
         pub fn dispatch(self: *Self, now: Instant, buf: []u8) ?DispatchResult {
-            for (self.queries) |*slot| {
-                const state = slot.state orelse continue;
-                var pq = switch (state) {
+            var it = self.queries.iterator();
+            while (it.next()) |entry| {
+                var pq = switch (entry.value.*) {
                     .pending => |p| p,
                     else => continue,
                 };
@@ -368,12 +339,12 @@ pub fn Socket(comptime Ip: type) type {
                 }
 
                 if (!pq.mdns and pq.server_idx >= self.server_count) {
-                    slot.state = .failure;
+                    entry.value.* = .failure;
                     continue;
                 }
 
                 if (pq.retransmit_at.micros > now.micros) {
-                    slot.state = .{ .pending = pq };
+                    entry.value.* = .{ .pending = pq };
                     continue;
                 }
 
@@ -388,14 +359,14 @@ pub fn Socket(comptime Ip: type) type {
                 };
 
                 const pkt_len = wire.emit(repr, buf) catch {
-                    slot.state = .{ .pending = pq };
+                    entry.value.* = .{ .pending = pq };
                     continue;
                 };
 
                 pq.retransmit_at = now.add(pq.delay);
                 pq.delay = MAX_RETRANSMIT_DELAY.min(Duration.fromMicros(pq.delay.micros * 2));
 
-                slot.state = .{ .pending = pq };
+                entry.value.* = .{ .pending = pq };
 
                 if (pq.mdns) {
                     return .{
@@ -417,8 +388,8 @@ pub fn Socket(comptime Ip: type) type {
 
         pub fn pollAt(self: *const Self) ?Instant {
             var earliest: ?Instant = null;
-            for (self.queries) |slot| {
-                const pq = switch (slot.state orelse continue) {
+            for (self.queries.slots) |slot| {
+                const pq = switch (slot.value orelse continue) {
                     .pending => |p| p,
                     else => continue,
                 };
@@ -688,8 +659,7 @@ test "start query encodes name" {
     var s = &ctx.socket;
 
     const handle = try s.startQuery("google.com", .a);
-    const state = s.queries[handle.index].state.?;
-    const pq = state.pending;
+    const pq = (try s.queries.get(handle)).pending;
 
     // Should be wire-encoded: \x06google\x03com\x00
     const expected = [_]u8{ 0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d, 0x00 };
@@ -730,7 +700,7 @@ test "dispatch emits query packet" {
     const buf = ctx.buf;
 
     const handle = try s.startQuery("google.com", .a);
-    const pq = s.queries[handle.index].state.?.pending;
+    const pq = (try s.queries.get(handle)).pending;
     const result = s.dispatch(Instant.fromMillis(0), buf) orelse return error.TestExpectedEqual;
 
     // Verify packet structure
@@ -747,9 +717,9 @@ test "start query rotates transaction IDs and source ports" {
     var s = &ctx.socket;
 
     const h1 = try s.startQuery("a.com", .a);
-    const q1 = s.queries[h1.index].state.?.pending;
+    const q1 = (try s.queries.get(h1)).pending;
     const h2 = try s.startQuery("b.com", .a);
-    const q2 = s.queries[h2.index].state.?.pending;
+    const q2 = (try s.queries.get(h2)).pending;
 
     try testing.expect(q1.txid != q2.txid);
     try testing.expect(q1.port != q2.port);
@@ -827,7 +797,7 @@ test "process A response" {
 
     const handle = try s.startQuery("google.com", .a);
     _ = s.dispatch(Instant.fromMillis(0), buf);
-    const pq = s.queries[handle.index].state.?.pending;
+    const pq = (try s.queries.get(handle)).pending;
 
     const name_enc = encodeName("google.com");
     const addr = [4]u8{ 172, 217, 14, 206 };
@@ -847,7 +817,7 @@ test "process AAAA response for IPv6 socket" {
 
     const handle = try s.startQuery("example.com", .aaaa);
     _ = s.dispatch(Instant.fromMillis(0), buf);
-    const pq = s.queries[handle.index].state.?.pending;
+    const pq = (try s.queries.get(handle)).pending;
 
     const name_enc = encodeName("example.com");
     const addr = [16]u8{ 0x26, 0x06, 0x28, 0x00, 0x02, 0x20, 0x00, 0x01, 0x02, 0x48, 0x18, 0x93, 0x25, 0xc8, 0x19, 0x46 };
@@ -867,7 +837,7 @@ test "IPv6 DNS socket ignores A answers" {
 
     const handle = try s.startQuery("example.com", .aaaa);
     _ = s.dispatch(Instant.fromMillis(0), buf);
-    const pq = s.queries[handle.index].state.?.pending;
+    const pq = (try s.queries.get(handle)).pending;
 
     const name_enc = encodeName("example.com");
     const resp = buildResponse(pq.txid, .no_error, name_enc.data[0..name_enc.len], .aaaa, &[_][4]u8{.{ 192, 0, 2, 1 }});
@@ -884,7 +854,7 @@ test "process ignores response from unexpected server" {
 
     const handle = try s.startQuery("google.com", .a);
     _ = s.dispatch(Instant.fromMillis(0), buf);
-    const pq = s.queries[handle.index].state.?.pending;
+    const pq = (try s.queries.get(handle)).pending;
 
     const name_enc = encodeName("google.com");
     const addr = [4]u8{ 172, 217, 14, 206 };
@@ -906,7 +876,7 @@ test "process NXDomain" {
 
     const handle = try s.startQuery("nonexistent.com", .a);
     _ = s.dispatch(Instant.fromMillis(0), buf);
-    const pq = s.queries[handle.index].state.?.pending;
+    const pq = (try s.queries.get(handle)).pending;
 
     const name_enc = encodeName("nonexistent.com");
     const resp = buildResponse(pq.txid, .nx_domain, name_enc.data[0..name_enc.len], .a, &[_][4]u8{});
@@ -923,7 +893,7 @@ test "process NXDomain validates question before failure" {
 
     const handle = try s.startQuery("nonexistent.com", .a);
     _ = s.dispatch(Instant.fromMillis(0), buf);
-    const pq = s.queries[handle.index].state.?.pending;
+    const pq = (try s.queries.get(handle)).pending;
 
     const wrong_name = encodeName("other.com");
     const forged = buildResponse(pq.txid, .nx_domain, wrong_name.data[0..wrong_name.len], .a, &[_][4]u8{});
@@ -944,7 +914,7 @@ test "process CNAME then A" {
 
     const handle = try s.startQuery("www.example.com", .a);
     _ = s.dispatch(Instant.fromMillis(0), buf);
-    const pq = s.queries[handle.index].state.?.pending;
+    const pq = (try s.queries.get(handle)).pending;
 
     const question_name = encodeName("www.example.com");
     const cname_target = encodeName("cdn.example.com");
@@ -970,10 +940,10 @@ test "cancel query frees slot" {
     var s = &ctx.socket;
 
     const h1 = try s.startQuery("a.com", .a);
-    try testing.expect(s.queries[h1.index].state != null);
+    try testing.expect(s.queries.isLive(h1));
 
     s.cancelQuery(h1);
-    try testing.expect(s.queries[h1.index].state == null);
+    try testing.expect(!s.queries.isLive(h1));
 
     // Slot is reusable
     const h2 = try s.startQuery("b.com", .a);
@@ -986,7 +956,7 @@ test "mDNS: .local suffix sets mdns flag" {
     var s = &ctx.socket;
 
     const handle = try s.startQuery("myprinter.local", .a);
-    const pq = s.queries[handle.index].state.?.pending;
+    const pq = (try s.queries.get(handle)).pending;
     try testing.expect(pq.mdns);
 }
 
@@ -996,7 +966,7 @@ test "mDNS: non-local name does not set mdns flag" {
     var s = &ctx.socket;
 
     const handle = try s.startQuery("google.com", .a);
-    const pq = s.queries[handle.index].state.?.pending;
+    const pq = (try s.queries.get(handle)).pending;
     try testing.expect(!pq.mdns);
 }
 

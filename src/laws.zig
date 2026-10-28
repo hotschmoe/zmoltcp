@@ -1530,8 +1530,8 @@ pub const handles = struct {
     pub fn staleDnsHandlesAreRejected(ops: [16]Op) bool {
         var slots: [2]Dns.QuerySlot = @splat(.{});
         var sock = Dns.initWithSeed(&slots, &.{.{ 10, 0, 0, 53 }}, 1);
-        var live: [2]?dns_socket.QueryHandle = .{ null, null };
-        var dead: [16]dns_socket.QueryHandle = undefined;
+        var live: [2]?Dns.QueryHandle = .{ null, null };
+        var dead: [16]Dns.QueryHandle = undefined;
         var dead_count: usize = 0;
         for (ops) |op| {
             const k = op.a & 1;

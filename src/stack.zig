@@ -3094,7 +3094,7 @@ test "stack DNS query dispatches via UDP" {
 
     const udp_data = try ipv4.payloadSlice(ip_data);
     const udp_repr = try udp_wire.parse(udp_data);
-    const pq = sock.queries[handle.index].state.?.pending;
+    const pq = (try sock.queries.get(handle)).pending;
     try testing.expectEqual(pq.port, udp_repr.src_port);
     try testing.expect(udp_repr.src_port >= 49152);
     try testing.expectEqual(@as(u16, 53), udp_repr.dst_port);
@@ -3126,7 +3126,7 @@ test "stack DNS ingress delivers response" {
     // Dispatch query.
     _ = stack.poll(Instant.ZERO, &device);
     _ = device.dequeueTx();
-    const pq = sock.queries[handle.index].state.?.pending;
+    const pq = (try sock.queries.get(handle)).pending;
 
     // Build DNS A-record response.
     const answer_ip = [4]u8{ 93, 184, 216, 34 };
