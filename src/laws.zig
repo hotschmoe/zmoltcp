@@ -1608,15 +1608,20 @@ test "laws: configuration" {
     try zv.checkLaws(configuration, .{ .iterations = iterations, .seed = 14 });
 }
 
+/// Flip to true to print, per parser, how often laws reach a value versus each error.
+const report_reach = false;
+
 test "laws: reach report" {
-    std.debug.print("\nlaw reach (parser result counts)\n", .{});
+    if (report_reach) std.debug.print("\nlaw reach (parser result counts)\n", .{});
     for (probes[0..probe_count]) |p| {
         var total: usize = p.ok;
         for (p.err_counts[0..p.err_kinds]) |c| total += c;
         const name = if (std.mem.indexOfScalar(u8, p.name, '!')) |i| p.name[i + 1 ..] else p.name;
-        std.debug.print("  {s: <46} ok {d: >7} of {d: >7}", .{ name[0..@min(name.len, 46)], p.ok, total });
-        for (p.err_names[0..p.err_kinds], p.err_counts[0..p.err_kinds]) |n, c| std.debug.print("  {s}={d}", .{ n, c });
-        std.debug.print("\n", .{});
+        if (report_reach) {
+            std.debug.print("  {s: <46} ok {d: >7} of {d: >7}", .{ name[0..@min(name.len, 46)], p.ok, total });
+            for (p.err_names[0..p.err_kinds], p.err_counts[0..p.err_kinds]) |n, c| std.debug.print("  {s}={d}", .{ n, c });
+            std.debug.print("\n", .{});
+        }
         if (std.mem.endsWith(u8, p.name, "*")) try std.testing.expect(p.ok > 0);
     }
 }

@@ -164,6 +164,13 @@ mise run demo
 mise run fuzz
 ```
 
+### Laws and the assurance report
+
+Verification uses [zirakzigil](https://github.com/hotschmoe/zirakzigil) (`zv`), pinned in `build.zig.zon`.
+
+- `zig build test` runs the executable laws in `src/laws.zig` with fixed seeds: parser totality and parse/emit round-trips for every wire format (plus structure-aware variants that get past checksum and version guards), framing and single-bit-integrity shapes, SeqNumber and storage model laws, a stateful TCP socket law, neighbor-cache and send-limit laws, and pinned counterexamples. A failing law prints its arguments and a `zv.laws.replay(...)` call; a law that panics is re-run with `.trace = true`. Set `report_reach = true` in `src/laws.zig` to print how often each parser reaches a value versus each error.
+- `zig build assurance` prints one line per module: every module carries `pub const assurance` and gates itself with `zv.requireAssurance(@This(), .tested)`, so a new public function without a classification fails the build. `-Dghost=true` compiles zv ghost code.
+
 ## Integration Demos
 
 Fifteen end-to-end demos exercise the full stack API (sockets -> Stack poll

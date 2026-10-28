@@ -115,6 +115,8 @@ Only if all three answers are "yes" should you fix the code.
 **The real success metric**: Does the code further our project's vision and goals?
 
 **Don't test the type system**: When writing tests, do not add cases for invariants or errors already enforced by the static type system (e.g., type mismatches, missing required arguments, nullability violations, return type correctness, enum exhaustiveness). The type checker handles these at compile time. Test solely runtime behaviors, business rules, algorithmic logic, and edge cases using only valid typed inputs.
+
+**Project policy (zmoltcp)**: laws are the specification (`src/laws.zig`, run by `zig build test`). End-to-end scenario tests (stack-level exchanges, multi-step socket conversations, demos) are allowed. Do not add small single-function unit tests. A regression is a pinned law instance: a direct call of the law, or `zv.laws.replay`, with the exact counterexample; add a scenario test only where no law applies. Behavior is decided by correctness and smoltcp's design, never by what existing tests assume.
 <!-- END:testing-philosophy -->
 
 <!-- BEGIN:footer -->
