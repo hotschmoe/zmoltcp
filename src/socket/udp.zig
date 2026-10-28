@@ -49,7 +49,11 @@ pub fn Socket(comptime Ip: type) type {
         hop_limit: ?u8,
 
         pub const BindError = error{ Unaddressable, InvalidState };
-        pub const SendError = error{ Unaddressable, BufferFull };
+        pub const SendError = error{ Unaddressable, BufferFull, PayloadTooLarge };
+
+        /// Largest datagram the stack can emit: IPv4 fragments up to a 4096-byte
+        /// IP payload; IPv6 has no fragmenter, so it must fit one 1500-byte frame.
+        pub const MAX_PAYLOAD_LEN: usize = if (Ip.ADDRESS_LEN == 16) 1452 else 4088;
         pub const RecvError = error{ Exhausted, Truncated };
         pub const HopLimitError = error{InvalidHopLimit};
 
@@ -125,6 +129,7 @@ pub fn Socket(comptime Ip: type) type {
             if (self.local_endpoint.port == 0) return error.Unaddressable;
             if (Ip.isUnspecified(meta.endpoint.addr)) return error.Unaddressable;
             if (meta.endpoint.port == 0) return error.Unaddressable;
+            if (data.len > MAX_PAYLOAD_LEN) return error.PayloadTooLarge;
 
             const buf = self.tx.enqueue(data.len, .{
                 .endpoint = meta.endpoint,

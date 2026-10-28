@@ -1640,7 +1640,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
         }
 
         fn emitUdpEgress(self: *Self, result: anytype, device: *Device) EmitResult {
-            var payload_buf: [IP_PAYLOAD_MAX]u8 = undefined;
+            var payload_buf: [FRAG_BUFFER_SIZE]u8 = undefined;
             const udp_total: u16 = @intCast(udp_wire.HEADER_LEN + result.payload.len);
             const hdr_len = udp_wire.emit(.{
                 .src_port = result.repr.src_port,
@@ -7063,4 +7063,39 @@ test "IPv6 TCP segments are sized to fit the egress buffer" {
         }
     }
     try testing.expectEqual(@as(usize, 1440), max_payload);
+}
+
+// [audit:7]
+test "UDP datagrams above the MTU are fragmented and oversize ones are refused" {
+    const UdpSock = udp_socket_mod.Socket(ipv4);
+    const Sockets = struct { udp4_sockets: []*UdpSock };
+    const UdpStack = Stack(TestDevice, Sockets);
+    var device = TestDevice.init();
+    var rx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]UdpSock.PacketMeta = .{.{}};
+    const Storage = struct {
+        var tx_payload: [8000]u8 = undefined;
+    };
+    var sock = UdpSock.init(&rx_meta, &rx_payload, &tx_meta, &Storage.tx_payload);
+    try sock.bind(.{ .port = 12345 });
+    const dest = UdpSock.Metadata{ .endpoint = .{ .addr = REMOTE_IP, .port = 54321 } };
+
+    var too_big: [UdpSock.MAX_PAYLOAD_LEN + 1]u8 = @splat(0x55);
+    try testing.expectError(error.PayloadTooLarge, sock.sendSlice(&too_big, dest));
+
+    var big: [3000]u8 = @splat(0x55);
+    try sock.sendSlice(&big, dest);
+    var sock_arr = [_]*UdpSock{&sock};
+    var stack = UdpStack.init(LOCAL_HW, .{ .udp4_sockets = &sock_arr });
+    stack.iface.v4.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+    stack.iface.neighbor_cache.fill(REMOTE_IP, REMOTE_HW, Instant.ZERO);
+    _ = stack.poll(Instant.ZERO, &device);
+    var frames: usize = 0;
+    var round: usize = 0;
+    while (round < 4) : (round += 1) {
+        while (device.dequeueTx()) |_| frames += 1;
+        _ = stack.poll(Instant.ZERO, &device);
+    }
+    try testing.expect(frames >= 2);
 }
