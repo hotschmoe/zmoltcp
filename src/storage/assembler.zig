@@ -12,9 +12,35 @@
 // [smoltcp:storage/assembler.rs]
 
 const std = @import("std");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .Assembler = zv.governed(Assembler(4)),
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 pub fn Assembler(comptime max_segment_count: usize) type {
     return struct {
+        pub const assurance = .{
+            .init = .tested,
+            .clear = .tested,
+            .isEmpty = .tested,
+            .peekFront = .tested,
+            .add = .tested,
+            .removeFront = .tested,
+            .addThenRemoveFront = .tested,
+            .Iterator = .{
+                .next = .tested,
+            },
+            .iterData = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         const Contig = struct {

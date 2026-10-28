@@ -11,6 +11,15 @@ const ipv4 = @import("../wire/ipv4.zig");
 const packet_buffer_mod = @import("../storage/packet_buffer.zig");
 const time = @import("../time.zig");
 const iface_mod = @import("../iface.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .Socket = zv.governed(Socket(ipv4)),
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 const Instant = time.Instant;
 
@@ -30,6 +39,28 @@ pub const UdpRepr = struct {
 pub fn Socket(comptime Ip: type) type {
     comptime ip_generic.assertIsIp(Ip);
     return struct {
+        pub const assurance = .{
+            .init = .tested,
+            .bind = .tested,
+            .close = .tested,
+            .isOpen = .tested,
+            .canSend = .tested,
+            .canRecv = .tested,
+            .setHopLimit = .tested,
+            .sendSlice = .tested,
+            .recvSlice = .tested,
+            .peek = .tested,
+            .peekSlice = .tested,
+            .pollAt = .tested,
+            .accepts = .tested,
+            .process = .tested,
+            .peekDstAddr = .tested,
+            .dispatch = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         pub const Endpoint = ip_generic.Endpoint(Ip);

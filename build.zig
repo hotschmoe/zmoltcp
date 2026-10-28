@@ -75,4 +75,14 @@ pub fn build(b: *std.Build) void {
         const demo_test = b.addTest(.{ .root_module = demo_mod });
         demo_step.dependOn(&b.addRunArtifact(demo_test).step);
     }
+
+    const report = b.addExecutable(.{ .name = "assurance", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/assurance.zig"),
+        .target = b.graph.host,
+        .imports = &.{
+            .{ .name = "zv", .module = zv },
+            .{ .name = "zmoltcp", .module = zmoltcp_mod },
+        },
+    }) });
+    b.step("assurance", "Print the per-module assurance table").dependOn(&b.addRunArtifact(report).step);
 }

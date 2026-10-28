@@ -12,6 +12,15 @@ const ipv4 = @import("../wire/ipv4.zig");
 const ring_buffer_mod = @import("../storage/ring_buffer.zig");
 const time = @import("../time.zig");
 const iface_mod = @import("../iface.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .Socket = zv.governed(Socket(ipv4, .{ .payload_size = 64 })),
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 const Instant = time.Instant;
 
@@ -30,6 +39,27 @@ pub const Config = struct {
 pub fn Socket(comptime Ip: type, comptime config: Config) type {
     comptime ip_generic.assertIsIp(Ip);
     return struct {
+        pub const assurance = .{
+            .init = .tested,
+            .bind = .tested,
+            .close = .tested,
+            .isOpen = .tested,
+            .canSend = .tested,
+            .canRecv = .tested,
+            .setHopLimit = .tested,
+            .sendSlice = .tested,
+            .recvSlice = .tested,
+            .peek = .tested,
+            .pollAt = .tested,
+            .accepts = .tested,
+            .process = .tested,
+            .peekDstAddr = .tested,
+            .dispatch = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         pub const Packet = struct {

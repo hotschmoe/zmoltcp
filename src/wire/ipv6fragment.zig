@@ -9,6 +9,17 @@
 //   Bytes 4-7: identification (u32 big-endian)
 
 const checksum = @import("checksum.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .parse = .tested,
+    .emit = .tested,
+    .bufferLen = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 const readU16 = checksum.readU16;
 const readU32 = checksum.readU32;

@@ -3,6 +3,14 @@
 // Architecturally inspired by smoltcp (Rust no_std).
 // See SPEC.md for conformance testing methodology.
 
+const zv = @import("zv");
+
+pub const assurance = .{};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
+
 pub const wire = struct {
     pub const checksum = @import("wire/checksum.zig");
     pub const ethernet = @import("wire/ethernet.zig");

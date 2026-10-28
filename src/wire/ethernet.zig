@@ -2,6 +2,19 @@
 //
 // Reference: IEEE 802.3, smoltcp src/wire/ethernet.rs
 
+const zv = @import("zv");
+
+pub const assurance = .{
+    .isUnicast = .tested,
+    .parse = .tested,
+    .emit = .tested,
+    .payload = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
+
 pub const HEADER_LEN = 14;
 pub const ADDR_LEN = 6;
 pub const MIN_FRAME_LEN = 64;

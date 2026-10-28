@@ -13,6 +13,63 @@ const ipv4 = @import("../wire/ipv4.zig");
 const assembler_mod = @import("../storage/assembler.zig");
 const ring_buffer_mod = @import("../storage/ring_buffer.zig");
 const iface_mod = @import("../iface.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .TcpRepr = .{
+        .segmentLen = .tested,
+        .isEmpty = .tested,
+        .fromWireBytes = .tested,
+        .fromWireRepr = .tested,
+        .toWireRepr = .tested,
+    },
+    .rstReply = .tested,
+    .NoControl = .{
+        .window = .tested,
+        .onAck = .tested,
+        .onRetransmit = .tested,
+        .onDuplicateAck = .tested,
+        .preTransmit = .tested,
+        .postTransmit = .tested,
+        .setMss = .tested,
+        .setRemoteWindow = .tested,
+    },
+    .Reno = .{
+        .window = .tested,
+        .onAck = .tested,
+        .onRetransmit = .tested,
+        .onDuplicateAck = .tested,
+        .preTransmit = .tested,
+        .postTransmit = .tested,
+        .setMss = .tested,
+        .setRemoteWindow = .tested,
+    },
+    .Cubic = .{
+        .window = .tested,
+        .onAck = .tested,
+        .onRetransmit = .tested,
+        .onDuplicateAck = .tested,
+        .preTransmit = .tested,
+        .postTransmit = .tested,
+        .setMss = .tested,
+        .setRemoteWindow = .tested,
+    },
+    .CongestionController = .{
+        .window = .tested,
+        .onAck = .tested,
+        .onRetransmit = .tested,
+        .onDuplicateAck = .tested,
+        .preTransmit = .tested,
+        .postTransmit = .tested,
+        .setMss = .tested,
+        .setRemoteWindow = .tested,
+    },
+    .Socket = zv.governed(Socket(ipv4, 4)),
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 const Instant = time.Instant;
 const Duration = time.Duration;
@@ -582,6 +639,53 @@ pub const CongestionController = union(enum) {
 pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
     comptime ip_generic.assertIsIp(Ip);
     return struct {
+        pub const assurance = .{
+            .init = .tested,
+            .initWithRandom = .tested,
+            .initWithInitialSequenceSecret = .tested,
+            .setInitialSequenceSecret = .tested,
+            .setInitialSequenceRandom = .tested,
+            .getState = .tested,
+            .isOpen = .tested,
+            .isActive = .tested,
+            .isListening = .tested,
+            .maySend = .tested,
+            .mayRecv = .tested,
+            .canSend = .tested,
+            .canRecv = .tested,
+            .localEndpoint = .tested,
+            .remoteEndpoint = .tested,
+            .setTimeout = .tested,
+            .setAckDelay = .tested,
+            .setNagleEnabled = .tested,
+            .setKeepAlive = .tested,
+            .setHopLimit = .tested,
+            .setCongestionControl = .tested,
+            .congestionControl = .tested,
+            .sendQueue = .tested,
+            .recvQueue = .tested,
+            .sendCapacity = .tested,
+            .recvCapacity = .tested,
+            .setTsvalGenerator = .tested,
+            .timestampEnabled = .tested,
+            .listen = .tested,
+            .connect = .tested,
+            .close = .tested,
+            .abort = .tested,
+            .sendSlice = .tested,
+            .recvSlice = .tested,
+            .peek = .tested,
+            .send = .tested,
+            .recv = .tested,
+            .accepts = .tested,
+            .process = .tested,
+            .dispatch = .tested,
+            .pollAt = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
         const Assembler = assembler_mod.Assembler(max_asm_segs);
 

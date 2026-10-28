@@ -667,7 +667,7 @@ pub const structured = struct {
         const n = load(80, in, &buf);
         const ihl: usize = 5 + (buf[0] & 0x0f) % 11;
         buf[0] = 0x40 | @as(u8, @intCast(ihl));
-        return tally("ipv4*", ipv4.parse(buf[0 .. @max(n, ihl * 4)]));
+        return tally("ipv4*", ipv4.parse(buf[0..@max(n, ihl * 4)]));
     }
 
     pub fn ipv4ChecksumFill(in: zv.Bytes(80)) bool {
@@ -707,7 +707,7 @@ pub const structured = struct {
         const n = load(80, in, &buf);
         const words = 5 + (buf[12] >> 4) % 11;
         buf[12] = (buf[12] & 0x0f) | (words << 4);
-        return tally("tcp*", tcp.parse(buf[0 .. @max(n, @as(usize, words) * 4)]));
+        return tally("tcp*", tcp.parse(buf[0..@max(n, @as(usize, words) * 4)]));
     }
 
     /// Options built from a grammar that is well formed most of the time.
@@ -962,7 +962,6 @@ fn dhcpEql(a: dhcp.Repr, b: dhcp.Repr) bool {
 test "laws: structure-aware" {
     try zv.checkLaws(structured, .{ .iterations = iterations, .seed = 5 });
 }
-
 
 // -------------------------------------------------------------------------
 // Stateful TCP socket law. Operations are interpreted relative to the
@@ -1567,6 +1566,46 @@ pub const integrity = struct {
 test "laws: framing and integrity" {
     try zv.checkLaws(framing, .{ .iterations = iterations, .seed = 12 });
     try zv.checkLaws(integrity, .{ .iterations = iterations, .seed = 13 });
+}
+
+// -------------------------------------------------------------------------
+// Configuration and classification helpers.
+// -------------------------------------------------------------------------
+
+const dhcp_socket = @import("socket/dhcp.zig");
+
+pub const configuration = struct {
+    /// RFC 8200 4.2: the two high bits of an option type say what to do with an unrecognized option.
+    pub fn optionFailureTypeIsTopTwoBits(opt_type: u8) bool {
+        return @backingInt(ipv6option.failureTypeFromOptionType(opt_type)) == opt_type >> 6;
+    }
+
+    /// DHCP socket setters take effect, and equal seeds give equal transaction ids.
+    pub fn dhcpSettersTakeEffect(hw: [6]u8, seed: u64, other_seed: u64, server: u16, client: u16, ignore: bool, lease_secs: ?u16, retries: u16) bool {
+        var a = dhcp_socket.Socket.initWithTransactionSeed(hw, seed);
+        const b = dhcp_socket.Socket.initWithTransactionSeed(hw, seed);
+        if (a.transaction_id != b.transaction_id) return false;
+        var prng_a: std.Random.DefaultPrng = .init(seed);
+        var prng_b: std.Random.DefaultPrng = .init(seed);
+        const c = dhcp_socket.Socket.initWithRandom(hw, prng_a.random());
+        const e = dhcp_socket.Socket.initWithTransactionSeed(hw, prng_b.random().int(u64));
+        if (c.transaction_id != e.transaction_id) return false;
+        a.setTransactionIdSeed(other_seed);
+        var d = dhcp_socket.Socket.initWithTransactionSeed(hw, other_seed);
+        d.setTransactionIdSeed(other_seed);
+        if (a.transaction_id != d.transaction_id) return false;
+        a.setPorts(server, client);
+        a.setIgnoreNaks(ignore);
+        a.setMaxLeaseDuration(if (lease_secs) |l| time_mod.Duration.fromSecs(l) else null);
+        a.setRetryConfig(.{ .request_retries = retries });
+        return a.server_port == server and a.client_port == client and a.ignore_naks == ignore and
+            a.getRetryConfig().request_retries == retries and
+            (a.max_lease_duration == null) == (lease_secs == null);
+    }
+};
+
+test "laws: configuration" {
+    try zv.checkLaws(configuration, .{ .iterations = iterations, .seed = 14 });
 }
 
 test "laws: reach report" {

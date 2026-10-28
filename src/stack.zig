@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const zv = @import("zv");
+
 const ethernet = @import("wire/ethernet.zig");
 const arp = @import("wire/arp.zig");
 const ipv4 = @import("wire/ipv4.zig");
@@ -31,6 +32,15 @@ const sixlowpan_frag = @import("wire/sixlowpan_frag.zig");
 const iface_mod = @import("iface.zig");
 const frag_mod = @import("fragmentation.zig");
 const time = @import("time.zig");
+
+pub const assurance = .{
+    .Stack = zv.governed(Stack(LoopbackDevice(4), void)),
+    .LoopbackDevice = zv.governed(LoopbackDevice(4)),
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 const Instant = time.Instant;
 
@@ -132,6 +142,15 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
     }
 
     return struct {
+        pub const assurance = .{
+            .init = .tested,
+            .poll = .tested,
+            .pollAt = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         const EmitResult = enum { sent, neighbor_pending };
@@ -2041,6 +2060,18 @@ pub fn LoopbackDevice(comptime max_frames: usize) type {
     };
 
     return struct {
+        pub const assurance = .{
+            .init = .tested,
+            .enqueueRx = .tested,
+            .receive = .tested,
+            .transmit = .tested,
+            .dequeueTx = .tested,
+            .loopback = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         rx_queue: [max_frames]Frame = @splat(.{}),

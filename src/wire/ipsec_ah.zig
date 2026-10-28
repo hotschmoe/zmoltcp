@@ -4,6 +4,18 @@
 
 const ipv4 = @import("ipv4.zig");
 const checksum = @import("checksum.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .parse = .tested,
+    .emit = .tested,
+    .bufferLen = .tested,
+    .headerLen = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 pub const MIN_HEADER_LEN: usize = 12;
 

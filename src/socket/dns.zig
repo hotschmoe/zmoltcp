@@ -8,6 +8,15 @@ const ipv4 = @import("../wire/ipv4.zig");
 const ipv6 = @import("../wire/ipv6.zig");
 const wire = @import("../wire/dns.zig");
 const time = @import("../time.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .Socket = zv.governed(Socket(ipv4)),
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 const Instant = time.Instant;
 const Duration = time.Duration;
 
@@ -42,6 +51,29 @@ pub fn Socket(comptime Ip: type) type {
     comptime ip_generic.assertIsIp(Ip);
 
     return struct {
+        pub const assurance = .{
+            .Addresses = .{
+                .push = .tested,
+                .get = .tested,
+            },
+            .init = .tested,
+            .initWithRandom = .tested,
+            .initWithSeed = .tested,
+            .setQuerySeed = .tested,
+            .setQueryRandom = .tested,
+            .updateServers = .tested,
+            .startQuery = .tested,
+            .startQueryRaw = .tested,
+            .getQueryResult = .tested,
+            .cancelQuery = .tested,
+            .process = .tested,
+            .dispatch = .tested,
+            .pollAt = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         const is_v6 = Ip.ADDRESS_LEN == 16;

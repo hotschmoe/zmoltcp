@@ -3,6 +3,23 @@
 // Reference: RFC 768, smoltcp src/wire/udp.rs
 
 const checksum = @import("checksum.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .parse = .tested,
+    .emit = .tested,
+    .computeChecksum = .tested,
+    .computeChecksumV6 = .tested,
+    .fillChecksum = .tested,
+    .fillChecksumV6 = .tested,
+    .verifyChecksum = .tested,
+    .verifyChecksumV6 = .tested,
+    .payloadSlice = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 pub const HEADER_LEN = 8;
 

@@ -2,6 +2,24 @@
 //
 // Reference: IEEE 802.15.4-2015, smoltcp src/wire/ieee802154.rs
 
+const zv = @import("zv");
+
+pub const assurance = .{
+    .Address = .{
+        .isBroadcast = .tested,
+        .asEui64 = .tested,
+        .asLinkLocalAddress = .tested,
+    },
+    .parse = .tested,
+    .bufferLen = .tested,
+    .emit = .tested,
+    .payloadSlice = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
+
 pub const MAX_FRAME_LEN: usize = 127;
 
 pub const FrameType = enum(u3) {

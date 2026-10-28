@@ -7,6 +7,18 @@ const ndisc = @import("ndisc.zig");
 const mld = @import("mld.zig");
 const rpl_mod = @import("rpl.zig");
 const checksum = @import("checksum.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .bufferLen = .tested,
+    .parse = .tested,
+    .emit = .tested,
+    .verifyChecksum = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 const readU16 = checksum.readU16;
 const readU32 = checksum.readU32;

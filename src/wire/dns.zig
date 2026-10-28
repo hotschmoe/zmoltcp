@@ -3,6 +3,34 @@
 // Reference: RFC 1035, smoltcp src/wire/dns.rs
 
 const std = @import("std");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .transactionId = .tested,
+    .flags = .tested,
+    .opcode = .tested,
+    .rcode = .tested,
+    .questionCount = .tested,
+    .answerCount = .tested,
+    .authorityCount = .tested,
+    .additionalCount = .tested,
+    .payload = .tested,
+    .NameLabels = .{
+        .get = .tested,
+    },
+    .parseNamePart = .tested,
+    .parseName = .tested,
+    .eqNames = .tested,
+    .copyName = .tested,
+    .parseQuestion = .tested,
+    .parseRecord = .tested,
+    .bufferLen = .tested,
+    .emit = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 pub const HEADER_LEN: usize = 12;
 pub const CLASS_IN: u16 = 1;

@@ -2,6 +2,31 @@
 //
 // Reference: RFC 8200, smoltcp src/wire/ipv6.rs
 
+const zv = @import("zv");
+
+pub const assurance = .{
+    .isUnspecified = .tested,
+    .isBroadcast = .tested,
+    .isMulticast = .tested,
+    .isLoopback = .tested,
+    .isLinkLocal = .tested,
+    .isUniqueLocal = .tested,
+    .isGlobalUnicast = .tested,
+    .isSolicitedNodeMulticast = .tested,
+    .solicitedNode = .tested,
+    .formatAddr = .tested,
+    .parse = .tested,
+    .parseHeader = .tested,
+    .emit = .tested,
+    .bufferLen = .tested,
+    .checkLen = .tested,
+    .payloadSlice = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
+
 pub const HEADER_LEN: usize = 40;
 pub const MIN_MTU: usize = 1280;
 

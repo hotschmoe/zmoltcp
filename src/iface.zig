@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const zv = @import("zv");
+
 const ethernet = @import("wire/ethernet.zig");
 const arp = @import("wire/arp.zig");
 const ip_generic = @import("wire/ip.zig");
@@ -26,6 +27,65 @@ const udp = @import("wire/udp.zig");
 const tcp_wire = @import("wire/tcp.zig");
 const tcp_socket = @import("socket/tcp.zig");
 const time = @import("time.zig");
+
+pub const assurance = .{
+    .ChecksumMode = .{
+        .shouldVerifyRx = .tested,
+        .shouldComputeTx = .tested,
+    },
+    .RouteFor = zv.governed(RouteFor(ipv4)),
+    .RoutesFor = zv.governed(RoutesFor(ipv4)),
+    .NeighborCache = zv.governed(NeighborCache(ipv4)),
+    .IpMetaFor = zv.governed(IpMetaFor(ipv4)),
+    .IpState = zv.governed(IpState(ipv4)),
+    .Interface = .{
+        .init = .tested,
+        .setIpAddrs = .tested,
+        .isBroadcast = .tested,
+        .ipv4Addr = .tested,
+        .route = .tested,
+        .routeV6 = .tested,
+        .hasNeighbor = .tested,
+        .joinMulticastGroup = .tested,
+        .leaveMulticastGroup = .tested,
+        .hasMulticastGroup = .tested,
+        .setIpv6Addrs = .tested,
+        .ipv6Addr = .tested,
+        .linkLocalIpv6Addr = .tested,
+        .hasSolicitedNode = .tested,
+        .joinMulticastGroupV6 = .tested,
+        .leaveMulticastGroupV6 = .tested,
+        .hasMulticastGroupV6 = .tested,
+        .hasPendingMldV6 = .tested,
+        .markMldReported = .tested,
+        .markAllGroupsForReport = .tested,
+        .markGroupForReport = .tested,
+        .enableSlaac = .tested,
+        .processRouterAdvertisement = .tested,
+        .slaacMaintenance = .tested,
+        .slaacPollAt = .tested,
+        .eui64InterfaceId = .tested,
+        .linkLocalFromMac = .tested,
+        .processEthernet = .tested,
+        .processArp = .tested,
+        .processIpv4 = .tested,
+        .processIcmp = .tested,
+        .icmpProtoUnreachable = .tested,
+        .processUdp = .tested,
+        .processTcp = .tested,
+        .processIpv6 = .tested,
+        .processIcmpv6 = .tested,
+        .processNdisc = .tested,
+        .processMldQuery = .tested,
+        .icmpv6ParamProblem = .tested,
+        .processUdpV6 = .tested,
+        .processTcpV6 = .tested,
+    },
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 // -------------------------------------------------------------------------
 // Medium
@@ -105,6 +165,13 @@ pub const MAX_ROUTE_COUNT = 4;
 
 pub fn RouteFor(comptime Ip: type) type {
     return struct {
+        pub const assurance = .{
+            .newDefaultGateway = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         cidr: ip_generic.Cidr(Ip),
         via_router: Ip.Address,
         expires_at: ?time.Instant = null,
@@ -123,6 +190,14 @@ pub const RouteV6 = RouteFor(ipv6);
 
 pub fn RoutesFor(comptime Ip: type) type {
     return struct {
+        pub const assurance = .{
+            .add = .tested,
+            .lookup = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const R = RouteFor(Ip);
         entries: [MAX_ROUTE_COUNT]?R = @splat(null),
 
@@ -160,6 +235,19 @@ pub const RoutesV6 = RoutesFor(ipv6);
 
 pub fn NeighborCache(comptime Ip: type) type {
     return struct {
+        pub const assurance = .{
+            .fill = .checked,
+            .refreshIfExisting = .tested,
+            .lookup = .tested,
+            .lookupFull = .tested,
+            .limitRate = .tested,
+            .hasNeighbor = .tested,
+            .flush = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
         pub const SILENT_TIME = time.Duration.fromMillis(1000);
 
@@ -265,6 +353,11 @@ pub fn NeighborCache(comptime Ip: type) type {
 
 pub fn IpMetaFor(comptime Ip: type) type {
     return struct {
+        pub const assurance = .{};
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         src_addr: Ip.Address,
         dst_addr: Ip.Address,
         protocol: Ip.Protocol,
@@ -331,6 +424,20 @@ pub fn IpState(comptime Ip: type) type {
     const Cidr = ip_generic.Cidr(Ip);
 
     return struct {
+        pub const assurance = .{
+            .addIpAddr = .tested,
+            .removeIpAddr = .tested,
+            .setAddrs = .tested,
+            .ipAddrs = .tested,
+            .hasIpAddr = .tested,
+            .getSourceAddress = .tested,
+            .inSameNetwork = .tested,
+            .routeLookup = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         ip_addrs: [MAX_ADDR_COUNT]Cidr = undefined,

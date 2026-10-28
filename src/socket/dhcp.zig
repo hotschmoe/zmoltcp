@@ -5,6 +5,40 @@
 const std = @import("std");
 const wire = @import("../wire/dhcp.zig");
 const time = @import("../time.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .ServerInfo = .{
+        .eql = .tested,
+    },
+    .Config = .{
+        .eql = .tested,
+    },
+    .Event = .{
+        .eql = .tested,
+    },
+    .Socket = .{
+        .init = .tested,
+        .initWithRandom = .tested,
+        .initWithTransactionSeed = .tested,
+        .setTransactionIdSeed = .tested,
+        .setTransactionIdRandom = .tested,
+        .setPorts = .tested,
+        .setRetryConfig = .tested,
+        .getRetryConfig = .tested,
+        .setMaxLeaseDuration = .tested,
+        .setIgnoreNaks = .tested,
+        .poll = .tested,
+        .reset = .tested,
+        .process = .tested,
+        .dispatch = .tested,
+        .pollAt = .tested,
+    },
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 const Instant = time.Instant;
 const Duration = time.Duration;
 

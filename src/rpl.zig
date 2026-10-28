@@ -3,6 +3,35 @@
 
 const std = @import("std");
 const time = @import("time.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .SequenceCounter = .{
+        .increment = .tested,
+        .order = .tested,
+    },
+    .Rank = .{
+        .dagRank = .tested,
+        .order = .tested,
+    },
+    .ObjectiveFunction0 = .{
+        .computeRank = .tested,
+        .preferredParent = .tested,
+    },
+    .ParentSet = zv.governed(ParentSet(4)),
+    .Relations = zv.governed(Relations(4)),
+    .TrickleTimer = .{
+        .init = .tested,
+        .poll = .tested,
+        .hearConsistent = .tested,
+        .hearInconsistency = .tested,
+        .pollAt = .tested,
+    },
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 pub const SEQUENCE_WINDOW: u8 = 16;
 pub const DEFAULT_MIN_HOP_RANK_INCREASE: u16 = 256;
@@ -102,6 +131,17 @@ pub const Parent = struct {
 
 pub fn ParentSet(comptime max_parents: usize) type {
     return struct {
+        pub const assurance = .{
+            .add = .tested,
+            .find = .tested,
+            .remove = .tested,
+            .worstParent = .tested,
+            .count = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
         pub const Entry = struct { addr: [16]u8, parent: Parent };
 
@@ -184,6 +224,17 @@ pub const Relation = struct {
 
 pub fn Relations(comptime max_relations: usize) type {
     return struct {
+        pub const assurance = .{
+            .addRelation = .tested,
+            .removeRelation = .tested,
+            .findNextHop = .tested,
+            .purge = .tested,
+            .count = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         entries: [max_relations]?Relation = @splat(null),

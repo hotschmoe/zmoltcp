@@ -20,6 +20,15 @@ const time = @import("../time.zig");
 const iface_mod = @import("../iface.zig");
 
 const readU16 = @import("../wire/checksum.zig").readU16;
+const zv = @import("zv");
+
+pub const assurance = .{
+    .Socket = zv.governed(Socket(ipv4)),
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 const Instant = time.Instant;
 
 // Extract the quoted UDP source port from an ICMPv4 error payload.
@@ -54,6 +63,29 @@ pub fn Socket(comptime Ip: type) type {
     comptime ip_generic.assertIsIp(Ip);
     const is_v6 = Ip.ADDRESS_LEN == 16;
     return struct {
+        pub const assurance = .{
+            .Endpoint = .{
+                .isSpecified = .tested,
+            },
+            .init = .tested,
+            .bind = .tested,
+            .close = .tested,
+            .isOpen = .tested,
+            .canSend = .tested,
+            .canRecv = .tested,
+            .setHopLimit = .tested,
+            .sendSlice = .tested,
+            .recvSlice = .tested,
+            .pollAt = .tested,
+            .accepts = .tested,
+            .process = .tested,
+            .peekDstAddr = .tested,
+            .dispatch = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         pub const IcmpRepr = if (is_v6) icmpv6_wire.Repr else icmp.Repr;

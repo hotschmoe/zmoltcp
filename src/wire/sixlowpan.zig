@@ -8,6 +8,26 @@ const readU16 = checksum.readU16;
 const writeU16 = checksum.writeU16;
 const ieee802154 = @import("ieee802154.zig");
 const ipv6 = @import("ipv6.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .dispatchType = .tested,
+    .resolveSourceAddress = .tested,
+    .resolveDestAddress = .tested,
+    .parseIphc = .tested,
+    .emitIphc = .tested,
+    .iphcBufferLen = .tested,
+    .parseExtHeaderNhc = .tested,
+    .emitExtHeaderNhc = .tested,
+    .extHeaderNhcBufLen = .tested,
+    .parseUdpNhc = .tested,
+    .emitUdpNhc = .tested,
+    .udpNhcBufLen = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 pub const sixlowpan_frag = @import("sixlowpan_frag.zig");
 
 pub const DISPATCH_IPHC: u8 = 0b011;

@@ -4,7 +4,42 @@
 
 const std = @import("std");
 const zv = @import("zv");
+
 const checksum = @import("checksum.zig");
+
+pub const assurance = .{
+    .SeqNumber = .{
+        .fromU32 = .tested,
+        .toU32 = .tested,
+        .add = .checked,
+        .sub = .checked,
+        .diff = .checked,
+        .cmp = .tested,
+        .lessThan = .tested,
+        .greaterThan = .tested,
+        .greaterThanOrEqual = .tested,
+        .lessThanOrEqual = .tested,
+        .eql = .tested,
+        .max = .tested,
+        .min = .tested,
+    },
+    .Control = .{
+        .seqLen = .tested,
+        .quashPsh = .tested,
+        .fromFlags = .tested,
+        .applyToFlags = .tested,
+    },
+    .parse = .tested,
+    .headerLen = .tested,
+    .emit = .tested,
+    .computeChecksum = .tested,
+    .verifyChecksum = .tested,
+    .verifyChecksumV6 = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 pub const HEADER_LEN = 20; // Minimum (no options)
 pub const MAX_HEADER_LEN = 60; // data_offset=15 * 4

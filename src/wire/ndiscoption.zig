@@ -8,6 +8,18 @@
 const ipv6 = @import("ipv6.zig");
 const ethernet = @import("ethernet.zig");
 const checksum = @import("checksum.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .bufferLen = .tested,
+    .optionLen = .tested,
+    .parse = .tested,
+    .emit = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 const readU32 = checksum.readU32;
 const writeU32 = checksum.writeU32;

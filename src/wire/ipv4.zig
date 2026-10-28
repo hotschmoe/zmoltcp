@@ -3,6 +3,25 @@
 // Reference: RFC 791, smoltcp src/wire/ipv4.rs
 
 const checksum = @import("checksum.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .isUnspecified = .tested,
+    .isBroadcast = .tested,
+    .isMulticast = .tested,
+    .isLinkLocal = .tested,
+    .isLoopback = .tested,
+    .formatAddr = .tested,
+    .parse = .tested,
+    .emit = .tested,
+    .verifyChecksum = .tested,
+    .checkLen = .tested,
+    .payloadSlice = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 pub const HEADER_LEN = 20; // Minimum (no options)
 pub const MAX_HEADER_LEN = 60; // IHL=15 * 4

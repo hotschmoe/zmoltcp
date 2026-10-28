@@ -13,8 +13,42 @@
 const std = @import("std");
 const zv = @import("zv");
 
+pub const assurance = .{
+    .RingBuffer = zv.governed(RingBuffer(u8)),
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
+
 pub fn RingBuffer(comptime T: type) type {
     return struct {
+        pub const assurance = .{
+            .init = .tested,
+            .clear = .tested,
+            .capacity = .tested,
+            .len = .tested,
+            .window = .tested,
+            .contiguousWindow = .tested,
+            .isEmpty = .tested,
+            .isFull = .tested,
+            .enqueueOne = .tested,
+            .dequeueOne = .tested,
+            .enqueueMany = .tested,
+            .dequeueMany = .tested,
+            .enqueueSlice = .tested,
+            .dequeueSlice = .tested,
+            .getUnallocated = .tested,
+            .writeUnallocated = .tested,
+            .enqueueUnallocated = .checked,
+            .getAllocated = .tested,
+            .readAllocated = .tested,
+            .dequeueAllocated = .checked,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         storage: []T,

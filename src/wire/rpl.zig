@@ -6,6 +6,42 @@
 // parse/emit starts at byte 4 of the ICMPv6 message (after type+code+checksum).
 
 const checksum = @import("checksum.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .InstanceId = .{
+        .fromByte = .tested,
+        .toByte = .tested,
+    },
+    .parse = .tested,
+    .emit = .tested,
+    .bufferLen = .tested,
+    .OptionIterator = .{
+        .init = .tested,
+        .next = .tested,
+    },
+    .DodagConfigurationOption = .{
+        .parseOption = .tested,
+        .emit = .tested,
+    },
+    .RplTargetOption = .{
+        .parseOption = .tested,
+        .emit = .tested,
+    },
+    .TransitInformationOption = .{
+        .parseOption = .tested,
+        .emit = .tested,
+        .wireLen = .tested,
+    },
+    .HopByHopRepr = .{
+        .parseOption = .tested,
+        .emit = .tested,
+    },
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 const readU16 = checksum.readU16;
 const writeU16 = checksum.writeU16;

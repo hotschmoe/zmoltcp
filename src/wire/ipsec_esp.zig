@@ -3,6 +3,17 @@
 // Reference: RFC 4303, smoltcp src/wire/ipsec_esp.rs
 
 const checksum = @import("checksum.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .parse = .tested,
+    .emit = .tested,
+    .bufferLen = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 pub const HEADER_LEN: usize = 8;
 
