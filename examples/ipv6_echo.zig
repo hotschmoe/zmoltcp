@@ -61,10 +61,10 @@ test "TCP6 echo between two stacks" {
     const Sockets = struct { tcp6_sockets: []*TcpSock };
     const V6Stack = stack_mod.Stack(Device, Sockets);
 
-    var server_rx: [256]u8 = .{0} ** 256;
-    var server_tx: [256]u8 = .{0} ** 256;
-    var client_rx: [256]u8 = .{0} ** 256;
-    var client_tx: [256]u8 = .{0} ** 256;
+    var server_rx: [256]u8 = @splat(0);
+    var server_tx: [256]u8 = @splat(0);
+    var client_rx: [256]u8 = @splat(0);
+    var client_tx: [256]u8 = @splat(0);
 
     var server = TcpSock.init(&server_rx, &server_tx);
     var client = TcpSock.init(&client_rx, &client_tx);

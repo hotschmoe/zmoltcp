@@ -58,10 +58,10 @@ fn earliestPollTime(a: ?Instant, b: ?Instant) ?Instant {
 }
 
 test "TCP back-to-back transfer" {
-    var server_rx: [4096]u8 = .{0} ** 4096;
-    var server_tx: [4096]u8 = .{0} ** 4096;
-    var client_rx: [4096]u8 = .{0} ** 4096;
-    var client_tx: [4096]u8 = .{0} ** 4096;
+    var server_rx: [4096]u8 = @splat(0);
+    var server_tx: [4096]u8 = @splat(0);
+    var client_rx: [4096]u8 = @splat(0);
+    var client_tx: [4096]u8 = @splat(0);
 
     var server_sock = TcpSock.init(&server_rx, &server_tx);
     var client_sock = TcpSock.init(&client_rx, &client_tx);

@@ -37,10 +37,10 @@ const LOCAL_MAC: ethernet.Address = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
 const LOCAL_IP: ipv4.Address = .{ 127, 0, 0, 1 };
 
 test "TCP loopback echo" {
-    var server_rx: [256]u8 = .{0} ** 256;
-    var server_tx: [256]u8 = .{0} ** 256;
-    var client_rx: [256]u8 = .{0} ** 256;
-    var client_tx: [256]u8 = .{0} ** 256;
+    var server_rx: [256]u8 = @splat(0);
+    var server_tx: [256]u8 = @splat(0);
+    var client_rx: [256]u8 = @splat(0);
+    var client_tx: [256]u8 = @splat(0);
 
     var server = TcpSock.init(&server_rx, &server_tx);
     var client = TcpSock.init(&client_rx, &client_tx);

@@ -110,7 +110,7 @@ test "DNS resolution through full stack" {
     var dev_b: Device = .{};
 
     const S = struct {
-        var slots: [4]DnsSock.QuerySlot = [_]DnsSock.QuerySlot{.{}} ** 4;
+        var slots: [4]DnsSock.QuerySlot = @splat(.{});
     };
     @memset(@as([*]u8, @ptrCast(&S.slots))[0..@sizeOf(@TypeOf(S.slots))], 0);
     const servers = [_][4]u8{IP_B};

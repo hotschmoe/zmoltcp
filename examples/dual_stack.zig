@@ -61,10 +61,10 @@ test "IPv4 TCP + IPv6 UDP concurrent on dual-stack" {
     };
     const DualStack = stack_mod.Stack(Device, Sockets);
 
-    var srv_rx: [256]u8 = .{0} ** 256;
-    var srv_tx: [256]u8 = .{0} ** 256;
-    var cli_rx: [256]u8 = .{0} ** 256;
-    var cli_tx: [256]u8 = .{0} ** 256;
+    var srv_rx: [256]u8 = @splat(0);
+    var srv_tx: [256]u8 = @splat(0);
+    var cli_rx: [256]u8 = @splat(0);
+    var cli_tx: [256]u8 = @splat(0);
 
     var tcp_srv = TcpSock4.init(&srv_rx, &srv_tx);
     var tcp_cli = TcpSock4.init(&cli_rx, &cli_tx);
