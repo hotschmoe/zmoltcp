@@ -214,26 +214,17 @@ pub fn NeighborCache(comptime Ip: type) type {
             oldest.* = new_entry;
         }
 
-        /// Opportunistic learning from data packets, whose source addresses
-        /// nothing authenticates. Refreshes an entry with the same hardware
-        /// address, and may use a free or expired slot, but never overwrites a
-        /// live entry or evicts one, so forged sources cannot displace a real
-        /// neighbor.
-        pub fn learnIfFree(self: *Self, ip: Ip.Address, mac: ethernet.Address, now: time.Instant) void {
-            zv.requires(!Ip.isUnspecified(ip) and !Ip.isMulticast(ip) and !Ip.isBroadcast(ip));
-            zv.requires(ethernet.isUnicast(mac));
-            var free: ?*Entry = null;
+        /// Extend the lifetime of an entry the cache already holds for exactly
+        /// this (address, hardware address) pair. Data packets are not
+        /// authenticated, so they may keep a neighbor alive but never create
+        /// or change one (smoltcp reset_expiry_if_existing).
+        pub fn refreshIfExisting(self: *Self, ip: Ip.Address, mac: ethernet.Address, now: time.Instant) void {
             for (&self.entries) |*entry| {
-                if (isOccupied(entry.*) and std.mem.eql(u8, &entry.protocol_addr, &ip)) {
-                    if (std.mem.eql(u8, &entry.hardware_addr, &mac) or entry.expires_at.lessThan(now)) {
-                        entry.hardware_addr = mac;
-                        entry.expires_at = now.add(NEIGHBOR_LIFETIME);
-                    }
+                if (isOccupied(entry.*) and std.mem.eql(u8, &entry.protocol_addr, &ip) and std.mem.eql(u8, &entry.hardware_addr, &mac)) {
+                    entry.expires_at = now.add(NEIGHBOR_LIFETIME);
                     return;
                 }
-                if (free == null and (!isOccupied(entry.*) or entry.expires_at.lessThan(now))) free = entry;
             }
-            if (free) |entry| entry.* = .{ .protocol_addr = ip, .hardware_addr = mac, .expires_at = now.add(NEIGHBOR_LIFETIME) };
         }
 
         pub fn lookup(self: *const Self, ip: Ip.Address, now: time.Instant) ?ethernet.Address {

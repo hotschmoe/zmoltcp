@@ -1191,8 +1191,8 @@ pub const neighbors = struct {
         return true;
     }
 
-    /// Learning from unauthenticated data packets never displaces a live entry.
-    pub fn learningNeverEvictsLiveEntry(victim_last: u8, ops: [24]NeighborOp) bool {
+    /// Refreshing from unauthenticated data packets never creates or changes an entry.
+    pub fn refreshNeverCreatesOrChangesEntries(victim_last: u8, ops: [24]NeighborOp) bool {
         var iface = lawInterface();
         const victim_ip: ipv4.Address = .{ 10, 0, 0, @max(victim_last, 2) };
         const victim_mac: ethernet_mod.Address = .{ 0x02, 0, 0, 0, 0, 0x99 };
@@ -1202,9 +1202,14 @@ pub const neighbors = struct {
             now_ms += op.dt;
             const ip: ipv4.Address = .{ 10, 0, 0, @max(op.ip_last, 2) };
             const mac: ethernet_mod.Address = .{ op.mac_first & 0xfe, 0, 0, 0, 0, op.mac_last };
-            iface.neighbor_cache.learnIfFree(ip, mac, time_mod.Instant.fromMillis(now_ms));
+            iface.neighbor_cache.refreshIfExisting(ip, mac, time_mod.Instant.fromMillis(now_ms));
             const found = iface.neighbor_cache.lookup(victim_ip, time_mod.Instant.fromMillis(now_ms));
             if (found == null or !std.mem.eql(u8, &found.?, &victim_mac)) return false;
+            var occupied: usize = 0;
+            for (iface.neighbor_cache.entries) |entry| {
+                if (!ipv4.isUnspecified(entry.protocol_addr)) occupied += 1;
+            }
+            if (occupied != 1) return false;
         }
         return true;
     }
@@ -1248,6 +1253,137 @@ pub const icmp_replies = struct {
 test "laws: neighbor cache and ICMP replies" {
     try zv.checkLaws(neighbors, .{ .iterations = iterations, .seed = 8 });
     try zv.checkLaws(icmp_replies, .{ .iterations = iterations, .seed = 9 });
+}
+
+// -------------------------------------------------------------------------
+// Handles and send-size limits.
+// -------------------------------------------------------------------------
+
+const dns_socket = @import("socket/dns.zig");
+const udp_socket = @import("socket/udp.zig");
+const icmp_socket = @import("socket/icmp.zig");
+const raw_socket = @import("socket/raw.zig");
+
+pub const handles = struct {
+    const Dns = dns_socket.Socket(ipv4);
+
+    /// A query handle works until the query is cancelled or read; afterwards
+    /// it is stale even when its slot has been reused.
+    pub fn staleDnsHandlesAreRejected(ops: [16]Op) bool {
+        var slots: [2]Dns.QuerySlot = @splat(.{});
+        var sock = Dns.initWithSeed(&slots, &.{.{ 10, 0, 0, 53 }}, 1);
+        var live: [2]?dns_socket.QueryHandle = .{ null, null };
+        var dead: [16]dns_socket.QueryHandle = undefined;
+        var dead_count: usize = 0;
+        for (ops) |op| {
+            const k = op.a & 1;
+            switch (op.kind % 3) {
+                0 => if (sock.startQuery("example.com", .a)) |h| {
+                    live[h.index] = h;
+                } else |_| {},
+                1 => if (live[k]) |h| {
+                    sock.cancelQuery(h);
+                    live[k] = null;
+                    dead[dead_count % dead.len] = h;
+                    dead_count += 1;
+                },
+                else => if (live[k]) |h| {
+                    if (sock.getQueryResult(h)) |_| {} else |err| if (err != error.Pending) return false;
+                },
+            }
+            for (dead[0..@min(dead_count, dead.len)]) |h| {
+                if (sock.getQueryResult(h)) |_| return false else |err| if (err != error.StaleHandle) return false;
+            }
+            for (live) |maybe| if (maybe) |h| {
+                if (sock.getQueryResult(h)) |_| {} else |err| if (err == error.StaleHandle) return false;
+            };
+        }
+        return true;
+    }
+};
+
+pub const send_limits = struct {
+    /// A payload up to MAX_PAYLOAD_LEN is accepted; one byte more is refused
+    /// at send time instead of being dropped by the stack.
+    pub fn udpSendLimit(extra: u8, v6: bool) bool {
+        return if (v6) udpSendLimitFor(ipv6, extra) else udpSendLimitFor(ipv4, extra);
+    }
+
+    fn udpSendLimitFor(comptime Ip: type, extra: u8) bool {
+        const Sock = udp_socket.Socket(Ip);
+        var rx_meta: [1]Sock.PacketMeta = .{.{}};
+        var rx_payload: [8]u8 = undefined;
+        var tx_meta: [1]Sock.PacketMeta = .{.{}};
+        var tx_payload: [8192]u8 = undefined;
+        var sock = Sock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
+        sock.bind(.{ .port = 1000 }) catch return false;
+        var dest: Ip.Address = @splat(1);
+        dest[0] = 10;
+        const meta = Sock.Metadata{ .endpoint = .{ .addr = dest, .port = 2000 } };
+        const len = Sock.MAX_PAYLOAD_LEN - 2 + extra % 5;
+        const result = sock.sendSlice(payload_mem[0..len], meta);
+        if (len > Sock.MAX_PAYLOAD_LEN) return result == error.PayloadTooLarge;
+        return if (result) |_| true else |_| false;
+    }
+
+    pub fn icmpSendLimit(extra: u8, v6: bool) bool {
+        return if (v6) icmpSendLimitFor(ipv6, extra) else icmpSendLimitFor(ipv4, extra);
+    }
+
+    fn icmpSendLimitFor(comptime Ip: type, extra: u8) bool {
+        const Sock = icmp_socket.Socket(Ip);
+        var rx_meta: [1]Sock.PacketMeta = .{.{}};
+        var rx_payload: [8]u8 = undefined;
+        var tx_meta: [1]Sock.PacketMeta = .{.{}};
+        var tx_payload: [8192]u8 = undefined;
+        var sock = Sock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
+        var dest: Ip.Address = @splat(1);
+        dest[0] = 10;
+        const len = Sock.MAX_PAYLOAD_LEN - 2 + extra % 5;
+        const result = sock.sendSlice(payload_mem[0..len], dest);
+        if (len > Sock.MAX_PAYLOAD_LEN) return result == error.PayloadTooLarge;
+        return if (result) |_| true else |_| false;
+    }
+};
+
+// -------------------------------------------------------------------------
+// Pinned counterexamples. Each (law, seed, iteration) failed on the code
+// before the named fix; replay regenerates the exact arguments.
+// -------------------------------------------------------------------------
+
+test "laws: pinned regressions" {
+    // negative window edge after a FIN (fix(socket/tcp): clamp the receive window edge)
+    try zv.laws.replay(tcp_state, "ringsStayInBounds", 6, 8);
+    // SYN-ACK window shifted (fix: bound in-window data by the unscaled SYN window)
+    try zv.laws.replay(tcp_state, "ringsStayInBounds", 6, 28);
+    // FIN after truncated payload
+    try zv.laws.replay(tcp_state, "finConsumesAllPrecedingData", 6, 0);
+    // segment larger than the egress buffer (IPv4 with timestamps)
+    try zv.laws.replay(tcp_state, "dispatchedSegmentsFitEgress", 6, 284);
+    // echo to a joined multicast group and from the unspecified address
+    try std.testing.expect(icmp_replies.echoReplyRules(.{ 10, 0, 0, 2 }, .{ 224, 0, 0, 251 }, false));
+    try std.testing.expect(icmp_replies.echoReplyRules(.{ 0, 0, 0, 0 }, .{ 10, 0, 0, 1 }, false));
+    // one byte over each socket's send limit
+    try std.testing.expect(send_limits.udpSendLimit(4, false));
+    try std.testing.expect(send_limits.udpSendLimit(4, true));
+    try std.testing.expect(send_limits.icmpSendLimit(4, false));
+    try std.testing.expect(send_limits.icmpSendLimit(4, true));
+    // query handle used after cancel, and after its slot was reused
+    try std.testing.expect(handles.staleDnsHandlesAreRejected(.{
+        .{ .kind = 0, .a = 0, .b = 0 }, .{ .kind = 1, .a = 0, .b = 0 },
+        .{ .kind = 2, .a = 0, .b = 0 }, .{ .kind = 0, .a = 0, .b = 0 },
+        .{ .kind = 2, .a = 0, .b = 0 }, .{ .kind = 0, .a = 0, .b = 0 },
+        .{ .kind = 1, .a = 1, .b = 0 }, .{ .kind = 2, .a = 1, .b = 0 },
+        .{ .kind = 0, .a = 0, .b = 0 }, .{ .kind = 0, .a = 0, .b = 0 },
+        .{ .kind = 2, .a = 0, .b = 0 }, .{ .kind = 2, .a = 1, .b = 0 },
+        .{ .kind = 1, .a = 0, .b = 0 }, .{ .kind = 0, .a = 0, .b = 0 },
+        .{ .kind = 2, .a = 0, .b = 0 }, .{ .kind = 2, .a = 0, .b = 0 },
+    }));
+}
+
+test "laws: handles and send limits" {
+    try zv.checkLaws(handles, .{ .iterations = iterations, .seed = 10 });
+    try zv.checkLaws(send_limits, .{ .iterations = 2_000, .seed = 11 });
 }
 
 test "laws: reach report" {
