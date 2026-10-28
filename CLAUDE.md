@@ -143,6 +143,7 @@ zmoltcp replaces the C-based lwIP network stack.
 ```bash
 zig build test                                    # Run all tests (host-native)
 zig build test -- --summary all                   # Verbose test output
+zig build matrix --summary all                    # All optimize modes, ghost on/off, cross checks
 zig build demo                                    # Run integration demos
 zig build -Dtarget=aarch64-freestanding-none      # Cross-compile check
 ```

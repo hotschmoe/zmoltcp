@@ -43,8 +43,8 @@ jobs:
         with:
           version: 0.17.0
 
-      - name: Run tests
-        run: zig build test
+      - name: Run test matrix (all modes, ghost on/off, cross checks)
+        run: zig build matrix --summary all
 
       - name: Run demos
         run: zig build demo

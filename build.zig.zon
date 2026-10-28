@@ -3,8 +3,8 @@
     .version = "0.3.0",
     .dependencies = .{
         .zirakzigil = .{
-            .url = "git+https://github.com/hotschmoe/zirakzigil#7e878aa552a55ecef47d52c366bea868b0684ed7",
-            .hash = "zirakzigil-0.1.0-6iLE2XxzAgCAfwaTscqQyRqcngLKeXJ78ee3roMyHs3u",
+            .url = "git+https://github.com/hotschmoe/zirakzigil#d07e08cb596800426027f441b0c316d7b9ff9582",
+            .hash = "zirakzigil-0.1.0-6iLE2c2LAgBW_Zkz5bSCRFoxNdNJU4adEf5U-tsgxUiG",
         },
     },
     .fingerprint = 0x46a16d6c419cca00,

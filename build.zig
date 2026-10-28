@@ -1,4 +1,5 @@
 const std = @import("std");
+const zirakzigil = @import("zirakzigil");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -30,6 +31,13 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run zmoltcp unit and conformance tests");
     test_step.dependOn(&run_unit_tests.step);
+
+    // `zig build matrix`: every optimize mode, ghost off and on, plus cross checks.
+    _ = zirakzigil.addTestMatrix(b, .{
+        .root_source_file = b.path("src/root.zig"),
+        .ghost = true,
+        .cross = &.{ "aarch64-freestanding-none", "riscv64-freestanding-none" },
+    });
 
     // Native fuzzing needs a threaded test binary.
     const fuzz_mod = b.createModule(.{
