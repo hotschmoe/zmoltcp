@@ -150,13 +150,13 @@ pub fn parseTcp(f: []const u8) ?TcpInfo {
         info.v6 = false;
         info.ip_off = 14;
         info.tcp_off = 14 + ihl;
-        ip_end = 14 + be16(f[16..]);
+        ip_end = 14 + @as(usize, be16(f[16..]));
     } else if (et == 0x86dd) {
         if (f.len < 14 + 40 + 20 or f[20] != 6) return null;
         info.v6 = true;
         info.ip_off = 14;
         info.tcp_off = 14 + 40;
-        ip_end = 14 + 40 + be16(f[18..]);
+        ip_end = 14 + 40 + @as(usize, be16(f[18..]));
     } else return null;
     if (ip_end > f.len or info.tcp_off + 20 > ip_end) return null;
     const t = f[info.tcp_off..];
@@ -563,7 +563,7 @@ pub const PeerProc = struct {
     reader: std.Io.File.Reader = undefined,
     writer: std.Io.File.Writer = undefined,
     /// Why the peer died, when it did (its stderr).
-    death: [2048]u8 = undefined,
+    death: [16384]u8 = undefined,
     death_len: usize = 0,
 
     pub fn start(gpa: std.mem.Allocator, io: std.Io, exe: []const u8, cfg: PeerConfig) !*PeerProc {
@@ -653,6 +653,37 @@ pub const PeerProc = struct {
         const a = try self.request('T', &p, frames);
         const at = std.mem.readInt(i64, a[0..8], .little);
         return if (at < 0) null else @intCast(at);
+    }
+
+    fn timeArg(now: u64) [8]u8 {
+        var p: [8]u8 = undefined;
+        std.mem.writeInt(u64, &p, now, .little);
+        return p;
+    }
+
+    /// Process queued frames without letting the peer transmit.
+    pub fn ingress(self: *PeerProc, now: u64) !void {
+        _ = try self.request('I', &timeArg(now), null);
+    }
+
+    /// Let the peer transmit without processing queued frames.
+    pub fn egress(self: *PeerProc, now: u64, frames: *std.ArrayList(Frame)) !void {
+        _ = try self.request('G', &timeArg(now), frames);
+    }
+
+    /// The peer's next poll time, without polling.
+    pub fn pollAtOnly(self: *PeerProc, now: u64) !?u64 {
+        const a = try self.request('P', &timeArg(now), null);
+        const at = std.mem.readInt(i64, a[0..8], .little);
+        return if (at < 0) null else @intCast(at);
+    }
+
+    /// Write up to n constant bytes into the peer's socket; returns how many it took.
+    pub fn writeBytes(self: *PeerProc, n: u32) !u32 {
+        var p: [4]u8 = undefined;
+        std.mem.writeInt(u32, &p, n, .little);
+        const a = try self.request('W', &p, null);
+        return std.mem.readInt(u32, a[0..4], .little);
     }
 
     pub fn listen(self: *PeerProc, port: u16) !bool {

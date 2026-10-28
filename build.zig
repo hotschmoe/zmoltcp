@@ -101,38 +101,66 @@ pub fn build(b: *std.Build) void {
 /// Deliberately not a dependency of `test` or `matrix`: the core suite stays Rust-free.
 fn addInterop(b: *std.Build, zmoltcp_mod: *std.Build.Module, zv: *std.Build.Module, optimize: std.builtin.OptimizeMode) void {
     const host = b.graph.host;
-    const interop_step = b.step("interop", "Run the zmoltcp <-> smoltcp interop scenarios (requires cargo)");
     const manifest = b.path("tests/interop/peer/Cargo.toml");
-
-    const tests_mod = b.createModule(.{
-        .root_source_file = b.path("tests/interop/main.zig"),
-        .target = host,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "zmoltcp", .module = zmoltcp_mod },
-            .{ .name = "zv", .module = zv },
-        },
-    });
     const filter = b.option([]const u8, "interop-filter", "Run only interop tests whose name contains this");
-    const interop_tests = b.addTest(.{
-        .root_module = tests_mod,
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "zmoltcp", .module = zmoltcp_mod },
+        .{ .name = "zv", .module = zv },
+    };
+    const scenarios = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/interop/main.zig"),
+            .target = host,
+            .optimize = optimize,
+            .imports = imports,
+        }),
         .filters = if (filter) |f| &.{f} else &.{},
     });
+    const upstream = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/interop/upstream_main.zig"),
+            .target = host,
+            .optimize = optimize,
+            .imports = imports,
+        }),
+    });
 
-    // Two peer builds: plain release, and release with debug assertions and overflow checks so
-    // smoltcp's own debug_assert!s fire. cargo is incremental, so the step always runs it and
-    // the test runs declare the produced binary as an input.
+    // The scenarios run against upstream main, in a plain release build and in a release build
+    // with debug assertions and overflow checks (so smoltcp's own debug_assert!s fire). cargo is
+    // incremental, so its step always runs, and each test run declares the binary as an input.
+    const interop_step = b.step("interop", "Run the zmoltcp <-> smoltcp interop scenarios (requires cargo)");
     for ([_][]const u8{ "release", "release-assert" }) |profile| {
-        const peer = addPeerBuild(b, manifest, "master", profile, host);
-        const run = b.addRunArtifact(interop_tests);
-        run.setName(b.fmt("run interop (smoltcp master, {s})", .{profile}));
-        run.setCwd(b.path("."));
-        run.setEnvironmentVariable("ZMOLTCP_PEER", peer.path);
-        run.setEnvironmentVariable("ZMOLTCP_PEER_PROFILE", profile);
-        run.step.dependOn(peer.step);
-        run.addFileInput(.{ .cwd_relative = peer.path });
-        interop_step.dependOn(&run.step);
+        addPeerRun(b, interop_step, scenarios, manifest, host, "master", profile);
     }
+
+    // The upstream-bug probes run against both smoltcp revisions in all three build flavors.
+    const upstream_step = b.step("interop-upstream", "Probe smoltcp (08bacc9 and main) with the segments behind the zmoltcp TCP fixes");
+    for ([_][]const u8{ "ref", "master" }) |variant| {
+        for ([_][]const u8{ "release", "release-assert", "dev" }) |profile| {
+            addPeerRun(b, upstream_step, upstream, manifest, host, variant, profile);
+        }
+    }
+}
+
+fn addPeerRun(
+    b: *std.Build,
+    step: *std.Build.Step,
+    tests: *std.Build.Step.Compile,
+    manifest: std.Build.LazyPath,
+    host: std.Build.ResolvedTarget,
+    variant: []const u8,
+    profile: []const u8,
+) void {
+    const peer = addPeerBuild(b, manifest, variant, profile, host);
+    const run = b.addRunArtifact(tests);
+    run.setName(b.fmt("run {s} (smoltcp {s}, {s})", .{ step.name, variant, profile }));
+    run.setCwd(b.path("."));
+    run.setEnvironmentVariable("ZMOLTCP_PEER", peer.path);
+    run.setEnvironmentVariable("ZMOLTCP_PEER_VARIANT", variant);
+    run.setEnvironmentVariable("ZMOLTCP_PEER_PROFILE", profile);
+    run.step.dependOn(peer.step);
+    run.addFileInput(.{ .cwd_relative = peer.path });
+    step.dependOn(&run.step);
 }
 
 const PeerBuild = struct { step: *std.Build.Step, path: []const u8 };
@@ -153,6 +181,6 @@ fn addPeerBuild(
     cargo.has_side_effects = true;
     return .{
         .step = &cargo.step,
-        .path = b.pathJoin(&.{ target_dir, profile, b.fmt("peer{s}", .{host.result.exeFileExt()}) }),
+        .path = b.pathJoin(&.{ target_dir, if (std.mem.eql(u8, profile, "dev")) "debug" else profile, b.fmt("peer{s}", .{host.result.exeFileExt()}) }),
     };
 }

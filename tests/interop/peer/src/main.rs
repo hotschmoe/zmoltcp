@@ -444,6 +444,35 @@ fn main() -> io::Result<()> {
                         }
                         reply.extend_from_slice(&p.poll_at(now).to_le_bytes());
                     }
+                    // Split polling, for probes that need ingress without egress in between.
+                    b'I' => {
+                        let micros = c.u64() as i64;
+                        TS_CLOCK_MS.store((micros / 1000) as u32, Ordering::Relaxed);
+                        let now = Instant::from_micros(micros);
+                        while p.iface.poll_ingress_single(now, &mut p.device, &mut p.sockets)
+                            != smoltcp::iface::PollIngressSingleResult::None
+                        {}
+                    }
+                    b'G' => {
+                        let micros = c.u64() as i64;
+                        TS_CLOCK_MS.store((micros / 1000) as u32, Ordering::Relaxed);
+                        let now = Instant::from_micros(micros);
+                        p.iface.poll_egress(now, &mut p.device, &mut p.sockets);
+                        for f in p.device.tx.drain(..) {
+                            write_msg(&mut out, b'F', &f)?;
+                        }
+                    }
+                    b'P' => {
+                        let micros = c.u64() as i64;
+                        let now = Instant::from_micros(micros);
+                        reply.extend_from_slice(&p.poll_at(now).to_le_bytes());
+                    }
+                    b'W' => {
+                        let n = c.u32() as usize;
+                        let data = vec![0x5a_u8; n];
+                        let sent = p.sock().send_slice(&data).unwrap_or(0);
+                        reply.extend_from_slice(&(sent as u32).to_le_bytes());
+                    }
                     b'L' => {
                         let port = c.u16();
                         let r = p.sock().listen(port);

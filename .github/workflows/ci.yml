@@ -56,3 +56,21 @@ jobs:
 
       - name: Cross-compile check (aarch64-freestanding)
         run: zig build -Dtarget=aarch64-freestanding-none
+
+  interop:
+    name: Interop with smoltcp
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run interop scenarios
+        run: zig build interop --summary all
+
+      - name: Probe smoltcp with the segments behind the TCP fixes
+        run: zig build interop-upstream --summary all
