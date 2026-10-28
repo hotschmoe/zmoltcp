@@ -963,6 +963,164 @@ test "laws: structure-aware" {
     try zv.checkLaws(structured, .{ .iterations = iterations, .seed = 5 });
 }
 
+
+// -------------------------------------------------------------------------
+// Stateful TCP socket law. Operations are interpreted relative to the
+// socket's current state (next expected sequence number, last dispatched
+// segment), so a short script reaches established connections, windows and
+// FIN handling that blind random segments never would.
+// -------------------------------------------------------------------------
+
+const tcp_socket = @import("socket/tcp.zig");
+const time_mod = @import("time.zig");
+
+const TcpOp = struct { kind: u8, a: u16, b: u16, c: u8 };
+
+const rx_sizes = [_]usize{ 32, 64, 1000, 4096, 65535, 65536, 70000, 140000 };
+const max_rx = 140_000;
+
+var rx_mem: [max_rx]u8 = undefined;
+var tx_mem: [2048]u8 = undefined;
+var payload_mem: [2 * max_rx]u8 = @splat(0x5a);
+
+const local_v4 = ipv4.Address{ 10, 0, 0, 1 };
+const peer_v4 = ipv4.Address{ 10, 0, 0, 2 };
+
+pub const tcp_state = struct {
+    const Sock = tcp_socket.Socket(ipv4, 4);
+    const Seq = tcp.SeqNumber;
+
+    const Check = enum { rings_in_bounds, window_fits_ring, fin_follows_all_data };
+
+    /// No operation sequence overflows the buffers or panics.
+    pub fn ringsStayInBounds(rx_pick: u8, peer_isn: u32, use_ws: bool, ops: [48]TcpOp) bool {
+        return run(.rings_in_bounds, rx_pick, peer_isn, use_ws, ops);
+    }
+
+    /// What the in-window test admits fits the free space of the receive ring.
+    pub fn advertisedWindowFitsRing(rx_pick: u8, peer_isn: u32, use_ws: bool, ops: [48]TcpOp) bool {
+        return run(.window_fits_ring, rx_pick, peer_isn, use_ws, ops);
+    }
+
+    /// A FIN is only consumed once every byte before it was accepted.
+    pub fn finConsumesAllPrecedingData(rx_pick: u8, peer_isn: u32, use_ws: bool, ops: [48]TcpOp) bool {
+        return run(.fin_follows_all_data, rx_pick, peer_isn, use_ws, ops);
+    }
+
+    fn run(comptime check: Check, rx_pick: u8, peer_isn: u32, use_ws: bool, ops: [48]TcpOp) bool {
+        const cap = rx_sizes[rx_pick % rx_sizes.len];
+        var s = Sock.initWithInitialSequenceSecret(rx_mem[0..cap], &tx_mem, peer_isn);
+        s.listen(.{ .port = 80 }) catch unreachable;
+        var now_ms: i64 = 0;
+        var last_sent_end: ?Seq = null;
+        const isn = Seq.fromU32(peer_isn);
+
+        for (ops) |op| {
+            now_ms += op.c;
+            const now = time_mod.Instant.fromMillis(now_ms);
+            switch (op.kind % 14) {
+                0, 1, 2, 3, 4, 5, 6, 7 => {
+                    var r: tcp_socket.TcpRepr = .{ .src_port = 5000, .dst_port = 80 };
+                    const handshaking = s.state == .listen or s.state == .syn_sent;
+                    r.control = if (s.state == .listen) .syn else switch (op.a % 9) {
+                        0 => .syn,
+                        1, 2 => .fin,
+                        3 => .rst,
+                        4 => .psh,
+                        else => .none,
+                    };
+                    if (r.control == .syn and use_ws) r.window_scale = @intCast(op.b % 15);
+                    if (r.control == .syn) r.max_seg_size = if (op.b & 1 == 0) null else op.b;
+                    const base = if (handshaking) isn else s.remote_seq_no.add(s.rx_buffer.len());
+                    const offset: usize = switch (op.c % 8) {
+                        0, 1, 2 => 0,
+                        3 => op.b % 100,
+                        4 => cap / 2 + op.b % 64,
+                        5 => cap -| (op.b % 64),
+                        6 => cap + op.b % 64,
+                        else => op.b,
+                    };
+                    r.seq_number = if (r.control == .syn) isn else base.add(offset);
+                    if (s.state != .listen and !(s.state == .syn_sent and r.control == .syn and op.b & 4 != 0)) {
+                        r.ack_number = switch (op.b % 6) {
+                            0, 1, 2 => last_sent_end orelse s.local_seq_no,
+                            3 => s.local_seq_no.add(1),
+                            4 => s.local_seq_no,
+                            else => Seq.fromU32(@as(u32, op.a) *% 65537),
+                        };
+                    }
+                    r.window_len = switch (op.a % 5) {
+                        0 => 0,
+                        1 => 100,
+                        2 => 65535,
+                        else => op.a,
+                    };
+                    const plen: usize = switch ((op.a >> 4) % 8) {
+                        0, 1, 2 => 0,
+                        3 => 1,
+                        4 => op.b % 64,
+                        5 => cap / 2,
+                        6 => cap + op.b % 129,
+                        else => @min(2 * cap, payload_mem.len),
+                    };
+                    r.payload = payload_mem[0..plen];
+                    if (!s.accepts(peer_v4, local_v4, r)) continue;
+                    const was_fin = s.rx_fin_received;
+                    // a conforming peer sends nothing, in or out of order, beyond its FIN
+                    const next_before = s.remote_seq_no.add(s.rx_buffer.len());
+                    const fin_is_new = s.assembler.isEmpty() and !next_before.greaterThan(r.seq_number.add(r.payload.len));
+                    _ = s.process(now, peer_v4, local_v4, r);
+                    if (check == .fin_follows_all_data and fin_is_new and r.control == .fin and !was_fin and s.rx_fin_received) {
+                        const fin_end = r.seq_number.add(r.payload.len).add(1);
+                        if (!s.remote_seq_no.add(s.rx_buffer.len()).eql(fin_end)) return false;
+                    }
+                },
+                8, 9 => {
+                    if (s.dispatch(now)) |d| {
+                        if (!s.accepts(local_v4, peer_v4, d.repr) or true) last_sent_end = d.repr.seq_number.add(d.repr.segmentLen());
+                    }
+                },
+                10 => {
+                    var out: [512]u8 = undefined;
+                    _ = s.recvSlice(out[0 .. op.a % 512]) catch {};
+                },
+                11 => _ = s.sendSlice(payload_mem[0 .. op.a % 700]) catch 0,
+                12 => switch (op.a % 5) {
+                    0 => s.close(),
+                    1 => s.abort(),
+                    2 => if (!s.isOpen()) s.connect(peer_v4, 5000, local_v4, 80) catch {},
+                    3 => if (!s.isOpen()) s.listen(.{ .port = 80 }) catch {},
+                    else => {},
+                },
+                else => {},
+            }
+            _ = s.pollAt();
+            switch (check) {
+                .rings_in_bounds => if (s.rx_buffer.len() > s.rx_buffer.capacity() or s.tx_buffer.len() > s.tx_buffer.capacity()) return false,
+                .window_fits_ring => if (!windowFitsRing(&s)) return false,
+                .fin_follows_all_data => {},
+            }
+        }
+        return true;
+    }
+
+    fn windowFitsRing(s: *const Sock) bool {
+        switch (s.state) {
+            .closed, .listen, .syn_sent => return true,
+            else => {},
+        }
+        const last_ack = s.remote_last_ack orelse return true;
+        const edge = last_ack.add(@as(usize, s.remote_last_win) << @intCast(s.remote_win_shift));
+        const next = s.remote_seq_no.add(s.rx_buffer.len());
+        const room: i32 = edge.value -% next.value;
+        return room <= @as(i64, @intCast(s.rx_buffer.window()));
+    }
+};
+
+test "laws: tcp socket state machine" {
+    try zv.checkLaws(tcp_state, .{ .iterations = 50_000, .seed = 6 });
+}
+
 test "laws: reach report" {
     std.debug.print("\nlaw reach (parser result counts)\n", .{});
     for (probes[0..probe_count]) |p| {
