@@ -210,15 +210,15 @@ pub fn checkLen(data: []const u8) error{ Truncated, BadVersion }!void {
     if (data.len < HEADER_LEN + payload_len) return error.Truncated;
 }
 
-/// Returns the IPv6 payload, clamped to the header's `payload_length` field.
-/// The IP layer must trim any trailing bytes (e.g. link-layer padding) before
-/// handing the segment to higher layers -- otherwise padding leaks into
-/// TCP/UDP payloads. See issue #2.
+/// Returns the IPv6 payload described by the header's `payload_length` field.
+/// Trailing bytes beyond it (e.g. link-layer padding) are excluded, so padding
+/// cannot leak into TCP/UDP payloads (issue #2); an over-declared length is
+/// rejected like the IPv4 and UDP views do, never converted into a partial payload.
 pub fn payloadSlice(data: []const u8) error{Truncated}![]const u8 {
     if (data.len < HEADER_LEN) return error.Truncated;
     const payload_len: usize = @as(usize, data[4]) << 8 | @as(usize, data[5]);
-    const end = @min(HEADER_LEN + payload_len, data.len);
-    return data[HEADER_LEN..end];
+    if (HEADER_LEN + payload_len > data.len) return error.Truncated;
+    return data[HEADER_LEN..][0..payload_len];
 }
 
 // -------------------------------------------------------------------------

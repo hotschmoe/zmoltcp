@@ -1363,6 +1363,10 @@ test "laws: pinned regressions" {
     // echo to a joined multicast group and from the unspecified address
     try std.testing.expect(icmp_replies.echoReplyRules(.{ 10, 0, 0, 2 }, .{ 224, 0, 0, 251 }, false));
     try std.testing.expect(icmp_replies.echoReplyRules(.{ 0, 0, 0, 0 }, .{ 10, 0, 0, 1 }, false));
+    // IPv6 payload_len 65535 on a 40-byte packet must not yield a partial payload
+    var over_declared: zv.Bytes(64) = .{ .buf = @splat(0), .len = 8 };
+    @memset(over_declared.buf[0..8], 255);
+    try std.testing.expect(framing.ipv6PayloadInsideInput(over_declared));
     // one byte over each socket's send limit
     try std.testing.expect(send_limits.udpSendLimit(4, false));
     try std.testing.expect(send_limits.udpSendLimit(4, true));
@@ -1404,6 +1408,165 @@ test "generics compile for both IP families" {
         std.testing.refAllDecls(iface_mod.RoutesFor(Ip));
         std.testing.refAllDecls(@import("wire/ip.zig").Cidr(Ip));
     }
+}
+
+// -------------------------------------------------------------------------
+// Generic shapes: framing and single-bit integrity.
+// -------------------------------------------------------------------------
+
+fn within(outer: []const u8, inner: []const u8) bool {
+    const o = @intFromPtr(outer.ptr);
+    const n = @intFromPtr(inner.ptr);
+    return n >= o and n + inner.len <= o + outer.len;
+}
+
+pub const framing = struct {
+    /// Payload views handed to upper layers lie inside the input and respect the declared length.
+    pub fn ipv4PayloadInsideInput(in: zv.Bytes(80)) bool {
+        var buf: [80]u8 = undefined;
+        const n = load(80, in, &buf);
+        const ihl: usize = 5 + (buf[0] & 0x0f) % 11;
+        buf[0] = 0x40 | @as(u8, @intCast(ihl));
+        const data = buf[0..@max(n, ihl * 4)];
+        const p = ipv4.payloadSlice(data) catch return true;
+        const declared = @as(usize, data[2]) << 8 | data[3];
+        return within(data, p) and p.len + ihl * 4 == declared;
+    }
+    pub fn ipv6PayloadInsideInput(in: zv.Bytes(64)) bool {
+        var buf: [64]u8 = undefined;
+        const n = @max(load(64, in, &buf), ipv6.HEADER_LEN);
+        buf[0] = 0x60 | (buf[0] & 0x0f);
+        const data = buf[0..n];
+        const p = ipv6.payloadSlice(data) catch return true;
+        const declared = @as(usize, data[4]) << 8 | data[5];
+        return within(data, p) and p.len == declared;
+    }
+    pub fn udpPayloadInsideInput(in: zv.Bytes(48)) bool {
+        var buf: [48]u8 = undefined;
+        const n = load(48, in, &buf);
+        const data = buf[0..n];
+        const p = udp.payloadSlice(data) catch return true;
+        const declared = if (n >= 6) @as(usize, data[4]) << 8 | data[5] else 0;
+        return within(data, p) and p.len + udp.HEADER_LEN == declared;
+    }
+    pub fn ethernetPayloadInsideInput(in: zv.Bytes(32)) bool {
+        const data = in.slice();
+        const p = ethernet.payload(data) catch return true;
+        return within(data, p) and p.len + ethernet.HEADER_LEN == data.len;
+    }
+    pub fn ieee802154PayloadInsideInput(in: zv.Bytes(64)) bool {
+        const data = in.slice();
+        const p = ieee802154.payloadSlice(data) catch return true;
+        return within(data, p);
+    }
+    pub fn extensionViewsInsideInput(in: zv.Bytes(64)) bool {
+        const data = in.slice();
+        if (ipv6ext_header.parse(data)) |r| {
+            if (!within(data, r.data) or ipv6ext_header.headerLen(r.length) > data.len) return false;
+        } else |_| {}
+        if (ipv6routing.parse(data)) |r| switch (r) {
+            .rpl => |v| if (!within(data, v.addresses)) return false,
+            else => {},
+        } else |_| {}
+        if (ndiscoption.parse(data)) |r| switch (r) {
+            .unknown => |v| if (!within(data, v.data)) return false,
+            else => {},
+        } else |_| {}
+        if (ipv6option.parse(data)) |r| switch (r) {
+            .unknown => |v| if (!within(data, v.data)) return false,
+            else => {},
+        } else |_| {}
+        return true;
+    }
+    pub fn dnsViewsInsideInput(in: zv.Bytes(64)) bool {
+        var buf: [64]u8 = undefined;
+        const n = @max(load(64, in, &buf), 24);
+        const label: usize = buf[0] % 8;
+        buf[0] = @intCast(label);
+        buf[label + 1] = 0;
+        buf[label + 4] = 0;
+        buf[label + 5] = 1;
+        const data = buf[0..n];
+        if (dns.parseQuestion(data)) |q| {
+            if (!within(data, q.rest) or !within(data, q.question.name)) return false;
+        } else |_| {}
+        if (dns.parseRecord(data)) |r| {
+            if (!within(data, r.rest) or !within(data, r.record.name)) return false;
+        } else |_| {}
+        return true;
+    }
+};
+
+pub const integrity = struct {
+    fn flip(buf: []u8, bit: u16) void {
+        buf[(bit / 8) % buf.len] ^= @as(u8, 1) << @intCast(bit % 8);
+    }
+
+    /// Flipping any single bit of a valid checksummed packet makes it fail verification.
+    pub fn ipv4HeaderBitFlip(in: zv.Bytes(60), bit: u16) bool {
+        var buf: [60]u8 = undefined;
+        _ = load(60, in, &buf);
+        const ihl: usize = 5 + (buf[0] & 0x0f) % 11;
+        buf[0] = 0x40 | @as(u8, @intCast(ihl));
+        putU16(buf[10..12], 0);
+        putU16(buf[10..12], checksum.internetChecksum(buf[0 .. ihl * 4]));
+        if (!ipv4.verifyChecksum(buf[0 .. ihl * 4])) return false;
+        var flipped = buf;
+        flip(flipped[0 .. ihl * 4], bit);
+        return !ipv4.verifyChecksum(flipped[0 .. ihl * 4]);
+    }
+
+    pub fn icmpBitFlip(in: zv.Bytes(40), bit: u16) bool {
+        var buf: [40]u8 = undefined;
+        const n = @max(load(40, in, &buf), icmp.HEADER_LEN);
+        putU16(buf[2..4], 0);
+        putU16(buf[2..4], checksum.internetChecksum(buf[0..n]));
+        if (icmp.parse(buf[0..n])) |_| {} else |_| return false;
+        var flipped = buf;
+        flip(flipped[0..n], bit);
+        if (icmp.parse(flipped[0..n])) |_| return false else |_| return true;
+    }
+
+    pub fn icmpv6BitFlip(in: zv.Bytes(40), bit: u16, src: [16]u8, dst: [16]u8) bool {
+        var buf: [40]u8 = undefined;
+        const n = @max(load(40, in, &buf), icmpv6.HEADER_LEN);
+        putU16(buf[2..4], 0);
+        const pseudo = checksum.pseudoHeaderChecksumV6(src, dst, @backingInt(ipv6.Protocol.icmpv6), @intCast(n));
+        putU16(buf[2..4], checksum.finish(checksum.calculate(buf[0..n], pseudo)));
+        if (!icmpv6.verifyChecksum(buf[0..n], src, dst)) return false;
+        var flipped = buf;
+        flip(flipped[0..n], bit);
+        return !icmpv6.verifyChecksum(flipped[0..n], src, dst);
+    }
+
+    pub fn tcpBitFlip(in: zv.Bytes(60), bit: u16, src: [4]u8, dst: [4]u8) bool {
+        var buf: [60]u8 = undefined;
+        const n = @max(load(60, in, &buf), tcp.HEADER_LEN);
+        putU16(buf[16..18], 0);
+        putU16(buf[16..18], tcp.computeChecksum(src, dst, buf[0..n]));
+        if (!tcp.verifyChecksum(src, dst, buf[0..n])) return false;
+        var flipped = buf;
+        flip(flipped[0..n], bit);
+        return !tcp.verifyChecksum(src, dst, flipped[0..n]);
+    }
+
+    pub fn udpBitFlip(in: zv.Bytes(60), bit: u16, src: [4]u8, dst: [4]u8) bool {
+        var buf: [60]u8 = undefined;
+        const n = @max(load(60, in, &buf), udp.HEADER_LEN);
+        putU16(buf[4..6], @intCast(n));
+        udp.fillChecksum(buf[0..n], src, dst);
+        if (!udp.verifyChecksum(buf[0..n], src, dst)) return false;
+        var flipped = buf;
+        flip(flipped[0..n], bit);
+        // a flip that makes the checksum field zero means "no checksum" over IPv4, by design
+        if (flipped[6] == 0 and flipped[7] == 0) return true;
+        return !udp.verifyChecksum(flipped[0..n], src, dst);
+    }
+};
+
+test "laws: framing and integrity" {
+    try zv.checkLaws(framing, .{ .iterations = iterations, .seed = 12 });
+    try zv.checkLaws(integrity, .{ .iterations = iterations, .seed = 13 });
 }
 
 test "laws: reach report" {
