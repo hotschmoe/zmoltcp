@@ -117,6 +117,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "smoltcp"
+version = "0.14.0"
+source = "git+https://github.com/smoltcp-rs/smoltcp.git?rev=24bda3b4f982625d8453d4360172557d24921c76#24bda3b4f982625d8453d4360172557d24921c76"
+dependencies = [
+ "bitflags",
+ "byteorder",
+ "cfg-if",
+ "defmt 1.2.0",
+ "heapless",
+ "managed",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -163,5 +176,6 @@ checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 name = "zmoltcp-interop-peer"
 version = "0.1.0"
 dependencies = [
- "smoltcp",
+ "smoltcp 0.12.0",
+ "smoltcp 0.14.0",
 ]

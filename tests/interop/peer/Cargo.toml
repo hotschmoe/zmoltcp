@@ -10,8 +10,10 @@ name = "peer"
 path = "src/main.rs"
 
 [dependencies]
-# The exact smoltcp revision that ref/smoltcp is pinned to (the reference zmoltcp is modeled on).
-smoltcp = { git = "https://github.com/smoltcp-rs/smoltcp.git", rev = "08bacc9821c4381272535e153c9aa68e9f60b3aa", default-features = false, features = [
+# Two smoltcp revisions, selected by feature (exactly one):
+#   master: upstream main at the SHA below (default; the scenarios run against this)
+#   ref:    08bacc9, the revision ref/smoltcp is pinned to (zmoltcp's design reference)
+smoltcp_master = { package = "smoltcp", git = "https://github.com/smoltcp-rs/smoltcp.git", rev = "24bda3b4f982625d8453d4360172557d24921c76", default-features = false, optional = true, features = [
     "std",
     "medium-ethernet",
     "proto-ipv4",
@@ -21,6 +23,21 @@ smoltcp = { git = "https://github.com/smoltcp-rs/smoltcp.git", rev = "08bacc9821
     "socket-tcp-cubic",
     "multicast",
 ] }
+smoltcp_ref = { package = "smoltcp", git = "https://github.com/smoltcp-rs/smoltcp.git", rev = "08bacc9821c4381272535e153c9aa68e9f60b3aa", default-features = false, optional = true, features = [
+    "std",
+    "medium-ethernet",
+    "proto-ipv4",
+    "proto-ipv6",
+    "socket-tcp",
+    "socket-tcp-reno",
+    "socket-tcp-cubic",
+    "multicast",
+] }
+
+[features]
+default = ["master"]
+master = ["dep:smoltcp_master"]
+ref = ["dep:smoltcp_ref"]
 
 [workspace]
 

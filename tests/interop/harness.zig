@@ -352,7 +352,7 @@ pub const Tap = struct {
     ws_shift: [2]u8 = .{ 0, 0 },
 
     fn observe(self: *Tap, dir: Dir, f: []const u8) void {
-        const d = @intFromEnum(dir);
+        const d = @backingInt(dir);
         self.frames[d] += 1;
         self.max_frame[d] = @max(self.max_frame[d], f.len);
         const info = parseTcp(f) orelse return;
@@ -387,6 +387,7 @@ pub const Link = struct {
     queue: std.ArrayList(InFlight) = .empty,
     order: u64 = 0,
     tap: Tap = .{},
+    trace: bool = false,
     gpa: std.mem.Allocator,
 
     pub fn init(gpa: std.mem.Allocator, sched: Schedule) Link {
@@ -416,11 +417,12 @@ pub const Link = struct {
     /// Hand a frame to the link at time `now`. Every random choice is drawn for every frame so
     /// a schedule's decisions for frame k do not depend on what was decided for frame k-1.
     pub fn send(self: *Link, dir: Dir, now: u64, bytes: []const u8) !void {
-        const d = @intFromEnum(dir);
+        const d = @backingInt(dir);
         const s = self.sched;
         var f = Frame.from(bytes);
         if (s.strip_sack or s.strip_ws) self.mangle(&f);
         self.tap.observe(dir, f.slice());
+        if (self.trace) traceFrame(dir, now, f.slice());
         const r = self.rng[d].random();
         const lose = r.uintLessThan(u16, 1000) < s.loss_pm;
         const dup = r.uintLessThan(u16, 1000) < s.dup_pm;
@@ -583,7 +585,7 @@ pub const PeerProc = struct {
         std.mem.writeInt(u16, p[9..11], cfg.mtu, .little);
         p[11] = @as(u8, @intFromBool(cfg.timestamps)) | @as(u8, @intFromBool(cfg.nagle_off)) << 1 |
             @as(u8, @intFromBool(cfg.ack_delay_off)) << 2 | @as(u8, @intFromBool(cfg.auto_close_on_eof)) << 3;
-        p[12] = @intFromEnum(cfg.cc);
+        p[12] = @backingInt(cfg.cc);
         std.mem.writeInt(u64, p[13..21], cfg.seed, .little);
         _ = try self.request('H', p[0..21], null);
         return self;
@@ -700,7 +702,7 @@ pub const PeerProc = struct {
     pub fn query(self: *PeerProc) !PeerStatus {
         const a = try self.request('Q', &.{}, null);
         return .{
-            .state = @enumFromInt(a[0]),
+            .state = @fromBackingInt(@intCast(a[0])),
             .may_send = a[1] & 1 != 0,
             .may_recv = a[1] & 2 != 0,
             .can_send = a[1] & 4 != 0,
@@ -760,6 +762,9 @@ pub const Dev = struct {
         self.tx_count += 1;
     }
 };
+
+/// Print every frame the link sees (debugging aid).
+pub var trace_all: bool = false;
 
 var g_ts_ms: u32 = 0;
 fn tsGen() u32 {
@@ -868,7 +873,11 @@ pub fn Sim(comptime v6: bool) type {
                 .gpa = gpa,
                 .cfg = cfg,
                 .peer = peer,
-                .link = Link.init(gpa, cfg.sched),
+                .link = blk: {
+                    var l = Link.init(gpa, cfg.sched);
+                    l.trace = trace_all;
+                    break :blk l;
+                },
                 .dev = dev,
                 .stk = stk,
                 .sock = sock,
@@ -1006,14 +1015,14 @@ pub fn Sim(comptime v6: bool) type {
                 const act = self.stk.poll(Instant.fromMicros(@intCast(self.now)), self.dev);
                 const app = try self.appStep();
                 try self.drainDev();
-                self.states_seen |= @as(u16, 1) << @as(u4, @intCast(@intFromEnum(State.fromZ(self.sock.getState()))));
+                self.states_seen |= @as(u16, 1) << @as(u4, @intCast(@backingInt(State.fromZ(self.sock.getState()))));
                 if (!act and !app) return;
             }
             return error.PumpDidNotQuiesce;
         }
 
         pub fn sawState(self: *const Self, s: State) bool {
-            return self.states_seen & (@as(u16, 1) << @as(u4, @intCast(@intFromEnum(s)))) != 0;
+            return self.states_seen & (@as(u16, 1) << @as(u4, @intCast(@backingInt(s)))) != 0;
         }
 
         /// Run both sides at the current instant, then advance to the next event.
@@ -1043,7 +1052,7 @@ pub fn Sim(comptime v6: bool) type {
             while (self.now <= deadline) {
                 try self.step();
                 if (try pred(ctx, self)) return true;
-                if (self.steps > 3_000_000) return error.StepBudgetExceeded;
+                if (self.steps > 400_000) return error.StepBudgetExceeded;
             }
             return false;
         }
@@ -1076,9 +1085,9 @@ pub fn Sim(comptime v6: bool) type {
         pub fn dump(self: *Self, comptime tag: []const u8) void {
             const ps = self.peer.query() catch return;
             std.debug.print("[{s}] t={d}us steps={d} z={s} rx={d} tx={d} | peer={s} rx={d} tx={d} | tap to_peer={d} to_zig={d} drop={d}/{d}\n", .{
-                tag,                  self.now,                      self.steps,                  @tagName(self.zState()),
-                self.rx_total,        self.tx_total,                 @tagName(ps.state),          ps.rx_total,
-                ps.tx_total,          self.link.tap.frames[0],       self.link.tap.frames[1],     self.link.tap.dropped[0],
+                tag,                      self.now,                self.steps,              @tagName(self.zState()),
+                self.rx_total,            self.tx_total,           @tagName(ps.state),      ps.rx_total,
+                ps.tx_total,              self.link.tap.frames[0], self.link.tap.frames[1], self.link.tap.dropped[0],
                 self.link.tap.dropped[1],
             });
         }
@@ -1098,4 +1107,19 @@ pub fn pad16(a: [4]u8) [16]u8 {
     var r: [16]u8 = @splat(0);
     @memcpy(r[0..4], &a);
     return r;
+}
+
+fn traceFrame(dir: Dir, now: u64, f: []const u8) void {
+    const d = if (dir == .to_peer) "Z->P" else "P->Z";
+    if (parseTcp(f)) |i| {
+        std.debug.print("{d:>10}us {s} len={d} {s}{s}{s}{s}{s} seq={d} ack={d} win={d} pl={d} ts={} sack={d}\n", .{
+            now,                         d,                           f.len,
+            if (i.has(SYN)) "S" else "", if (i.has(ACK)) "A" else "", if (i.has(FIN)) "F" else "",
+            if (i.has(RST)) "R" else "", if (i.has(PSH)) "P" else "", i.seq,
+            i.ack,                       i.window,                    i.payload_len,
+            i.ts,                        i.sack_blocks,
+        });
+    } else {
+        std.debug.print("{d:>10}us {s} len={d} non-tcp ethertype={x}\n", .{ now, d, f.len, if (f.len >= 14) be16(f[12..]) else 0 });
+    }
 }

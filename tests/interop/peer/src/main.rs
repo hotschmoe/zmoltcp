@@ -9,6 +9,11 @@
 //! E echo, R recv enable, M recv limit, V recv n bytes now, X close, Z abort, Q query, B bye.
 //! Replies: F frames out (only before the A of a T), A ack with payload.
 
+#[cfg(feature = "master")]
+extern crate smoltcp_master as smoltcp;
+#[cfg(feature = "ref")]
+extern crate smoltcp_ref as smoltcp;
+
 use std::collections::VecDeque;
 use std::io::{self, BufWriter, Read, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
