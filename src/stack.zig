@@ -1324,6 +1324,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                 }, &buf) catch return .sent;
             }
 
+            if (pos + ipv6.HEADER_LEN + payload_data.len > buf.len) return .sent;
             const ip_len = ipv6.emit(.{
                 .payload_len = @intCast(payload_data.len),
                 .next_header = next_header,
@@ -1333,7 +1334,6 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             }, buf[pos..]) catch return .sent;
 
             const total = pos + ip_len + payload_data.len;
-            if (total > buf.len) return .sent;
             @memcpy(buf[pos + ip_len ..][0..payload_data.len], payload_data);
             device.transmit(buf[0..total]);
             return .sent;
@@ -7105,6 +7105,36 @@ test "UDP datagrams above the MTU are fragmented and oversize ones are refused" 
     while (round < 4) : (round += 1) {
         while (device.dequeueTx()) |_| frames += 1;
         _ = stack.poll(Instant.ZERO, &device);
+    }
+    try testing.expect(frames >= 2);
+}
+
+// [audit:7]
+test "raw socket datagrams above the MTU are fragmented and oversize ones are refused" {
+    const RawSock = raw_socket_mod.Socket(ipv4, .{ .payload_size = 5000 });
+    const Sockets = struct { raw4_sockets: []*RawSock };
+    const RawStack = Stack(TestDevice, Sockets);
+    var device = TestDevice.init();
+    const Storage = struct {
+        var rx: [1]RawSock.Packet = undefined;
+        var tx: [1]RawSock.Packet = undefined;
+    };
+    var sock = RawSock.init(&Storage.rx, &Storage.tx);
+    try sock.bind(.udp);
+    var too_big: [RawSock.MAX_PAYLOAD_LEN + 1]u8 = @splat(0x55);
+    try testing.expectError(error.PayloadTooLarge, sock.sendSlice(&too_big, REMOTE_IP));
+    var big: [3000]u8 = @splat(0x55);
+    try sock.sendSlice(&big, REMOTE_IP);
+
+    var sock_arr = [_]*RawSock{&sock};
+    var stack = RawStack.init(LOCAL_HW, .{ .raw4_sockets = &sock_arr });
+    stack.iface.v4.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+    stack.iface.neighbor_cache.fill(REMOTE_IP, REMOTE_HW, Instant.ZERO);
+    var frames: usize = 0;
+    var round: usize = 0;
+    while (round < 4) : (round += 1) {
+        _ = stack.poll(Instant.ZERO, &device);
+        while (device.dequeueTx()) |_| frames += 1;
     }
     try testing.expect(frames >= 2);
 }

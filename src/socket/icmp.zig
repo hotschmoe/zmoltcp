@@ -86,7 +86,10 @@ pub fn Socket(comptime Ip: type) type {
         hop_limit: ?u8,
 
         pub const BindError = error{ Unaddressable, InvalidState };
-        pub const SendError = error{ Unaddressable, BufferFull };
+        pub const SendError = error{ Unaddressable, BufferFull, PayloadTooLarge };
+        /// Largest payload the stack can emit: IPv4 fragments up to a 4096-byte
+        /// IP payload; IPv6 has no fragmenter, so it must fit one 1500-byte frame.
+        pub const MAX_PAYLOAD_LEN: usize = if (Ip.ADDRESS_LEN == 16) 1460 else 4096;
         pub const RecvError = error{ Exhausted, Truncated };
         pub const HopLimitError = error{InvalidHopLimit};
 
@@ -153,6 +156,7 @@ pub fn Socket(comptime Ip: type) type {
 
         pub fn sendSlice(self: *Self, data: []const u8, dst_addr: Ip.Address) SendError!void {
             if (Ip.isUnspecified(dst_addr)) return error.Unaddressable;
+            if (data.len > MAX_PAYLOAD_LEN) return error.PayloadTooLarge;
 
             const buf = self.tx.enqueue(data.len, .{
                 .addr = dst_addr,
@@ -564,4 +568,16 @@ test "pollAt returns ZERO when tx queued, null when empty" {
 
     _ = s.dispatch();
     try testing.expectEqual(@as(?Instant, null), s.pollAt());
+}
+
+// [audit:7]
+test "oversize ICMP payload is refused at send time" {
+    const Sock = Socket(ipv4);
+    var rx_meta: [1]Sock.PacketMeta = .{.{}};
+    var rx_payload: [64]u8 = undefined;
+    var tx_meta: [1]Sock.PacketMeta = .{.{}};
+    var tx_payload: [8192]u8 = undefined;
+    var sock = Sock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
+    var big: [Sock.MAX_PAYLOAD_LEN + 1]u8 = @splat(0);
+    try std.testing.expectError(error.PayloadTooLarge, sock.sendSlice(&big, .{ 10, 0, 0, 2 }));
 }
