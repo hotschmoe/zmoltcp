@@ -584,6 +584,10 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
     return struct {
         const Self = @This();
         const Assembler = assembler_mod.Assembler(max_asm_segs);
+
+        /// Largest payload that fits a 1500-byte IP MTU after the IP and base TCP headers.
+        const LOCAL_MSS: u16 = if (Ip.ADDRESS_LEN == 16) BASE_MSS - 20 else BASE_MSS;
+        const TIMESTAMP_OPTION_LEN: usize = 12;
         const RingBuffer = ring_buffer_mod.RingBuffer(u8);
 
         pub const Endpoint = ip_generic.Endpoint(Ip);
@@ -840,6 +844,11 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
             const bytes = @as(usize, self.remote_last_win) << @intCast(self.remote_win_shift);
             self.remote_last_win = @intCast(@min(bytes, std.math.maxInt(u16)));
             self.remote_win_shift = 0;
+        }
+
+        fn maxSegmentPayload(self: Self) usize {
+            const options: usize = if (self.tsval_generator != null) TIMESTAMP_OPTION_LEN else 0;
+            return @min(self.remote_mss, LOCAL_MSS - options);
         }
 
         fn scaledWindow(self: Self) u16 {
@@ -1574,7 +1583,7 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
                         is_zero_window_probe = true;
                     }
 
-                    const size = @min(win_limit, @min(self.remote_mss, BASE_MSS));
+                    const size = @min(win_limit, self.maxSegmentPayload());
                     const offset = self.remote_last_seq.diff(self.local_seq_no);
                     repr.payload = self.tx_buffer.getAllocated(offset, size);
 
@@ -1601,7 +1610,7 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
 
             // Fill MSS on SYN.
             if (repr.control == .syn) {
-                repr.max_seg_size = BASE_MSS;
+                repr.max_seg_size = LOCAL_MSS;
             }
 
             // RFC 7323: generate timestamp option on outgoing segments.
@@ -1728,7 +1737,7 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
                 0;
 
             var can_send = max_send != 0;
-            const can_send_full = max_send >= @min(self.remote_mss, BASE_MSS);
+            const can_send_full = max_send >= self.maxSegmentPayload();
 
             const want_fin = self.state == .fin_wait_1 or self.state == .closing or self.state == .last_ack;
 
@@ -7509,4 +7518,17 @@ test "FIN is ignored when the window truncated its payload" {
     try testing.expectEqual(State.established, s.state);
     try testing.expectEqual(@as(usize, 64), s.rx_buffer.len());
     try testing.expect(!s.rx_fin_received);
+}
+
+// [audit:5]
+test "segment payload leaves room for the timestamp option" {
+    var s = socketNew();
+    s.remote_mss = 1460;
+    try testing.expectEqual(@as(usize, 1460), s.maxSegmentPayload());
+    s.setTsvalGenerator(&testTsval);
+    try testing.expectEqual(@as(usize, 1448), s.maxSegmentPayload());
+}
+
+fn testTsval() u32 {
+    return 1;
 }

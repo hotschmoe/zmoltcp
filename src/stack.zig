@@ -7016,3 +7016,51 @@ test "TCP SYN to the broadcast address does not open a connection" {
     _ = stack.poll(Instant.ZERO, &device);
     try testing.expectEqual(tcp_socket.State.listen, sock.state);
 }
+
+// [audit:5]
+test "IPv6 TCP segments are sized to fit the egress buffer" {
+    const TcpSock = tcp_socket.Socket(ipv6, 4);
+    const Sockets = struct { tcp6_sockets: []*TcpSock };
+    const V6Stack = Stack(TestDevice, Sockets);
+    var device = TestDevice.init();
+    const SB = struct {
+        var rx_buf: [256]u8 = @splat(0);
+        var tx_buf: [4096]u8 = @splat(0);
+    };
+    var sock = TcpSock.init(&SB.rx_buf, &SB.tx_buf);
+    sock.ack_delay = null;
+    sock.setNagleEnabled(false);
+    try sock.listen(.{ .port = 8080 });
+    var arr = [_]*TcpSock{&sock};
+    var stack = V6Stack.init(LOCAL_HW, .{ .tcp6_sockets = &arr });
+    stack.iface.setIpv6Addrs(&.{.{ .address = LOCAL_V6, .prefix_len = 64 }});
+    stack.iface.neighbor_cache_v6.fill(REMOTE_V6, REMOTE_HW, Instant.ZERO);
+
+    var tcp_buf: [32]u8 = undefined;
+    const n = tcp_wire.emit(.{ .src_port = 9999, .dst_port = 8080, .seq_number = 1000, .ack_number = 0, .data_offset = 5, .flags = .{ .syn = true }, .window_size = 65535, .checksum = 0, .urgent_pointer = 0, .max_seg_size = 1460 }, &tcp_buf) catch unreachable;
+    var frame: [256]u8 = undefined;
+    device.enqueueRx(buildIpv6Frame(&frame, .tcp, tcp_buf[0..n]));
+    _ = stack.poll(Instant.ZERO, &device);
+    const synack = device.dequeueTx().?;
+    const sa = try tcp_wire.parse(try ipv6.payloadSlice(try ethernet.payload(synack)));
+
+    var ack: [20]u8 = undefined;
+    _ = tcp_wire.emit(.{ .src_port = 9999, .dst_port = 8080, .seq_number = 1001, .ack_number = sa.seq_number + 1, .data_offset = 5, .flags = .{ .ack = true }, .window_size = 65535, .checksum = 0, .urgent_pointer = 0 }, &ack) catch unreachable;
+    device.enqueueRx(buildIpv6Frame(&frame, .tcp, &ack));
+    _ = stack.poll(Instant.ZERO, &device);
+    try testing.expectEqual(tcp_socket.State.established, sock.state);
+
+    var data: [3000]u8 = @splat(0x42);
+    _ = try sock.sendSlice(&data);
+    var now: i64 = 1;
+    var max_payload: usize = 0;
+    while (now < 40) : (now += 1) {
+        _ = stack.poll(Instant.fromMillis(now), &device);
+        while (device.dequeueTx()) |f| {
+            const segment = ipv6.payloadSlice(ethernet.payload(f) catch continue) catch continue;
+            const r = tcp_wire.parse(segment) catch continue;
+            max_payload = @max(max_payload, segment.len - @as(usize, r.data_offset) * 4);
+        }
+    }
+    try testing.expectEqual(@as(usize, 1440), max_payload);
+}
