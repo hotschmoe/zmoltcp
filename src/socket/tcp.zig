@@ -1218,8 +1218,9 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
             // Quash PSH for state transition logic.
             var control = repr.control.quashPsh();
 
-            // Disregard FIN if we have a hole before the current segment.
-            if (control == .fin and window_start.lessThan(segment_start)) {
+            // Disregard FIN if we have a hole before the current segment, or if the
+            // window cut off part of its payload: the FIN follows the last byte.
+            if (control == .fin and (window_start.lessThan(segment_start) or segment_end.greaterThan(window_end))) {
                 control = .none;
             }
 
@@ -7488,4 +7489,24 @@ test "pollAt after simultaneous open does not underflow" {
     });
     try testing.expectEqual(State.syn_received, s.state);
     _ = s.pollAt();
+}
+
+// [audit:2] The FIN sits after the last payload byte. If the window trimmed
+// the payload, the FIN must not be consumed or the stream loses bytes and the
+// ACK covers a phantom FIN.
+test "FIN is ignored when the window truncated its payload" {
+    var s = socketEstablished();
+    var data: [100]u8 = @splat(0x41);
+    _ = sendPacketAt0(&s, .{
+        .src_port = REMOTE_PORT,
+        .dst_port = LOCAL_PORT,
+        .control = .fin,
+        .seq_number = REMOTE_SEQ.add(1),
+        .ack_number = LOCAL_SEQ.add(1),
+        .window_len = 256,
+        .payload = &data,
+    });
+    try testing.expectEqual(State.established, s.state);
+    try testing.expectEqual(@as(usize, 64), s.rx_buffer.len());
+    try testing.expect(!s.rx_fin_received);
 }
