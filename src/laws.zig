@@ -40,8 +40,7 @@ const iterations = 50_000;
 /// Parsers must classify any input as a value or an error; reaching the
 /// end of the function is the property (a panic aborts the test binary).
 fn consume(result: anytype) bool {
-    _ = result catch {};
-    return true;
+    return tally(@typeName(@TypeOf(result)), result);
 }
 
 pub const totality = struct {
@@ -235,11 +234,7 @@ pub const roundtrip = struct {
         }.f);
     }
     pub fn tcpRoundTrip(in: zv.Bytes(80)) bool {
-        return roundTrip(tcp, in.slice(), struct {
-            fn f(r: *tcp.Repr) void {
-                r.data_offset = 0;
-            }
-        }.f);
+        return roundTrip(tcp, in.slice(), tcpNormalize);
     }
     pub fn udpRoundTrip(in: zv.Bytes(16)) bool {
         return roundTrip(udp, in.slice(), keep);
@@ -582,4 +577,401 @@ pub const seq = struct {
 
 test "laws: sequence numbers" {
     try zv.checkLaws(seq, .{ .iterations = iterations, .seed = 4 });
+}
+
+// -------------------------------------------------------------------------
+// Structure-aware laws. Random bytes die at the first guard (version nibble,
+// checksum, magic), so these fix the gating fields and let everything else
+// stay random. The reach report at the bottom shows how deep each one gets.
+// -------------------------------------------------------------------------
+
+const checksum = @import("wire/checksum.zig");
+
+const Probe = struct {
+    name: []const u8,
+    ok: usize = 0,
+    err_names: [12][]const u8 = undefined,
+    err_counts: [12]usize = @splat(0),
+    err_kinds: usize = 0,
+
+    fn record(self: *Probe, err_name: []const u8) void {
+        for (self.err_names[0..self.err_kinds], self.err_counts[0..self.err_kinds]) |n, *c| {
+            if (std.mem.eql(u8, n, err_name)) {
+                c.* += 1;
+                return;
+            }
+        }
+        if (self.err_kinds == self.err_names.len) return;
+        self.err_names[self.err_kinds] = err_name;
+        self.err_counts[self.err_kinds] = 1;
+        self.err_kinds += 1;
+    }
+};
+
+var probes: [160]*Probe = undefined;
+var probe_count: usize = 0;
+
+/// Count how often a parser call ends in a value or in each error. Returns
+/// true so it composes as the tail of a totality law.
+fn tally(comptime name: []const u8, result: anytype) bool {
+    const S = struct {
+        var probe: Probe = .{ .name = name };
+        var registered = false;
+    };
+    if (!S.registered) {
+        S.registered = true;
+        probes[probe_count] = &S.probe;
+        probe_count += 1;
+    }
+    if (result) |_| S.probe.ok += 1 else |err| S.probe.record(@errorName(err));
+    return true;
+}
+
+fn load(comptime n: usize, in: zv.Bytes(n), buf: *[n]u8) usize {
+    const s = in.slice();
+    @memset(buf, 0);
+    @memcpy(buf[0..s.len], s);
+    return s.len;
+}
+
+fn putU16(buf: []u8, v: u16) void {
+    buf[0] = @truncate(v >> 8);
+    buf[1] = @truncate(v);
+}
+
+pub const structured = struct {
+    pub fn arpRoundTrip(in: zv.Bytes(32)) bool {
+        var buf: [32]u8 = undefined;
+        const n = @max(load(32, in, &buf), arp.HEADER_LEN);
+        buf[0..8].* = .{ 0, 1, 8, 0, 6, 4, 0, 1 + buf[7] % 2 };
+        _ = tally("arp*", arp.parse(buf[0..n]));
+        return roundTrip(arp, buf[0..n], keep);
+    }
+
+    /// A one-label name followed by class IN, then random type and data.
+    pub fn dnsQuestionAndRecord(in: zv.Bytes(64)) bool {
+        var buf: [64]u8 = undefined;
+        const n = @max(load(64, in, &buf), 24);
+        const label: usize = buf[0] % 8;
+        buf[0] = @intCast(label);
+        buf[label + 1] = 0;
+        const class_at = label + 4;
+        buf[class_at] = 0;
+        buf[class_at + 1] = 1;
+        _ = tally("dns question*", dns.parseQuestion(buf[0..n]));
+        return tally("dns record*", dns.parseRecord(buf[0..n]));
+    }
+
+    pub fn ipv4Parse(in: zv.Bytes(80)) bool {
+        var buf: [80]u8 = undefined;
+        const n = load(80, in, &buf);
+        const ihl: usize = 5 + (buf[0] & 0x0f) % 11;
+        buf[0] = 0x40 | @as(u8, @intCast(ihl));
+        return tally("ipv4*", ipv4.parse(buf[0 .. @max(n, ihl * 4)]));
+    }
+
+    pub fn ipv4ChecksumFill(in: zv.Bytes(80)) bool {
+        var buf: [80]u8 = undefined;
+        const n = load(80, in, &buf);
+        const ihl: usize = 5 + (buf[0] & 0x0f) % 11;
+        const len = @max(n, ihl * 4);
+        buf[0] = 0x40 | @as(u8, @intCast(ihl));
+        putU16(buf[10..12], 0);
+        putU16(buf[10..12], checksum.internetChecksum(buf[0 .. ihl * 4]));
+        return ipv4.verifyChecksum(buf[0..len]);
+    }
+
+    /// checkLen and payloadSlice are two views of one validity predicate.
+    pub fn ipv4LengthViewsAgree(in: zv.Bytes(80)) bool {
+        var buf: [80]u8 = undefined;
+        const n = load(80, in, &buf);
+        const ihl: usize = 5 + (buf[0] & 0x0f) % 11;
+        const len = @max(n, ihl * 4);
+        buf[0] = 0x40 | @as(u8, @intCast(ihl));
+        putU16(buf[2..4], @intCast(ihl * 4 + (@as(usize, buf[2]) * 7 + buf[3]) % (len - ihl * 4 + 3)));
+        const data = buf[0..len];
+        const checked = ipv4.checkLen(data);
+        const slice = ipv4.payloadSlice(data);
+        if (checked) |_| {
+            const p = slice catch return false;
+            const total = @as(usize, buf[2]) << 8 | buf[3];
+            return p.len == total - ihl * 4 and p.ptr == data.ptr + ihl * 4;
+        } else |_| {
+            _ = slice catch return true;
+            return false;
+        }
+    }
+
+    pub fn tcpParse(in: zv.Bytes(80)) bool {
+        var buf: [80]u8 = undefined;
+        const n = load(80, in, &buf);
+        const words = 5 + (buf[12] >> 4) % 11;
+        buf[12] = (buf[12] & 0x0f) | (words << 4);
+        return tally("tcp*", tcp.parse(buf[0 .. @max(n, @as(usize, words) * 4)]));
+    }
+
+    /// Options built from a grammar that is well formed most of the time.
+    pub fn tcpOptionsRoundTrip(ops: [8]Op, flags: u8) bool {
+        var buf: [60]u8 = @splat(0);
+        buf[12] = 0x50;
+        buf[13] = flags;
+        var pos: usize = tcp.HEADER_LEN;
+        for (ops) |op| {
+            const well_formed = op.b & 3 != 0;
+            const kind: u8 = switch (op.kind % 9) {
+                0 => 0,
+                1 => 1,
+                2 => 2,
+                3 => 3,
+                4 => 4,
+                5 => 5,
+                6 => 8,
+                else => op.kind,
+            };
+            const len: usize = if (!well_formed) op.b else switch (kind) {
+                2 => 4,
+                3 => 3,
+                4 => 2,
+                5 => 2 + 8 * @as(usize, op.a % 4),
+                8 => 10,
+                else => 2 + op.a % 4,
+            };
+            const used: usize = if (kind <= 1) 1 else len;
+            if (pos + @max(used, 2) > buf.len) break;
+            buf[pos] = kind;
+            if (kind > 1) buf[pos + 1] = @truncate(len);
+            for (buf[pos + 2 ..][0..@min(used -| 2, buf.len - pos - 2)], 0..) |*b, i| b.* = op.a +% @as(u8, @truncate(i * 31));
+            if (kind == 3 and well_formed) buf[pos + 2] = op.a % 16;
+            pos += used;
+        }
+        const words = (pos + 3) / 4;
+        buf[12] = @as(u8, @intCast(words)) << 4;
+        const data = buf[0 .. words * 4];
+        _ = tally("tcp options*", tcp.parse(data));
+        return roundTrip(tcp, data, tcpNormalize);
+    }
+
+    /// Reprs the socket layer could build must survive emit -> parse.
+    pub fn tcpEmitParseIdentity(repr_in: tcp.Repr) bool {
+        var repr = repr_in;
+        if (repr.window_scale) |ws| repr.window_scale = ws % (tcp.MAX_WINDOW_SCALE + 1);
+        if (tcp.headerLen(repr) > tcp.MAX_HEADER_LEN) return true;
+        var buf: [60]u8 = undefined;
+        const n = tcp.emit(repr, &buf) catch return false;
+        const again = tcp.parse(buf[0..n]) catch return false;
+        var want = repr;
+        var got = again;
+        tcpNormalize(&want);
+        tcpNormalize(&got);
+        return deepEq(want, got);
+    }
+
+    pub fn tcpChecksumFill(in: zv.Bytes(60), src: [4]u8, dst: [4]u8, src6: [16]u8, dst6: [16]u8) bool {
+        var buf: [60]u8 = undefined;
+        const n = load(60, in, &buf);
+        if (n < tcp.HEADER_LEN) return true;
+        const seg = buf[0..n];
+        putU16(seg[16..18], 0);
+        putU16(seg[16..18], tcp.computeChecksum(src, dst, seg));
+        if (!tcp.verifyChecksum(src, dst, seg)) return false;
+        putU16(seg[16..18], 0);
+        const sum6 = checksum.finish(checksum.calculate(seg, checksum.pseudoHeaderChecksumV6(src6, dst6, 6, @intCast(n))));
+        putU16(seg[16..18], sum6);
+        return tcp.verifyChecksumV6(src6, dst6, seg);
+    }
+
+    pub fn udpChecksumFill(in: zv.Bytes(60), src: [4]u8, dst: [4]u8, src6: [16]u8, dst6: [16]u8) bool {
+        var buf: [60]u8 = undefined;
+        const n = load(60, in, &buf);
+        if (n < udp.HEADER_LEN) return true;
+        const dgram = buf[0..n];
+        putU16(dgram[4..6], @intCast(n));
+        udp.fillChecksum(dgram, src, dst);
+        if (!udp.verifyChecksum(dgram, src, dst)) return false;
+        udp.fillChecksumV6(dgram, src6, dst6);
+        return udp.verifyChecksumV6(dgram, src6, dst6);
+    }
+
+    pub fn icmpRoundTrip(in: zv.Bytes(48)) bool {
+        var buf: [48]u8 = undefined;
+        const n = @max(load(48, in, &buf), icmp.HEADER_LEN);
+        putU16(buf[2..4], 0);
+        putU16(buf[2..4], checksum.internetChecksum(buf[0..n]));
+        const data = buf[0..n];
+        _ = tally("icmp*", icmp.parse(data));
+        const repr = icmp.parse(data) catch return false;
+        var out: [48]u8 = undefined;
+        const m = switch (repr) {
+            .echo => |e| icmp.emitEcho(e, data[icmp.HEADER_LEN..], &out),
+            .other => |o| icmp.emitOther(o, data[icmp.HEADER_LEN..], &out),
+        } catch return false;
+        const again = icmp.parse(out[0..m]) catch return false;
+        return switch (repr) {
+            .echo => |e| again == .echo and sameEcho(e, again.echo),
+            .other => |o| again == .other and o.icmp_type == again.other.icmp_type and o.code == again.other.code and o.data == again.other.data,
+        } and m == n;
+    }
+
+    pub fn igmpRoundTrip(in: zv.Bytes(16), type_sel: u8, multicast: bool) bool {
+        var buf: [16]u8 = undefined;
+        const n = @max(load(16, in, &buf), igmp.HEADER_LEN);
+        buf[0] = ([_]u8{ 0x11, 0x12, 0x16, 0x17 })[type_sel % 4];
+        if (multicast) buf[4] = 224 | (buf[4] & 0x0f);
+        putU16(buf[2..4], 0);
+        putU16(buf[2..4], checksum.internetChecksum(buf[0..igmp.HEADER_LEN]));
+        const data = buf[0..n];
+        _ = tally("igmp*", igmp.parse(data));
+        return roundTrip(igmp, data, keep);
+    }
+
+    pub fn ipv6Parse(in: zv.Bytes(64)) bool {
+        var buf: [64]u8 = undefined;
+        const n = @max(load(64, in, &buf), ipv6.HEADER_LEN);
+        buf[0] = 0x60 | (buf[0] & 0x0f);
+        putU16(buf[4..6], @intCast((@as(usize, buf[4]) << 8 | buf[5]) % (n - ipv6.HEADER_LEN + 2)));
+        _ = tally("ipv6*", ipv6.checkLen(buf[0..n]));
+        return tally("ipv6*", ipv6.parse(buf[0..n]));
+    }
+
+    pub fn icmpv6RoundTrip(in: zv.Bytes(96), type_sel: u8, src: [16]u8, dst: [16]u8) bool {
+        const types = [_]u8{ 1, 2, 3, 4, 128, 129, 130, 131, 133, 134, 135, 136, 137, 143, 155 };
+        var buf: [96]u8 = undefined;
+        const n = @max(load(96, in, &buf), icmpv6.HEADER_LEN);
+        buf[0] = types[type_sel % types.len];
+        if (buf[0] >= 1 and buf[0] <= 4 and n >= 8 + ipv6.HEADER_LEN) buf[8] = 0x60 | (buf[8] & 0x0f);
+        putU16(buf[2..4], 0);
+        const pseudo = checksum.pseudoHeaderChecksumV6(src, dst, @backingInt(ipv6.Protocol.icmpv6), @intCast(n));
+        putU16(buf[2..4], checksum.finish(checksum.calculate(buf[0..n], pseudo)));
+        const data = buf[0..n];
+        _ = tally("icmpv6*", icmpv6.parse(data, src, dst));
+        const repr = icmpv6.parse(data, src, dst) catch return true;
+        var out: [512]u8 = undefined;
+        const m = icmpv6.emit(repr, src, dst, &out) catch return false;
+        const again = icmpv6.parse(out[0..m], src, dst) catch return false;
+        return deepEq(repr, again);
+    }
+
+    pub fn mldRoundTrip(in: zv.Bytes(64), type_sel: u8) bool {
+        var buf: [64]u8 = undefined;
+        const n = load(64, in, &buf);
+        const msg_type: u8 = if (type_sel & 1 == 0) 0x82 else 0x8F;
+        const count_at: usize = if (msg_type == 0x82) 22 else 2;
+        buf[count_at] = 0;
+        buf[count_at + 1] %= 3;
+        _ = tally("mld*", mld.parse(msg_type, buf[0..n]));
+        const repr = mld.parse(msg_type, buf[0..n]) catch return true;
+        // emit writes only the fixed part; sources and records follow separately
+        switch (repr) {
+            .query => |q| if (q.num_srcs != 0) return true,
+            .report => |r| if (r.nr_mcast_addr_rcrds != 0) return true,
+        }
+        var out: [64]u8 = undefined;
+        const m = mld.emit(repr, &out) catch return false;
+        const again = mld.parse(msg_type, out[0..m]) catch return false;
+        return deepEq(repr, again);
+    }
+
+    pub fn ndiscRoundTrip(in: zv.Bytes(96), type_sel: u8) bool {
+        var buf: [96]u8 = undefined;
+        const n = load(96, in, &buf);
+        const msg_type: u8 = 133 + type_sel % 5;
+        _ = tally("ndisc*", ndisc.parse(msg_type, buf[0..n]));
+        const repr = ndisc.parse(msg_type, buf[0..n]) catch return true;
+        var out: [256]u8 = undefined;
+        const m = ndisc.emit(repr, &out) catch return false;
+        const again = ndisc.parse(msg_type, out[0..m]) catch return false;
+        return deepEq(repr, again);
+    }
+
+    pub fn rplRoundTrip(in: zv.Bytes(96), type_sel: u8) bool {
+        var buf: [96]u8 = undefined;
+        const n = load(96, in, &buf);
+        const code: u8 = type_sel % 4;
+        _ = tally("rpl*", rpl.parse(code, buf[0..n]));
+        const repr = rpl.parse(code, buf[0..n]) catch return true;
+        var out: [256]u8 = undefined;
+        const m = rpl.emit(repr, &out) catch return false;
+        const again = rpl.parse(code, out[0..m]) catch return false;
+        return deepEq(repr, again);
+    }
+
+    pub fn ieee802154RoundTrip(in: zv.Bytes(64)) bool {
+        var buf: [64]u8 = undefined;
+        const n = @max(load(64, in, &buf), 3);
+        buf[0] &= ~@as(u8, 0x08);
+        const modes = [_]u8{ 0, 2, 3 };
+        const dst = modes[(buf[1] >> 2) % 3];
+        const src = modes[(buf[1] >> 4) % 3];
+        const version: u8 = (buf[1] >> 6) % 3;
+        buf[1] = (dst << 2) | (version << 4) | (src << 6);
+        _ = tally("ieee802154*", ieee802154.parse(buf[0..n]));
+        return roundTripMin(ieee802154, buf[0..n], keep, 3);
+    }
+
+    pub fn dhcpRoundTrip(in: zv.Bytes(400), msg: u8) bool {
+        var buf: [400]u8 = undefined;
+        const n = load(400, in, &buf);
+        if (n < 241) return true;
+        buf[1] = 1;
+        buf[2] = 6;
+        buf[236..240].* = .{ 0x63, 0x82, 0x53, 0x63 };
+        const mt: u8 = 1 + msg % 8;
+        buf[0] = if (mt == 2 or mt == 5 or mt == 6) 2 else 1;
+        // splice in a message-type option so options after it are reached
+        buf[240..243].* = .{ 53, 1, mt };
+        _ = tally("dhcp*", dhcp.parse(buf[0..n]));
+        var first = dhcp.parse(buf[0..n]) catch return true;
+        var out: [512]u8 = undefined;
+        const m = dhcp.emit(first, &out) catch return false;
+        var second = dhcp.parse(out[0..m]) catch return false;
+        // smoltcp parses T1/T2 but its emit does not write them either
+        first.renew_duration = null;
+        first.rebind_duration = null;
+        second.renew_duration = null;
+        second.rebind_duration = null;
+        return dhcpEql(first, second);
+    }
+};
+
+fn tcpNormalize(r: *tcp.Repr) void {
+    r.data_offset = 0;
+    if (r.sack_permitted) r.sack_ranges = .{ null, null, null };
+    var packed_ranges: [3]?tcp.SackRange = .{ null, null, null };
+    var k: usize = 0;
+    for (r.sack_ranges) |range| if (range != null) {
+        packed_ranges[k] = range;
+        k += 1;
+    };
+    r.sack_ranges = packed_ranges;
+}
+
+fn sameEcho(a: icmp.EchoRepr, b: icmp.EchoRepr) bool {
+    return a.icmp_type == b.icmp_type and a.code == b.code and a.identifier == b.identifier and a.sequence == b.sequence;
+}
+
+fn dhcpEql(a: dhcp.Repr, b: dhcp.Repr) bool {
+    if ((a.dns_servers == null) != (b.dns_servers == null)) return false;
+    if (a.dns_servers) |s| if (!s.eql(&b.dns_servers.?)) return false;
+    var x = a;
+    var y = b;
+    x.dns_servers = null;
+    y.dns_servers = null;
+    return deepEq(x, y);
+}
+
+test "laws: structure-aware" {
+    try zv.checkLaws(structured, .{ .iterations = iterations, .seed = 5 });
+}
+
+test "laws: reach report" {
+    std.debug.print("\nlaw reach (parser result counts)\n", .{});
+    for (probes[0..probe_count]) |p| {
+        var total: usize = p.ok;
+        for (p.err_counts[0..p.err_kinds]) |c| total += c;
+        const name = if (std.mem.indexOfScalar(u8, p.name, '!')) |i| p.name[i + 1 ..] else p.name;
+        std.debug.print("  {s: <46} ok {d: >7} of {d: >7}", .{ name[0..@min(name.len, 46)], p.ok, total });
+        for (p.err_names[0..p.err_kinds], p.err_counts[0..p.err_kinds]) |n, c| std.debug.print("  {s}={d}", .{ n, c });
+        std.debug.print("\n", .{});
+        if (std.mem.endsWith(u8, p.name, "*")) try std.testing.expect(p.ok > 0);
+    }
 }
