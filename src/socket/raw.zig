@@ -213,7 +213,7 @@ fn boundSocket() TestSocket {
 // [smoltcp:socket/raw.rs:test_send_truncated]
 test "raw send truncation" {
     var s = boundSocket();
-    const big: [65]u8 = .{0xAA} ** 65;
+    const big: [65]u8 = @splat(0xAA);
     try testing.expectError(error.BufferFull, s.sendSlice(&big, REMOTE_ADDR));
 }
 
@@ -299,7 +299,7 @@ test "raw setHopLimit validation" {
 
 test "raw process truncates oversized payload" {
     var s = boundSocket();
-    const big: [128]u8 = .{0xBB} ** 128;
+    const big: [128]u8 = @splat(0xBB);
     s.process(REMOTE_ADDR, .udp, &big);
     const peek_result = try s.peek();
     try testing.expectEqual(@as(usize, 64), peek_result.payload.len);

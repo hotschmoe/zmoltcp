@@ -431,7 +431,7 @@ const DNS_SERVER_6_1 = [16]u8{ 0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0
 
 fn createSocket() struct { socket: DnsSock, slots: *[4]DnsSock.QuerySlot, buf: *[512]u8 } {
     const S = struct {
-        var slots: [4]DnsSock.QuerySlot = [_]DnsSock.QuerySlot{.{}} ** 4;
+        var slots: [4]DnsSock.QuerySlot = @splat(.{});
         var buf: [512]u8 = undefined;
     };
     @memset(std.mem.asBytes(&S.slots), 0);
@@ -445,7 +445,7 @@ fn createSocket() struct { socket: DnsSock, slots: *[4]DnsSock.QuerySlot, buf: *
 
 fn createSocket6() struct { socket: DnsSock6, slots: *[4]DnsSock6.QuerySlot, buf: *[512]u8 } {
     const S = struct {
-        var slots: [4]DnsSock6.QuerySlot = [_]DnsSock6.QuerySlot{.{}} ** 4;
+        var slots: [4]DnsSock6.QuerySlot = @splat(.{});
         var buf: [512]u8 = undefined;
     };
     @memset(std.mem.asBytes(&S.slots), 0);
@@ -486,7 +486,7 @@ fn buildResponse(txid: u16, rcode: wire.Rcode, question_name: []const u8, questi
     buf[0] = @truncate(txid >> 8);
     buf[1] = @truncate(txid);
     const flags_val = (wire.Flags.RESPONSE | wire.Flags.RECURSION_DESIRED | wire.Flags.RECURSION_AVAILABLE) |
-        @as(u16, @intFromEnum(rcode));
+        @as(u16, @backingInt(rcode));
     buf[2] = @truncate(flags_val >> 8);
     buf[3] = @truncate(flags_val);
     buf[4] = 0;
@@ -497,7 +497,7 @@ fn buildResponse(txid: u16, rcode: wire.Rcode, question_name: []const u8, questi
     var pos: usize = 12;
     @memcpy(buf[pos..][0..question_name.len], question_name);
     pos += question_name.len;
-    const qt = @intFromEnum(question_type);
+    const qt = @backingInt(question_type);
     buf[pos] = @truncate(qt >> 8);
     buf[pos + 1] = @truncate(qt);
     buf[pos + 2] = 0;
@@ -545,7 +545,7 @@ fn buildAaaaResponse(txid: u16, question_name: []const u8, answers: []const [16]
     var pos: usize = 12;
     @memcpy(buf[pos..][0..question_name.len], question_name);
     pos += question_name.len;
-    const qt = @intFromEnum(wire.Type.aaaa);
+    const qt = @backingInt(wire.Type.aaaa);
     buf[pos] = @truncate(qt >> 8);
     buf[pos + 1] = @truncate(qt);
     buf[pos + 2] = 0;
@@ -664,7 +664,8 @@ test "start query rejects empty name" {
 test "start query rejects too-long label" {
     var ctx = createSocket();
     var s = &ctx.socket;
-    const long_label = "a" ** 64 ++ ".com";
+    const label: [64]u8 = @splat('a');
+    const long_label = label ++ ".com";
     try testing.expectError(error.InvalidName, s.startQuery(long_label, .a));
 }
 

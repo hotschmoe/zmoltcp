@@ -276,7 +276,7 @@ const LOCAL_ADDR_V6: ipv6.Address = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 const REMOTE_ADDR_V6: ipv6.Address = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 };
 const ECHO_IDENT: u16 = 0x1234;
 const ECHO_SEQ: u16 = 0x5678;
-const ECHO_DATA = [_]u8{0xff} ** 16;
+const ECHO_DATA: [16]u8 = @splat(0xff);
 const EMBEDDED_UDP_ERROR_PAYLOAD = [_]u8{
     // IPv4 header (20 bytes): version=4, IHL=5, protocol=UDP(17)
     0x45, 0x00, 0x00, 0x1C,
@@ -295,16 +295,18 @@ const EMBEDDED_UDP_ERROR_PAYLOAD_V6 = [_]u8{
     0x00, 0x00, 0x00, 0x00,
     // IPv6 header: payload_len=8, next_header=UDP(17), hop_limit=64
     0x60, 0x00, 0x00, 0x00,
-    0x00, 0x08,
-    0x11,
-    0x40,
-    0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-    0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+    0x00, 0x08, 0x11, 0x40,
+    0xfe, 0x80, 0,    0,
+    0,    0,    0,    0,
+    0,    0,    0,    0,
+    0,    0,    0,    1,
+    0xfe, 0x80, 0,    0,
+    0,    0,    0,    0,
+    0,    0,    0,    0,
+    0,    0,    0,    2,
     // UDP header
-    0x00, 0x35,
-    0x23, 0x82,
-    0x00, 0x08,
-    0x00, 0x00,
+    0x00, 0x35, 0x23, 0x82,
+    0x00, 0x08, 0x00, 0x00,
 };
 
 fn makeSocket(
@@ -314,15 +316,15 @@ fn makeSocket(
     comptime tx_payload_n: usize,
 ) TestSocket {
     const S = struct {
-        var rx_meta: [rx_meta_n]TestSocket.PacketMeta = .{TestSocket.PacketMeta{}} ** rx_meta_n;
-        var rx_payload: [rx_payload_n]u8 = .{0} ** rx_payload_n;
-        var tx_meta: [tx_meta_n]TestSocket.PacketMeta = .{TestSocket.PacketMeta{}} ** tx_meta_n;
-        var tx_payload: [tx_payload_n]u8 = .{0} ** tx_payload_n;
+        var rx_meta: [rx_meta_n]TestSocket.PacketMeta = @splat(.{});
+        var rx_payload: [rx_payload_n]u8 = @splat(0);
+        var tx_meta: [tx_meta_n]TestSocket.PacketMeta = @splat(.{});
+        var tx_payload: [tx_payload_n]u8 = @splat(0);
     };
-    S.rx_meta = .{TestSocket.PacketMeta{}} ** rx_meta_n;
-    S.rx_payload = .{0} ** rx_payload_n;
-    S.tx_meta = .{TestSocket.PacketMeta{}} ** tx_meta_n;
-    S.tx_payload = .{0} ** tx_payload_n;
+    S.rx_meta = @splat(.{});
+    S.rx_payload = @splat(0);
+    S.tx_meta = @splat(.{});
+    S.tx_payload = @splat(0);
     return TestSocket.init(&S.rx_meta, &S.rx_payload, &S.tx_meta, &S.tx_payload);
 }
 
@@ -333,15 +335,15 @@ fn makeSocketV6(
     comptime tx_payload_n: usize,
 ) TestSocketV6 {
     const S = struct {
-        var rx_meta: [rx_meta_n]TestSocketV6.PacketMeta = .{TestSocketV6.PacketMeta{}} ** rx_meta_n;
-        var rx_payload: [rx_payload_n]u8 = .{0} ** rx_payload_n;
-        var tx_meta: [tx_meta_n]TestSocketV6.PacketMeta = .{TestSocketV6.PacketMeta{}} ** tx_meta_n;
-        var tx_payload: [tx_payload_n]u8 = .{0} ** tx_payload_n;
+        var rx_meta: [rx_meta_n]TestSocketV6.PacketMeta = @splat(.{});
+        var rx_payload: [rx_payload_n]u8 = @splat(0);
+        var tx_meta: [tx_meta_n]TestSocketV6.PacketMeta = @splat(.{});
+        var tx_payload: [tx_payload_n]u8 = @splat(0);
     };
-    S.rx_meta = .{TestSocketV6.PacketMeta{}} ** rx_meta_n;
-    S.rx_payload = .{0} ** rx_payload_n;
-    S.tx_meta = .{TestSocketV6.PacketMeta{}} ** tx_meta_n;
-    S.tx_payload = .{0} ** tx_payload_n;
+    S.rx_meta = @splat(.{});
+    S.rx_payload = @splat(0);
+    S.tx_meta = @splat(.{});
+    S.tx_payload = @splat(0);
     return TestSocketV6.init(&S.rx_meta, &S.rx_payload, &S.tx_meta, &S.tx_payload);
 }
 
@@ -373,7 +375,7 @@ test "send and dispatch outbound packet" {
     try testing.expect(s.dispatch() == null);
 
     // Oversized payload returns BufferFull
-    const too_large = [_]u8{0xff} ** 65;
+    const too_large: [65]u8 = @splat(0xff);
     try testing.expectError(error.BufferFull, s.sendSlice(&too_large, REMOTE_ADDR));
     try testing.expect(s.canSend());
 
@@ -494,7 +496,7 @@ test "rejects ICMP UDP error with non-UDP embedded protocol" {
     try s.bind(.{ .udp = .{ .addr = LOCAL_ADDR, .port = LOCAL_PORT } });
 
     var embedded_payload = EMBEDDED_UDP_ERROR_PAYLOAD;
-    embedded_payload[9] = @intFromEnum(ipv4.Protocol.tcp);
+    embedded_payload[9] = @backingInt(ipv4.Protocol.tcp);
 
     const icmp_repr = icmp.Repr{ .other = .{
         .icmp_type = .dest_unreachable,
@@ -531,7 +533,7 @@ test "rejects ICMPv6 UDP error with non-UDP embedded header" {
     try s.bind(.{ .udp = .{ .addr = LOCAL_ADDR_V6, .port = LOCAL_PORT } });
 
     var embedded_payload = EMBEDDED_UDP_ERROR_PAYLOAD_V6;
-    embedded_payload[4 + 6] = @intFromEnum(ipv6.Protocol.tcp);
+    embedded_payload[4 + 6] = @backingInt(ipv6.Protocol.tcp);
 
     const inner_header = ipv6.Repr{
         .src_addr = LOCAL_ADDR_V6,

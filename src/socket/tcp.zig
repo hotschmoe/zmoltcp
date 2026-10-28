@@ -1878,8 +1878,8 @@ fn socketNew() TestSocket {
 
 fn socketWithBuffers(comptime tx_len: usize, comptime rx_len: usize) TestSocket {
     const S = struct {
-        var rx_buf: [rx_len]u8 = .{0} ** rx_len;
-        var tx_buf: [tx_len]u8 = .{0} ** tx_len;
+        var rx_buf: [rx_len]u8 = @splat(0);
+        var tx_buf: [tx_len]u8 = @splat(0);
     };
     @memset(&S.rx_buf, 0);
     @memset(&S.tx_buf, 0);
@@ -6695,8 +6695,8 @@ test "established sliding window recv with scaling" {
     s.remote_win_shift = 2;
 
     // Send 1400 bytes of data.
-    const segment = "abcdefghijklmn" ** 100;
-    comptime std.debug.assert(segment.len == 1400);
+    const pattern: [100][14]u8 = @splat("abcdefghijklmn".*);
+    const segment: *const [1400]u8 = @ptrCast(&pattern);
 
     _ = sendPacketAt0(&s, TcpRepr{
         .src_port = SEND_TEMPL.src_port,
@@ -6720,13 +6720,14 @@ test "recv data beyond advertised receive window" {
     var s = socketEstablished();
 
     // Fill 33 bytes into the 64-byte rx buffer.
+    const fill33: [33]u8 = @splat(0);
     _ = sendPacketAt0(&s, TcpRepr{
         .src_port = SEND_TEMPL.src_port,
         .dst_port = SEND_TEMPL.dst_port,
         .seq_number = REMOTE_SEQ.add(1),
         .ack_number = LOCAL_SEQ.add(1),
         .window_len = SEND_TEMPL.window_len,
-        .payload = &([_]u8{0} ** 33),
+        .payload = &fill33,
     });
 
     // Dispatch ACK: acknowledges 33 bytes, advertises window=31.
@@ -6742,13 +6743,14 @@ test "recv data beyond advertised receive window" {
 
     // Remote sends 32 bytes at the right edge. Only 31 fit in the
     // previously advertised window; the 32nd byte is silently dropped.
+    const fill32: [32]u8 = @splat(0);
     _ = sendPacketAt0(&s, TcpRepr{
         .src_port = SEND_TEMPL.src_port,
         .dst_port = SEND_TEMPL.dst_port,
         .seq_number = REMOTE_SEQ.add(1).add(33),
         .ack_number = LOCAL_SEQ.add(1),
         .window_len = SEND_TEMPL.window_len,
-        .payload = &([_]u8{0} ** 32),
+        .payload = &fill32,
     });
 
     // Dispatch ACK: only 31 bytes accepted, window shrinks to 1.
@@ -7000,7 +7002,8 @@ test "established rfc2018 cases" {
     s.remote_has_sack = true;
 
     // Send 10 in-order segments of 500 bytes to advance ACK to REMOTE_SEQ+1+5000.
-    const segment = "abcdefghij" ** 50; // 500 bytes
+    const pattern: [50][10]u8 = @splat("abcdefghij".*);
+    const segment: *const [500]u8 = @ptrCast(&pattern);
     var offset: usize = 0;
     while (offset < 5000) : (offset += 500) {
         _ = sendPacketAt0(&s, .{
