@@ -1,6 +1,6 @@
 .{
     .name = .zmoltcp,
-    .version = "0.2.0",
+    .version = "0.3.0",
     .dependencies = .{
         .zirakzigil = .{
             .url = "git+https://github.com/hotschmoe/zirakzigil#7e878aa552a55ecef47d52c366bea868b0684ed7",
