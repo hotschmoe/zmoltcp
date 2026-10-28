@@ -122,7 +122,8 @@ test "parse UDP datagram" {
         0x00, 0x1C, // length = 28
         0xAB, 0xCD, // checksum
         // payload follows...
-        0xDE, 0xAD, 0xBE, 0xEF,
+        0xDE, 0xAD,
+        0xBE, 0xEF,
     };
     const repr = try parse(&data);
     try testing.expectEqual(@as(u16, 53), repr.src_port);
