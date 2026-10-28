@@ -23,6 +23,7 @@ const RETRANSMIT_TIMEOUT = Duration.fromSecs(10);
 
 pub const QueryHandle = struct {
     index: usize,
+    generation: u32,
 };
 
 pub const StartQueryError = error{
@@ -34,6 +35,7 @@ pub const StartQueryError = error{
 pub const GetQueryResultError = error{
     Pending,
     Failed,
+    StaleHandle,
 };
 
 pub fn Socket(comptime Ip: type) type {
@@ -88,6 +90,7 @@ pub fn Socket(comptime Ip: type) type {
 
         pub const QuerySlot = struct {
             state: ?QueryState = null,
+            generation: u32 = 0,
         };
 
         pub const DispatchResult = struct {
@@ -139,7 +142,7 @@ pub fn Socket(comptime Ip: type) type {
         fn findFreeSlot(self: *Self) ?QueryHandle {
             for (self.queries, 0..) |*q, i| {
                 if (q.state == null) {
-                    return .{ .index = i };
+                    return .{ .index = i, .generation = q.generation +% 1 };
                 }
             }
             return null;
@@ -214,12 +217,13 @@ pub fn Socket(comptime Ip: type) type {
             @memcpy(pq.name[0..raw_name.len], raw_name);
 
             self.queries[handle.index].state = .{ .pending = pq };
+            self.queries[handle.index].generation = handle.generation;
             return handle;
         }
 
         pub fn getQueryResult(self: *Self, handle: QueryHandle) GetQueryResultError!Addresses {
-            const slot = &self.queries[handle.index];
-            const state = slot.state orelse unreachable;
+            const slot = self.liveSlot(handle) orelse return error.StaleHandle;
+            const state = slot.state.?;
             switch (state) {
                 .pending => return error.Pending,
                 .completed => |addrs| {
@@ -234,7 +238,14 @@ pub fn Socket(comptime Ip: type) type {
         }
 
         pub fn cancelQuery(self: *Self, handle: QueryHandle) void {
-            self.queries[handle.index].state = null;
+            if (self.liveSlot(handle)) |slot| slot.state = null;
+        }
+
+        fn liveSlot(self: *Self, handle: QueryHandle) ?*QuerySlot {
+            if (handle.index >= self.queries.len) return null;
+            const slot = &self.queries[handle.index];
+            if (slot.generation != handle.generation or slot.state == null) return null;
+            return slot;
         }
 
         pub fn process(self: *Self, src_ip: Ip.Address, dst_port: u16, pkt_data: []const u8) void {
@@ -985,4 +996,26 @@ test "mDNS: no server rotation on timeout" {
     const r2 = s.dispatch(Instant.fromSecs(11), buf) orelse return error.TestExpectedEqual;
     try testing.expectEqualSlices(u8, &[4]u8{ 224, 0, 0, 251 }, &r2.dst_ip);
     try testing.expectEqual(@as(u16, 5353), r2.dst_port);
+}
+
+// [audit:8]
+test "stale query handle is rejected instead of reaching unreachable" {
+    var ctx = createSocket();
+    var s = &ctx.socket;
+    const handle = try s.startQuery("google.com", .a);
+    s.cancelQuery(handle);
+    try testing.expectError(error.StaleHandle, s.getQueryResult(handle));
+}
+
+// [audit:8]
+test "reused slot does not honor the old handle" {
+    var ctx = createSocket();
+    var s = &ctx.socket;
+    const first = try s.startQuery("google.com", .a);
+    s.cancelQuery(first);
+    const second = try s.startQuery("example.org", .a);
+    try testing.expectEqual(first.index, second.index);
+    s.cancelQuery(first);
+    try testing.expectError(error.Pending, s.getQueryResult(second));
+    try testing.expectError(error.StaleHandle, s.getQueryResult(first));
 }
