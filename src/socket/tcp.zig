@@ -1767,7 +1767,7 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
             const next_ack = self.remote_seq_no.add(self.rx_buffer.len());
             const last_win = @as(usize, self.remote_last_win) << @intCast(self.remote_win_shift);
             const last_win_edge = last_ack.add(last_win);
-            const adjusted = last_win_edge.diff(next_ack);
+            const adjusted: usize = if (last_win_edge.lessThan(next_ack)) 0 else last_win_edge.diff(next_ack);
             const shifted: usize = adjusted >> @intCast(self.remote_win_shift);
             return if (shifted > std.math.maxInt(u16)) std.math.maxInt(u16) else @intCast(shifted);
         }
@@ -7472,4 +7472,20 @@ test "SYN-ACK window is not scaled when bounding in-window data" {
         .payload = &big,
     });
     try testing.expect(s.rx_buffer.len() <= s.rx_buffer.capacity());
+}
+
+// [audit:3] Simultaneous open before our SYN is dispatched leaves the
+// advertised window edge before the next ACK; pollAt must not underflow.
+test "pollAt after simultaneous open does not underflow" {
+    var s = socketNew();
+    try s.connect(REMOTE_ADDR, REMOTE_PORT, LOCAL_ADDR, LOCAL_PORT);
+    _ = sendPacketAt0(&s, .{
+        .src_port = REMOTE_PORT,
+        .dst_port = LOCAL_PORT,
+        .control = .syn,
+        .seq_number = REMOTE_SEQ,
+        .window_len = 100,
+    });
+    try testing.expectEqual(State.syn_received, s.state);
+    _ = s.pollAt();
 }
