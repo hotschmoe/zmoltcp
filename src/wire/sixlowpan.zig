@@ -68,7 +68,7 @@ pub fn resolveSourceAddress(
     src_ctx_id: ?u4,
     contexts: []const AddressContext,
 ) error{ Truncated, Malformed }![16]u8 {
-    var addr = [_]u8{0} ** 16;
+    var addr: [16]u8 = @splat(0);
 
     if (sac == 0) {
         switch (sam) {
@@ -138,7 +138,7 @@ pub fn resolveDestAddress(
     dst_ctx_id: ?u4,
     contexts: []const AddressContext,
 ) error{ Truncated, Malformed }![16]u8 {
-    var addr = [_]u8{0} ** 16;
+    var addr: [16]u8 = @splat(0);
 
     if (m == 0) {
         return resolveSourceAddress(data, offset, dac, dam, ll_addr, dst_ctx_id, contexts);

@@ -24,7 +24,7 @@ pub const Repr = struct {
 
 pub fn mldv2RouterAlert() Repr {
     var repr: Repr = .{
-        .options = .{null} ** MAX_OPTIONS,
+        .options = @splat(null),
         .count = 1,
     };
     repr.options[0] = .{ .router_alert = .multicast_listener_discovery };
@@ -33,7 +33,7 @@ pub fn mldv2RouterAlert() Repr {
 
 pub fn parse(data: []const u8) error{ Truncated, BadOption, TooManyOptions }!Repr {
     var repr: Repr = .{
-        .options = .{null} ** MAX_OPTIONS,
+        .options = @splat(null),
         .count = 0,
     };
     var pos: usize = 0;

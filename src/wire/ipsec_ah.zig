@@ -113,7 +113,7 @@ test "AH parse rejects truncated buffers" {
 }
 
 test "AH parse rejects payload length below minimum header size" {
-    var packet: [MIN_HEADER_LEN]u8 = .{0} ** MIN_HEADER_LEN;
+    var packet: [MIN_HEADER_LEN]u8 = @splat(0);
     packet[0] = @intFromEnum(ipv4.Protocol.ipsec_esp);
     packet[1] = 0;
     try testing.expectError(error.Truncated, parse(&packet));

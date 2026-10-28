@@ -287,7 +287,7 @@ test "IPv4 payload clamps Ethernet frame padding" {
     // SAMPLE_IPV4 = 20-byte header with total_length=40. Forge a 40-byte
     // IP+TCP packet by appending 20 bytes of TCP-header-shaped data, then
     // 6 bytes of Ethernet padding.
-    var frame: [46]u8 = .{0} ** 46;
+    var frame: [46]u8 = @splat(0);
     @memcpy(frame[0..20], &SAMPLE_IPV4);
     // 20 bytes of arbitrary "TCP header" content
     for (20..40) |i| frame[i] = 0xAA;
@@ -331,7 +331,7 @@ test "IPv4 deconstruct raw fields" {
 
 // [smoltcp:wire/ipv4.rs:test_construct]
 test "IPv4 construct with flags and frag offset" {
-    var buf: [30]u8 = [_]u8{0xa5} ** 30;
+    var buf: [30]u8 = @splat(0xa5);
     _ = try emit(.{
         .version = 4,
         .ihl = 5,
@@ -377,7 +377,7 @@ test "IPv4 emit repr to exact bytes" {
         0x21, 0x22, 0x23, 0x24, 0xaa, 0x00, 0x00, 0xff,
     };
     const REPR_PAYLOAD = [_]u8{ 0xaa, 0x00, 0x00, 0xff };
-    var buf: [24]u8 = [_]u8{0xa5} ** 24;
+    var buf: [24]u8 = @splat(0xa5);
     _ = try emit(.{
         .version = 4,
         .ihl = 5,

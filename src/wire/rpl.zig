@@ -311,7 +311,7 @@ pub const RplTargetOption = struct {
 
     pub fn parseOption(data: []const u8) error{Truncated}!RplTargetOption {
         if (data.len < 2) return error.Truncated;
-        var prefix: [16]u8 = .{0} ** 16;
+        var prefix: [16]u8 = @splat(0);
         const avail = @min(data.len - 2, 16);
         @memcpy(prefix[0..avail], data[2 .. 2 + avail]);
         return .{
@@ -697,7 +697,7 @@ test "truncated messages" {
 }
 
 test "DIO with grounded flag and preference" {
-    var data: [24]u8 = .{0} ** 24;
+    var data: [24]u8 = @splat(0);
     data[0] = 0x00; // instance id
     data[1] = 0x01; // version
     data[2] = 0x01;
