@@ -3,6 +3,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const ghost = b.option(bool, "ghost", "Compile zv ghost code") orelse false;
+    const zv = b.dependency("zirakzigil", .{ .ghost = ghost }).module("zv");
 
     // Expose zmoltcp as a module for downstream consumers.
     // Downstream build.zig uses: b.dependency("zmoltcp", .{}).module("zmoltcp")
@@ -10,6 +12,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "zv", .module = zv }},
     });
 
     // Unit tests -- run on host (native target by default).
@@ -19,6 +22,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .single_threaded = true,
+        .imports = &.{.{ .name = "zv", .module = zv }},
     });
     const unit_tests = b.addTest(.{
         .root_module = test_mod,
@@ -33,6 +37,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .single_threaded = false,
+        .imports = &.{.{ .name = "zv", .module = zv }},
     });
     const fuzz_tests = b.addTest(.{
         .name = "fuzz",

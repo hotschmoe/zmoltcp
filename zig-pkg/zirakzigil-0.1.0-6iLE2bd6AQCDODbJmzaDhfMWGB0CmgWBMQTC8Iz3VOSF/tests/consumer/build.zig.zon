@@ -1,0 +1,10 @@
+.{
+    .name = .consumer,
+    .version = "0.0.0",
+    .fingerprint = 0x705b3727236c539c,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .zirakzigil = .{ .path = "../.." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "tools" },
+}
