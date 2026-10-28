@@ -1186,15 +1186,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     ethernet.BROADCAST
                 else inner: {
                     const next_hop = self.iface.route(dst_addr) orelse return .neighbor_pending;
-                    break :inner switch (self.iface.neighbor_cache.lookupFull(next_hop, self.iface.now)) {
-                        .found => |mac| mac,
-                        .rate_limited => return .neighbor_pending,
-                        .not_found => {
-                            self.emitArpRequest(next_hop, device);
-                            self.iface.neighbor_cache.limitRate(self.iface.now);
-                            return .neighbor_pending;
-                        },
-                    };
+                    break :inner self.resolveV4(next_hop, device) orelse return .neighbor_pending;
                 };
             } else ethernet.Address{ 0, 0, 0, 0, 0, 0 };
 
@@ -1254,6 +1246,32 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             return .sent;
         }
 
+        /// The hardware address for a next hop, or null after soliciting it (ARP
+        /// request, rate limited by the cache's silent window) so the caller drops.
+        fn resolveV4(self: *Self, next_hop: ipv4.Address, device: *Device) ?ethernet.Address {
+            switch (self.iface.neighbor_cache.lookupFull(next_hop, self.iface.now)) {
+                .found => |mac| return mac,
+                .rate_limited => return null,
+                .not_found => {
+                    self.emitArpRequest(next_hop, device);
+                    self.iface.neighbor_cache.limitRate(self.iface.now);
+                    return null;
+                },
+            }
+        }
+
+        fn resolveV6(self: *Self, next_hop: ipv6.Address, device: *Device) ?ethernet.Address {
+            switch (self.iface.neighbor_cache_v6.lookupFull(next_hop, self.iface.now)) {
+                .found => |mac| return mac,
+                .rate_limited => return null,
+                .not_found => {
+                    self.emitNdpSolicit(next_hop, device);
+                    self.iface.neighbor_cache_v6.limitRate(self.iface.now);
+                    return null;
+                },
+            }
+        }
+
         fn emitArpRequest(self: *Self, target_ip: ipv4.Address, device: *Device) void {
             if (comptime !is_ethernet) return;
             const src_ip = self.iface.v4.getSourceAddress(target_ip) orelse
@@ -1306,15 +1324,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     multicastMacV6(dst_addr)
                 else blk: {
                     const next_hop = self.iface.routeV6(dst_addr) orelse return .neighbor_pending;
-                    break :blk switch (self.iface.neighbor_cache_v6.lookupFull(next_hop, self.iface.now)) {
-                        .found => |mac| mac,
-                        .rate_limited => return .neighbor_pending,
-                        .not_found => {
-                            self.emitNdpSolicit(next_hop, device);
-                            self.iface.neighbor_cache_v6.limitRate(self.iface.now);
-                            return .neighbor_pending;
-                        },
-                    };
+                    break :blk self.resolveV6(next_hop, device) orelse return .neighbor_pending;
                 };
 
                 pos += ethernet.emit(.{
@@ -1830,14 +1840,14 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     device.transmit(frame);
                 },
                 .ipv4 => |resp| {
-                    const frame = self.serializeIpv4Response(resp, &buf) orelse return;
+                    const frame = self.serializeIpv4Response(resp, &buf, device) orelse return;
                     device.transmit(frame);
                 },
                 .ipv6 => |resp| {
                     if (comptime is_ieee802154) {
                         self.emit6LoWPANResponse(resp, device);
                     } else {
-                        const frame = self.serializeIpv6Response(resp, &buf) orelse return;
+                        const frame = self.serializeIpv6Response(resp, &buf, device) orelse return;
                         device.transmit(frame);
                     }
                 },
@@ -1855,7 +1865,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             return buf[0 .. eth_len + arp_len];
         }
 
-        fn serializeIpv4Response(self: *const Self, resp: iface_mod.Ipv4Response, buf: []u8) ?[]const u8 {
+        fn serializeIpv4Response(self: *Self, resp: iface_mod.Ipv4Response, buf: []u8, device: *Device) ?[]const u8 {
             var payload_buf: [IP_PAYLOAD_MAX]u8 = undefined;
             const payload_len: usize = switch (resp.payload) {
                 .icmp_echo => |echo| icmp.emitEcho(echo.echo, echo.data, &payload_buf) catch return null,
@@ -1896,7 +1906,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     ethernet.BROADCAST
                 else blk: {
                     const next_hop = self.iface.route(resp.ip.dst_addr) orelse return null;
-                    break :blk self.iface.neighbor_cache.lookup(next_hop, self.iface.now) orelse return null;
+                    break :blk self.resolveV4(next_hop, device) orelse return null;
                 };
 
                 pos += ethernet.emit(.{
@@ -1911,7 +1921,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
             return buf[0 .. pos + ip_len + payload_len];
         }
 
-        fn serializeIpv6Response(self: *const Self, resp: iface_mod.Ipv6Response, buf: []u8) ?[]const u8 {
+        fn serializeIpv6Response(self: *Self, resp: iface_mod.Ipv6Response, buf: []u8, device: *Device) ?[]const u8 {
             var payload_buf: [IPV6_PAYLOAD_MAX]u8 = undefined;
             const payload_len = serializeIpv6Payload(resp, &payload_buf) orelse return null;
 
@@ -1921,7 +1931,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     multicastMacV6(resp.ip.dst_addr)
                 else blk: {
                     const next_hop = self.iface.routeV6(resp.ip.dst_addr) orelse return null;
-                    break :blk self.iface.neighbor_cache_v6.lookup(next_hop, self.iface.now) orelse return null;
+                    break :blk self.resolveV6(next_hop, device) orelse return null;
                 };
 
                 pos += ethernet.emit(.{
@@ -7087,4 +7097,43 @@ test "raw socket datagrams above the MTU are fragmented and oversize ones are re
         while (device.dequeueTx()) |_| frames += 1;
     }
     try testing.expect(frames >= 2);
+}
+
+fn enqueueEchoRequest(device: *TestDevice, id: u16) void {
+    var icmp_buf: [icmp.HEADER_LEN]u8 = undefined;
+    _ = icmp.emitEcho(.{ .icmp_type = .echo_request, .code = 0, .checksum = 0, .identifier = id, .sequence = 1 }, &.{}, &icmp_buf) catch unreachable;
+    var frame_buf: [256]u8 = undefined;
+    device.enqueueRx(buildIpv4Frame(&frame_buf, .icmp, &icmp_buf));
+}
+
+test "reply to an unresolved peer solicits it, then is delivered once resolved" {
+    var device = TestDevice.init();
+    var stack = testStack();
+
+    const later = Instant.ZERO;
+    enqueueEchoRequest(&device, 1);
+    _ = stack.poll(later, &device);
+
+    var solicited = false;
+    while (device.dequeueTx()) |tx| {
+        const eth = try ethernet.parse(tx);
+        try testing.expectEqual(ethernet.EtherType.arp, eth.ethertype);
+        const request = try arp.parse(try ethernet.payload(tx));
+        try testing.expectEqual(arp.Operation.request, request.operation);
+        try testing.expectEqual(REMOTE_IP, request.target_protocol_addr);
+        solicited = true;
+    }
+    try testing.expect(solicited);
+
+    var arp_buf: [128]u8 = undefined;
+    device.enqueueRx(buildArpRequest(&arp_buf));
+    _ = stack.poll(later, &device);
+    while (device.dequeueTx()) |_| {}
+
+    enqueueEchoRequest(&device, 2);
+    _ = stack.poll(later, &device);
+    const reply = device.dequeueTx() orelse return error.ExpectedReply;
+    const ip_repr = try ipv4.parse(try ethernet.payload(reply));
+    try testing.expectEqual(ipv4.Protocol.icmp, ip_repr.protocol);
+    try testing.expectEqual(REMOTE_HW, (try ethernet.parse(reply)).dst_addr);
 }
