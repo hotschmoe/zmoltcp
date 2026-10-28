@@ -991,7 +991,19 @@ const local_v4 = ipv4.Address{ 10, 0, 0, 1 };
 const peer_v4 = ipv4.Address{ 10, 0, 0, 2 };
 
 pub const tcp_state = struct {
+    /// A scaled-window listener (140000 byte ring, shift 2) takes a SYN advertising 65535 and
+    /// scale 3, then dispatches: the SYN-ACK must not provoke a window update of itself.
+    const syn_then_dispatch: [48]TcpOp = blk: {
+        var ops: [48]TcpOp = @splat(.{ .kind = 13, .a = 0, .b = 0, .c = 0 });
+        ops[0] = .{ .kind = 0, .a = 2, .b = 3, .c = 0 };
+        ops[1] = .{ .kind = 8, .a = 0, .b = 0, .c = 0 };
+        break :blk ops;
+    };
+
     pub const pinned = .{
+        .dispatchQuiesces = .{
+            .{ 7, 0, .{ .v6 = false, .ws = true, .ts = false, .sack = false }, syn_then_dispatch },
+        },
         .ringsStayInBounds = .{
             .{
                 6,
@@ -1222,7 +1234,7 @@ pub const tcp_state = struct {
 
     const Seq = tcp.SeqNumber;
 
-    const Check = enum { rings_in_bounds, window_fits_ring, fin_follows_all_data, dispatch_fits_egress };
+    const Check = enum { rings_in_bounds, window_fits_ring, fin_follows_all_data, dispatch_fits_egress, dispatch_quiesces };
 
     /// No operation sequence overflows the buffers or panics.
     pub fn ringsStayInBounds(rx_pick: RxPick, peer_isn: u32, o: TcpOpts, ops: [48]TcpOp) bool {
@@ -1242,6 +1254,12 @@ pub const tcp_state = struct {
     /// Every segment the socket dispatches serializes into the stack's scratch buffer.
     pub fn dispatchedSegmentsFitEgress(rx_pick: RxPick, peer_isn: u32, o: TcpOpts, ops: [48]TcpOp) bool {
         return pick(.dispatch_fits_egress, rx_pick, peer_isn, o, ops);
+    }
+
+    /// Dispatching repeatedly at one instant ends (a 1-byte MSS makes the run long, never endless): the
+    /// stack drains a socket with `while (dispatch)`.
+    pub fn dispatchQuiesces(rx_pick: RxPick, peer_isn: u32, o: TcpOpts, ops: [48]TcpOp) bool {
+        return pick(.dispatch_quiesces, rx_pick, peer_isn, o, ops);
     }
 
     fn pick(comptime check: Check, rx_pick: RxPick, peer_isn: u32, o: TcpOpts, ops: [48]TcpOp) bool {
@@ -1338,6 +1356,13 @@ pub const tcp_state = struct {
                     if (s.dispatch(now)) |d| {
                         last_sent_end = d.repr.seq_number.add(d.repr.segmentLen());
                         if (check == .dispatch_fits_egress and tcp.headerLen(d.repr.toWireRepr()) + d.repr.payload.len > egress_limit) return false;
+                        if (check == .dispatch_quiesces) {
+                            var again: usize = 0;
+                            while (s.dispatch(now) != null) {
+                                again += 1;
+                                if (again > 1 << 20) return false;
+                            }
+                        }
                     }
                 },
                 10 => {
@@ -1358,7 +1383,7 @@ pub const tcp_state = struct {
             switch (check) {
                 .rings_in_bounds => if (s.rx_buffer.len() > s.rx_buffer.capacity() or s.tx_buffer.len() > s.tx_buffer.capacity()) return false,
                 .window_fits_ring => if (!windowFitsRing(&s)) return false,
-                .fin_follows_all_data, .dispatch_fits_egress => {},
+                .fin_follows_all_data, .dispatch_fits_egress, .dispatch_quiesces => {},
             }
         }
         return true;
