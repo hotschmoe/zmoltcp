@@ -186,6 +186,7 @@ overflow checks), and is deliberately not part of `zig build test` or `zig build
 - `zig build interop-upstream` sends smoltcp (08bacc9 and upstream main, each in release, release with assertions,
   and dev builds) the raw segment sequences behind four zmoltcp TCP fixes and checks what it does. `-Dinterop-filter=<text>`
   narrows the scenario run to matching test names.
+
 ## Integration Demos
 
 Fifteen end-to-end demos exercise the full stack API (sockets -> Stack poll
