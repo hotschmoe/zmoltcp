@@ -5,6 +5,23 @@
 
 /// Compute the internet checksum over a byte slice.
 /// Returns the checksum in host byte order.
+const zv = @import("zv");
+
+pub const assurance = .{
+    .internetChecksum = .tested,
+    .calculate = .tested,
+    .finish = .tested,
+    .pseudoHeaderChecksumV6 = .tested,
+    .readU16 = .tested,
+    .readU32 = .tested,
+    .writeU16 = .tested,
+    .writeU32 = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
+
 pub fn internetChecksum(data: []const u8) u16 {
     return finish(calculate(data, 0));
 }

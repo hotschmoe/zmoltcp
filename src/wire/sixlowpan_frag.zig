@@ -4,6 +4,18 @@
 
 const checksum = @import("checksum.zig");
 const ipv6 = @import("ipv6.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .parse = .tested,
+    .emit = .tested,
+    .bufferLen = .tested,
+    .payloadSlice = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 const readU16 = checksum.readU16;
 const writeU16 = checksum.writeU16;
 

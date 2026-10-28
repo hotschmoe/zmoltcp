@@ -9,6 +9,17 @@
 // Reference: smoltcp src/phy/tracer.rs, src/phy/fault_injector.rs
 
 const iface_mod = @import("iface.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .Tracer = zv.governed(Tracer(@import("stack.zig").LoopbackDevice(4))),
+    .FaultInjector = zv.governed(FaultInjector(@import("stack.zig").LoopbackDevice(4))),
+    .PcapWriter = zv.governed(PcapWriter(@import("stack.zig").LoopbackDevice(4))),
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 const MAX_FRAME_LEN = 1514;
 
@@ -26,6 +37,16 @@ fn hitPercent(r: u32, comptime shift: u5, threshold: u8) bool {
 /// Ethernet frame bytes.
 pub fn Tracer(comptime Device: type) type {
     return struct {
+        pub const assurance = .{
+            .init = .tested,
+            .receive = .tested,
+            .transmit = .tested,
+            .capabilities = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         pub const medium: iface_mod.Medium = if (@hasDecl(Device, "medium")) Device.medium else .ethernet;
@@ -61,6 +82,16 @@ pub fn Tracer(comptime Device: type) type {
 /// RNG function (returns u32) for all randomness.
 pub fn FaultInjector(comptime Device: type) type {
     return struct {
+        pub const assurance = .{
+            .init = .tested,
+            .receive = .tested,
+            .transmit = .tested,
+            .capabilities = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         pub const medium: iface_mod.Medium = if (@hasDecl(Device, "medium")) Device.medium else .ethernet;
@@ -120,6 +151,16 @@ pub const PcapMode = enum { both, rx_only, tx_only };
 /// Timestamps are zero (no clock source available at this layer).
 pub fn PcapWriter(comptime Device: type) type {
     return struct {
+        pub const assurance = .{
+            .init = .tested,
+            .receive = .tested,
+            .transmit = .tested,
+            .capabilities = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         pub const medium: iface_mod.Medium = if (@hasDecl(Device, "medium")) Device.medium else .ethernet;

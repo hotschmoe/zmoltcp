@@ -1,6 +1,12 @@
 .{
     .name = .zmoltcp,
-    .version = "0.2.0",
+    .version = "0.3.0",
+    .dependencies = .{
+        .zirakzigil = .{
+            .url = "git+https://github.com/hotschmoe/zirakzigil#7e878aa552a55ecef47d52c366bea868b0684ed7",
+            .hash = "zirakzigil-0.1.0-6iLE2XxzAgCAfwaTscqQyRqcngLKeXJ78ee3roMyHs3u",
+        },
+    },
     .fingerprint = 0x46a16d6c419cca00,
     .minimum_zig_version = "0.17.0",
     .paths = .{

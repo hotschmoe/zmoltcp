@@ -7,6 +7,17 @@
 const std = @import("std");
 const ipv4 = @import("ipv4.zig");
 const checksum_mod = @import("checksum.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .parse = .tested,
+    .emit = .tested,
+    .bufferLen = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 pub const HEADER_LEN: usize = 8;
 

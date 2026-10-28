@@ -11,6 +11,15 @@ const ipv4 = @import("../wire/ipv4.zig");
 const packet_buffer_mod = @import("../storage/packet_buffer.zig");
 const time = @import("../time.zig");
 const iface_mod = @import("../iface.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .Socket = zv.governed(Socket(ipv4)),
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 const Instant = time.Instant;
 
@@ -30,6 +39,28 @@ pub const UdpRepr = struct {
 pub fn Socket(comptime Ip: type) type {
     comptime ip_generic.assertIsIp(Ip);
     return struct {
+        pub const assurance = .{
+            .init = .tested,
+            .bind = .tested,
+            .close = .tested,
+            .isOpen = .tested,
+            .canSend = .tested,
+            .canRecv = .tested,
+            .setHopLimit = .tested,
+            .sendSlice = .tested,
+            .recvSlice = .tested,
+            .peek = .tested,
+            .peekSlice = .tested,
+            .pollAt = .tested,
+            .accepts = .tested,
+            .process = .tested,
+            .peekDstAddr = .tested,
+            .dispatch = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         pub const Endpoint = ip_generic.Endpoint(Ip);
@@ -49,7 +80,11 @@ pub fn Socket(comptime Ip: type) type {
         hop_limit: ?u8,
 
         pub const BindError = error{ Unaddressable, InvalidState };
-        pub const SendError = error{ Unaddressable, BufferFull };
+        pub const SendError = error{ Unaddressable, BufferFull, PayloadTooLarge };
+
+        /// Largest datagram the stack can emit: IPv4 fragments up to a 4096-byte
+        /// IP payload; IPv6 has no fragmenter, so it must fit one 1500-byte frame.
+        pub const MAX_PAYLOAD_LEN: usize = if (Ip.ADDRESS_LEN == 16) 1452 else 4088;
         pub const RecvError = error{ Exhausted, Truncated };
         pub const HopLimitError = error{InvalidHopLimit};
 
@@ -125,6 +160,7 @@ pub fn Socket(comptime Ip: type) type {
             if (self.local_endpoint.port == 0) return error.Unaddressable;
             if (Ip.isUnspecified(meta.endpoint.addr)) return error.Unaddressable;
             if (meta.endpoint.port == 0) return error.Unaddressable;
+            if (data.len > MAX_PAYLOAD_LEN) return error.PayloadTooLarge;
 
             const buf = self.tx.enqueue(data.len, .{
                 .endpoint = meta.endpoint,

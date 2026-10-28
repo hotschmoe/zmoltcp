@@ -2,6 +2,26 @@
 //
 // Reference: RFC 2131, smoltcp src/wire/dhcpv4.rs
 
+const zv = @import("zv");
+
+pub const assurance = .{
+    .MessageType = .{
+        .opCode = .tested,
+    },
+    .DnsServers = .{
+        .push = .tested,
+        .get = .tested,
+        .eql = .tested,
+    },
+    .parse = .tested,
+    .bufferLen = .tested,
+    .emit = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
+
 pub const SERVER_PORT: u16 = 67;
 pub const CLIENT_PORT: u16 = 68;
 pub const MAX_DNS_SERVER_COUNT = 3;

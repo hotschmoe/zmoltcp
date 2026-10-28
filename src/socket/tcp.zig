@@ -13,6 +13,63 @@ const ipv4 = @import("../wire/ipv4.zig");
 const assembler_mod = @import("../storage/assembler.zig");
 const ring_buffer_mod = @import("../storage/ring_buffer.zig");
 const iface_mod = @import("../iface.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .TcpRepr = .{
+        .segmentLen = .tested,
+        .isEmpty = .tested,
+        .fromWireBytes = .tested,
+        .fromWireRepr = .tested,
+        .toWireRepr = .tested,
+    },
+    .rstReply = .tested,
+    .NoControl = .{
+        .window = .tested,
+        .onAck = .tested,
+        .onRetransmit = .tested,
+        .onDuplicateAck = .tested,
+        .preTransmit = .tested,
+        .postTransmit = .tested,
+        .setMss = .tested,
+        .setRemoteWindow = .tested,
+    },
+    .Reno = .{
+        .window = .tested,
+        .onAck = .tested,
+        .onRetransmit = .tested,
+        .onDuplicateAck = .tested,
+        .preTransmit = .tested,
+        .postTransmit = .tested,
+        .setMss = .tested,
+        .setRemoteWindow = .tested,
+    },
+    .Cubic = .{
+        .window = .tested,
+        .onAck = .tested,
+        .onRetransmit = .tested,
+        .onDuplicateAck = .tested,
+        .preTransmit = .tested,
+        .postTransmit = .tested,
+        .setMss = .tested,
+        .setRemoteWindow = .tested,
+    },
+    .CongestionController = .{
+        .window = .tested,
+        .onAck = .tested,
+        .onRetransmit = .tested,
+        .onDuplicateAck = .tested,
+        .preTransmit = .tested,
+        .postTransmit = .tested,
+        .setMss = .tested,
+        .setRemoteWindow = .tested,
+    },
+    .Socket = zv.governed(Socket(ipv4, 4)),
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 const Instant = time.Instant;
 const Duration = time.Duration;
@@ -582,8 +639,59 @@ pub const CongestionController = union(enum) {
 pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
     comptime ip_generic.assertIsIp(Ip);
     return struct {
+        pub const assurance = .{
+            .init = .tested,
+            .initWithRandom = .tested,
+            .initWithInitialSequenceSecret = .tested,
+            .setInitialSequenceSecret = .tested,
+            .setInitialSequenceRandom = .tested,
+            .getState = .tested,
+            .isOpen = .tested,
+            .isActive = .tested,
+            .isListening = .tested,
+            .maySend = .tested,
+            .mayRecv = .tested,
+            .canSend = .tested,
+            .canRecv = .tested,
+            .localEndpoint = .tested,
+            .remoteEndpoint = .tested,
+            .setTimeout = .tested,
+            .setAckDelay = .tested,
+            .setNagleEnabled = .tested,
+            .setKeepAlive = .tested,
+            .setHopLimit = .tested,
+            .setCongestionControl = .tested,
+            .congestionControl = .tested,
+            .sendQueue = .tested,
+            .recvQueue = .tested,
+            .sendCapacity = .tested,
+            .recvCapacity = .tested,
+            .setTsvalGenerator = .tested,
+            .timestampEnabled = .tested,
+            .listen = .tested,
+            .connect = .tested,
+            .close = .tested,
+            .abort = .tested,
+            .sendSlice = .tested,
+            .recvSlice = .tested,
+            .peek = .tested,
+            .send = .tested,
+            .recv = .tested,
+            .accepts = .tested,
+            .process = .tested,
+            .dispatch = .tested,
+            .pollAt = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
         const Assembler = assembler_mod.Assembler(max_asm_segs);
+
+        /// Largest payload that fits a 1500-byte IP MTU after the IP and base TCP headers.
+        const LOCAL_MSS: u16 = if (Ip.ADDRESS_LEN == 16) BASE_MSS - 20 else BASE_MSS;
+        const TIMESTAMP_OPTION_LEN: usize = 12;
         const RingBuffer = ring_buffer_mod.RingBuffer(u8);
 
         pub const Endpoint = ip_generic.Endpoint(Ip);
@@ -832,6 +940,19 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
 
         pub fn recvCapacity(self: Self) usize {
             return self.rx_buffer.capacity();
+        }
+
+        /// The peer will not scale our windows; re-express the last advertised
+        /// window in bytes so it stays correct under a zero shift.
+        fn disableWindowScaling(self: *Self) void {
+            const bytes = @as(usize, self.remote_last_win) << @intCast(self.remote_win_shift);
+            self.remote_last_win = @intCast(@min(bytes, std.math.maxInt(u16)));
+            self.remote_win_shift = 0;
+        }
+
+        fn maxSegmentPayload(self: Self) usize {
+            const options: usize = if (self.tsval_generator != null) TIMESTAMP_OPTION_LEN else 0;
+            return @min(self.remote_mss, LOCAL_MSS - options);
         }
 
         fn scaledWindow(self: Self) u16 {
@@ -1132,7 +1253,7 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
             // Compute window and payload bounds.
             const window_start = self.remote_seq_no.add(self.rx_buffer.len());
             const window_end = if (self.remote_last_ack) |last_ack|
-                last_ack.add(@as(usize, self.remote_last_win) << @intCast(self.remote_win_shift))
+                window_start.max(last_ack.add(@as(usize, self.remote_last_win) << @intCast(self.remote_win_shift)))
             else
                 window_start;
 
@@ -1210,8 +1331,9 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
             // Quash PSH for state transition logic.
             var control = repr.control.quashPsh();
 
-            // Disregard FIN if we have a hole before the current segment.
-            if (control == .fin and window_start.lessThan(segment_start)) {
+            // Disregard FIN if we have a hole before the current segment, or if the
+            // window cut off part of its payload: the FIN follows the last byte.
+            if (control == .fin and (window_start.lessThan(segment_start) or segment_end.greaterThan(window_end))) {
                 control = .none;
             }
 
@@ -1234,7 +1356,7 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
                         self.remote_last_seq = self.local_seq_no;
                         self.remote_has_sack = repr.sack_permitted;
                         self.remote_win_scale = repr.window_scale;
-                        if (self.remote_win_scale == null) self.remote_win_shift = 0;
+                        if (self.remote_win_scale == null) self.disableWindowScaling();
                         if (repr.timestamp == null) self.tsval_generator = null;
                         self.state = .syn_received;
                         self.timer.setForIdle(timestamp, self.keep_alive);
@@ -1277,7 +1399,7 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
                         self.remote_last_ack = repr.seq_number;
                         self.remote_has_sack = repr.sack_permitted;
                         self.remote_win_scale = repr.window_scale;
-                        if (self.remote_win_scale == null) self.remote_win_shift = 0;
+                        if (self.remote_win_scale == null) self.disableWindowScaling();
                         if (repr.timestamp == null) self.tsval_generator = null;
 
                         if (repr.ack_number != null) {
@@ -1565,7 +1687,7 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
                         is_zero_window_probe = true;
                     }
 
-                    const size = @min(win_limit, @min(self.remote_mss, BASE_MSS));
+                    const size = @min(win_limit, self.maxSegmentPayload());
                     const offset = self.remote_last_seq.diff(self.local_seq_no);
                     repr.payload = self.tx_buffer.getAllocated(offset, size);
 
@@ -1592,7 +1714,7 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
 
             // Fill MSS on SYN.
             if (repr.control == .syn) {
-                repr.max_seg_size = BASE_MSS;
+                repr.max_seg_size = LOCAL_MSS;
             }
 
             // RFC 7323: generate timestamp option on outgoing segments.
@@ -1621,7 +1743,8 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
 
             self.remote_last_seq = repr.seq_number.add(repr.segmentLen());
             self.remote_last_ack = repr.ack_number;
-            self.remote_last_win = repr.window_len;
+            // A SYN carries an unscaled window; keep the field in units of the current shift.
+            self.remote_last_win = if (repr.control == .syn) repr.window_len >> @intCast(self.remote_win_shift) else repr.window_len;
 
             if (repr.segmentLen() > 0) {
                 self.rtte.onSend(timestamp, repr.seq_number.add(repr.segmentLen()));
@@ -1718,7 +1841,7 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
                 0;
 
             var can_send = max_send != 0;
-            const can_send_full = max_send >= @min(self.remote_mss, BASE_MSS);
+            const can_send_full = max_send >= self.maxSegmentPayload();
 
             const want_fin = self.state == .fin_wait_1 or self.state == .closing or self.state == .last_ack;
 
@@ -1758,7 +1881,7 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
             const next_ack = self.remote_seq_no.add(self.rx_buffer.len());
             const last_win = @as(usize, self.remote_last_win) << @intCast(self.remote_win_shift);
             const last_win_edge = last_ack.add(last_win);
-            const adjusted = last_win_edge.diff(next_ack);
+            const adjusted: usize = if (last_win_edge.lessThan(next_ack)) 0 else last_win_edge.diff(next_ack);
             const shifted: usize = adjusted >> @intCast(self.remote_win_shift);
             return if (shifted > std.math.maxInt(u16)) std.math.maxInt(u16) else @intCast(shifted);
         }

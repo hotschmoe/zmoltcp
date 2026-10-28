@@ -2,6 +2,25 @@
 //
 // Reference: RFC 8200 S4.2, smoltcp src/wire/ipv6option.rs
 
+const zv = @import("zv");
+
+pub const assurance = .{
+    .failureTypeFromOptionType = .tested,
+    .Repr = .{
+        .bufferLen = .tested,
+    },
+    .parse = .tested,
+    .emit = .tested,
+    .Iterator = .{
+        .next = .tested,
+    },
+    .iterator = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
+
 pub const Type = enum(u8) {
     pad1 = 0x00,
     padn = 0x01,

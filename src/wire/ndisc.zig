@@ -9,6 +9,17 @@ const ipv6 = @import("ipv6.zig");
 const ethernet = @import("ethernet.zig");
 const ndiscoption = @import("ndiscoption.zig");
 const checksum = @import("checksum.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .bufferLen = .tested,
+    .parse = .tested,
+    .emit = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 const readU16 = checksum.readU16;
 const readU32 = checksum.readU32;

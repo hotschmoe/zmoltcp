@@ -4,6 +4,18 @@
 // that work with any IP address type satisfying the Ip contract.
 
 const std = @import("std");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .assertIsIp = .tested,
+    .Cidr = zv.governed(Cidr(ipv4)),
+    .Endpoint = zv.governed(Endpoint(ipv4)),
+    .ListenEndpoint = zv.governed(ListenEndpoint(ipv4)),
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 pub fn assertIsIp(comptime Ip: type) void {
     const required = .{
@@ -23,6 +35,16 @@ pub fn Cidr(comptime Ip: type) type {
     const IntType = @Int(.unsigned, BITS);
 
     return struct {
+        pub const assurance = .{
+            .networkMask = .tested,
+            .networkAddr = .tested,
+            .broadcast = .tested,
+            .contains = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         address: Ip.Address,
         prefix_len: u8,
 
@@ -77,6 +99,11 @@ pub fn Cidr(comptime Ip: type) type {
 pub fn Endpoint(comptime Ip: type) type {
     comptime assertIsIp(Ip);
     return struct {
+        pub const assurance = .{};
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         addr: Ip.Address,
         port: u16,
     };
@@ -85,6 +112,11 @@ pub fn Endpoint(comptime Ip: type) type {
 pub fn ListenEndpoint(comptime Ip: type) type {
     comptime assertIsIp(Ip);
     return struct {
+        pub const assurance = .{};
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         addr: ?Ip.Address = null,
         port: u16 = 0,
     };

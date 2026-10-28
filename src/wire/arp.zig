@@ -4,6 +4,16 @@
 // Only supports Ethernet + IPv4 (hardware type 1, protocol type 0x0800).
 
 const ethernet = @import("ethernet.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .parse = .tested,
+    .emit = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 pub const HEADER_LEN = 28;
 

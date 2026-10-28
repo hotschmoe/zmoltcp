@@ -6,6 +6,20 @@
 // (after the 2-byte next_header + length prefix handled by ipv6ext_header).
 
 const ipv6option = @import("ipv6option.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .Repr = .{
+        .bufferLen = .tested,
+    },
+    .mldv2RouterAlert = .tested,
+    .parse = .tested,
+    .emit = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 pub const MAX_OPTIONS: usize = 8;
 

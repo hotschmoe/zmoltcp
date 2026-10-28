@@ -11,9 +11,44 @@
 // [smoltcp:storage/ring_buffer.rs]
 
 const std = @import("std");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .RingBuffer = zv.governed(RingBuffer(u8)),
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 pub fn RingBuffer(comptime T: type) type {
     return struct {
+        pub const assurance = .{
+            .init = .tested,
+            .clear = .tested,
+            .capacity = .tested,
+            .len = .tested,
+            .window = .tested,
+            .contiguousWindow = .tested,
+            .isEmpty = .tested,
+            .isFull = .tested,
+            .enqueueOne = .tested,
+            .dequeueOne = .tested,
+            .enqueueMany = .tested,
+            .dequeueMany = .tested,
+            .enqueueSlice = .tested,
+            .dequeueSlice = .tested,
+            .getUnallocated = .tested,
+            .writeUnallocated = .tested,
+            .enqueueUnallocated = .checked,
+            .getAllocated = .tested,
+            .readAllocated = .tested,
+            .dequeueAllocated = .checked,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         storage: []T,
@@ -137,8 +172,10 @@ pub fn RingBuffer(comptime T: type) type {
             return first.len + second.len;
         }
 
+        /// Caller contract: `count` must not exceed `window()`; the caller owns
+        /// clamping what it wrote with `writeUnallocated` to the free space.
         pub fn enqueueUnallocated(self: *Self, count: usize) void {
-            std.debug.assert(count <= self.window());
+            zv.requires(count <= self.window());
             self.length += count;
         }
 
@@ -157,8 +194,9 @@ pub fn RingBuffer(comptime T: type) type {
             return first.len + second.len;
         }
 
+        /// Caller contract: `count` must not exceed `len()`.
         pub fn dequeueAllocated(self: *Self, count: usize) void {
-            std.debug.assert(count <= self.length);
+            zv.requires(count <= self.length);
             self.length -= count;
             self.read_at = self.getIdx(count);
         }

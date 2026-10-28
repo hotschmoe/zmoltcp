@@ -5,6 +5,19 @@
 // Extension headers share a common 2-byte prefix: next_header + length.
 // The length field encodes total size as (length + 1) * 8 bytes.
 
+const zv = @import("zv");
+
+pub const assurance = .{
+    .headerLen = .tested,
+    .parse = .tested,
+    .emit = .tested,
+    .payloadSlice = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
+
 pub const MIN_HEADER_LEN: usize = 8;
 
 pub const Repr = struct {

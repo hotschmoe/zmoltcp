@@ -12,6 +12,15 @@ const ipv4 = @import("../wire/ipv4.zig");
 const ring_buffer_mod = @import("../storage/ring_buffer.zig");
 const time = @import("../time.zig");
 const iface_mod = @import("../iface.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .Socket = zv.governed(Socket(ipv4, .{ .payload_size = 64 })),
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 const Instant = time.Instant;
 
@@ -30,6 +39,27 @@ pub const Config = struct {
 pub fn Socket(comptime Ip: type, comptime config: Config) type {
     comptime ip_generic.assertIsIp(Ip);
     return struct {
+        pub const assurance = .{
+            .init = .tested,
+            .bind = .tested,
+            .close = .tested,
+            .isOpen = .tested,
+            .canSend = .tested,
+            .canRecv = .tested,
+            .setHopLimit = .tested,
+            .sendSlice = .tested,
+            .recvSlice = .tested,
+            .peek = .tested,
+            .pollAt = .tested,
+            .accepts = .tested,
+            .process = .tested,
+            .peekDstAddr = .tested,
+            .dispatch = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         pub const Packet = struct {
@@ -46,7 +76,10 @@ pub fn Socket(comptime Ip: type, comptime config: Config) type {
         hop_limit: ?u8,
 
         pub const BindError = error{InvalidProtocol};
-        pub const SendError = error{ Unbound, BufferFull };
+        pub const SendError = error{ Unbound, BufferFull, PayloadTooLarge };
+        /// Largest payload the stack can emit: IPv4 fragments up to a 4096-byte
+        /// IP payload; IPv6 has no fragmenter, so it must fit one 1500-byte frame.
+        pub const MAX_PAYLOAD_LEN: usize = if (Ip.ADDRESS_LEN == 16) 1460 else 4096;
         pub const RecvError = error{ Exhausted, Truncated };
         pub const HopLimitError = error{InvalidHopLimit};
 
@@ -112,6 +145,7 @@ pub fn Socket(comptime Ip: type, comptime config: Config) type {
 
         pub fn sendSlice(self: *Self, data: []const u8, dst_addr: Ip.Address) SendError!void {
             if (self.ip_protocol == null) return error.Unbound;
+            if (data.len > MAX_PAYLOAD_LEN) return error.PayloadTooLarge;
             if (data.len > config.payload_size) return error.BufferFull;
 
             const pkt = self.tx.enqueueOne() catch return error.BufferFull;

@@ -7,9 +7,26 @@
 // Reference: smoltcp src/storage/packet_buffer.rs
 
 const ring_buffer_mod = @import("ring_buffer.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .PacketMeta = zv.governed(PacketMeta(void)),
+    .PacketBuffer = zv.governed(PacketBuffer(void)),
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 pub fn PacketMeta(comptime H: type) type {
     return struct {
+        pub const assurance = .{
+            .isPadding = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         size: usize = 0,
         header: ?H = null,
 
@@ -25,6 +42,21 @@ pub fn PacketBuffer(comptime H: type) type {
     const PayloadRing = ring_buffer_mod.RingBuffer(u8);
 
     return struct {
+        pub const assurance = .{
+            .init = .tested,
+            .isEmpty = .tested,
+            .isFull = .tested,
+            .packetCapacity = .tested,
+            .payloadCapacity = .tested,
+            .reset = .tested,
+            .enqueue = .tested,
+            .dequeue = .tested,
+            .peek = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         metadata: MetaRing,

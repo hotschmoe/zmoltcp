@@ -3,6 +3,18 @@
 // Reference: RFC 792, smoltcp src/wire/icmpv4.rs
 
 const checksum_mod = @import("checksum.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .parse = .tested,
+    .emitEcho = .tested,
+    .emitOther = .tested,
+    .verifyChecksum = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 pub const HEADER_LEN = 8; // Type + Code + Checksum + 4 bytes data/id+seq
 

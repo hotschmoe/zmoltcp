@@ -19,6 +19,30 @@ const ieee802154 = @import("wire/ieee802154.zig");
 const sixlowpan_frag = @import("wire/sixlowpan_frag.zig");
 const time = @import("time.zig");
 const Assembler = @import("storage/assembler.zig").Assembler;
+const zv = @import("zv");
+
+pub const assurance = .{
+    .maxIpv4FragmentPayload = .tested,
+    .Fragmenter = zv.governed(Fragmenter(64, true)),
+    .FragKey = .{
+        .eql = .tested,
+    },
+    .isFragment = .tested,
+    .FragKeyV6 = .{
+        .eql = .tested,
+    },
+    .isFragmentV6 = .tested,
+    .FragKey6LoWPAN = .{
+        .eql = .tested,
+        .fromAddrs = .tested,
+    },
+    .SixlowpanFragmenter = zv.governed(SixlowpanFragmenter(64)),
+    .Reassembler = zv.governed(Reassembler(FragKey, .{ .buffer_size = 64, .max_segments = 4 })),
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 /// Fragment payloads must be multiples of 8 bytes (except the last).
 pub const IPV4_FRAGMENT_ALIGNMENT: usize = 8;
@@ -35,6 +59,17 @@ pub fn maxIpv4FragmentPayload(ip_header_len: usize, ip_mtu: usize) usize {
 /// (no Ethernet header) for Medium::Ip devices.
 pub fn Fragmenter(comptime buffer_size: usize, comptime emit_ethernet: bool) type {
     return struct {
+        pub const assurance = .{
+            .isEmpty = .tested,
+            .finished = .tested,
+            .reset = .tested,
+            .stage = .tested,
+            .emitNext = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         buffer: [buffer_size]u8 = undefined,
@@ -213,6 +248,17 @@ pub const FragKey6LoWPAN = struct {
 /// IEEE 802.15.4 frames.
 pub fn SixlowpanFragmenter(comptime buffer_size: usize) type {
     return struct {
+        pub const assurance = .{
+            .isEmpty = .tested,
+            .finished = .tested,
+            .reset = .tested,
+            .stage = .tested,
+            .emitNext = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         buffer: [buffer_size]u8 = undefined,
@@ -331,6 +377,19 @@ pub const ReassemblerConfig = struct {
 
 pub fn Reassembler(comptime Key: type, comptime config: ReassemblerConfig) type {
     return struct {
+        pub const assurance = .{
+            .isFree = .tested,
+            .accept = .tested,
+            .add = .tested,
+            .setTotalSize = .tested,
+            .assemble = .tested,
+            .removeExpired = .tested,
+            .reset = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
         const Asm = Assembler(config.max_segments);
 

@@ -6,6 +6,50 @@
 // [smoltcp:time.rs]
 
 const std = @import("std");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .Instant = .{
+        .fromMicros = .tested,
+        .fromMillis = .tested,
+        .fromSecs = .tested,
+        .totalMicros = .tested,
+        .totalMillis = .tested,
+        .secs = .tested,
+        .millis = .tested,
+        .add = .tested,
+        .sub = .tested,
+        .diff = .tested,
+        .cmp = .tested,
+        .lessThan = .tested,
+        .greaterThanOrEqual = .tested,
+        .eql = .tested,
+    },
+    .Duration = .{
+        .fromMicros = .tested,
+        .fromMillis = .tested,
+        .fromSecs = .tested,
+        .totalMicros = .tested,
+        .totalMillis = .tested,
+        .secs = .tested,
+        .millis = .tested,
+        .add = .tested,
+        .subSaturating = .tested,
+        .mul = .tested,
+        .divFloor = .tested,
+        .shl = .tested,
+        .min = .tested,
+        .max = .tested,
+        .clamp = .tested,
+        .lessThan = .tested,
+        .greaterThanOrEqual = .tested,
+        .eql = .tested,
+    },
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 pub const Instant = struct {
     micros: i64,

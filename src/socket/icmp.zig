@@ -20,6 +20,15 @@ const time = @import("../time.zig");
 const iface_mod = @import("../iface.zig");
 
 const readU16 = @import("../wire/checksum.zig").readU16;
+const zv = @import("zv");
+
+pub const assurance = .{
+    .Socket = zv.governed(Socket(ipv4)),
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 const Instant = time.Instant;
 
 // Extract the quoted UDP source port from an ICMPv4 error payload.
@@ -54,6 +63,29 @@ pub fn Socket(comptime Ip: type) type {
     comptime ip_generic.assertIsIp(Ip);
     const is_v6 = Ip.ADDRESS_LEN == 16;
     return struct {
+        pub const assurance = .{
+            .Endpoint = .{
+                .isSpecified = .tested,
+            },
+            .init = .tested,
+            .bind = .tested,
+            .close = .tested,
+            .isOpen = .tested,
+            .canSend = .tested,
+            .canRecv = .tested,
+            .setHopLimit = .tested,
+            .sendSlice = .tested,
+            .recvSlice = .tested,
+            .pollAt = .tested,
+            .accepts = .tested,
+            .process = .tested,
+            .peekDstAddr = .tested,
+            .dispatch = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         pub const IcmpRepr = if (is_v6) icmpv6_wire.Repr else icmp.Repr;
@@ -86,7 +118,10 @@ pub fn Socket(comptime Ip: type) type {
         hop_limit: ?u8,
 
         pub const BindError = error{ Unaddressable, InvalidState };
-        pub const SendError = error{ Unaddressable, BufferFull };
+        pub const SendError = error{ Unaddressable, BufferFull, PayloadTooLarge };
+        /// Largest payload the stack can emit: IPv4 fragments up to a 4096-byte
+        /// IP payload; IPv6 has no fragmenter, so it must fit one 1500-byte frame.
+        pub const MAX_PAYLOAD_LEN: usize = if (Ip.ADDRESS_LEN == 16) 1460 else 4096;
         pub const RecvError = error{ Exhausted, Truncated };
         pub const HopLimitError = error{InvalidHopLimit};
 
@@ -153,6 +188,7 @@ pub fn Socket(comptime Ip: type) type {
 
         pub fn sendSlice(self: *Self, data: []const u8, dst_addr: Ip.Address) SendError!void {
             if (Ip.isUnspecified(dst_addr)) return error.Unaddressable;
+            if (data.len > MAX_PAYLOAD_LEN) return error.PayloadTooLarge;
 
             const buf = self.tx.enqueue(data.len, .{
                 .addr = dst_addr,

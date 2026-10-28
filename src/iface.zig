@@ -8,6 +8,8 @@
 // Reference: smoltcp src/iface/interface.rs, tests/ipv4.rs
 
 const std = @import("std");
+const zv = @import("zv");
+
 const ethernet = @import("wire/ethernet.zig");
 const arp = @import("wire/arp.zig");
 const ip_generic = @import("wire/ip.zig");
@@ -25,6 +27,65 @@ const udp = @import("wire/udp.zig");
 const tcp_wire = @import("wire/tcp.zig");
 const tcp_socket = @import("socket/tcp.zig");
 const time = @import("time.zig");
+
+pub const assurance = .{
+    .ChecksumMode = .{
+        .shouldVerifyRx = .tested,
+        .shouldComputeTx = .tested,
+    },
+    .RouteFor = zv.governed(RouteFor(ipv4)),
+    .RoutesFor = zv.governed(RoutesFor(ipv4)),
+    .NeighborCache = zv.governed(NeighborCache(ipv4)),
+    .IpMetaFor = zv.governed(IpMetaFor(ipv4)),
+    .IpState = zv.governed(IpState(ipv4)),
+    .Interface = .{
+        .init = .tested,
+        .setIpAddrs = .tested,
+        .isBroadcast = .tested,
+        .ipv4Addr = .tested,
+        .route = .tested,
+        .routeV6 = .tested,
+        .hasNeighbor = .tested,
+        .joinMulticastGroup = .tested,
+        .leaveMulticastGroup = .tested,
+        .hasMulticastGroup = .tested,
+        .setIpv6Addrs = .tested,
+        .ipv6Addr = .tested,
+        .linkLocalIpv6Addr = .tested,
+        .hasSolicitedNode = .tested,
+        .joinMulticastGroupV6 = .tested,
+        .leaveMulticastGroupV6 = .tested,
+        .hasMulticastGroupV6 = .tested,
+        .hasPendingMldV6 = .tested,
+        .markMldReported = .tested,
+        .markAllGroupsForReport = .tested,
+        .markGroupForReport = .tested,
+        .enableSlaac = .tested,
+        .processRouterAdvertisement = .tested,
+        .slaacMaintenance = .tested,
+        .slaacPollAt = .tested,
+        .eui64InterfaceId = .tested,
+        .linkLocalFromMac = .tested,
+        .processEthernet = .tested,
+        .processArp = .tested,
+        .processIpv4 = .tested,
+        .processIcmp = .tested,
+        .icmpProtoUnreachable = .tested,
+        .processUdp = .tested,
+        .processTcp = .tested,
+        .processIpv6 = .tested,
+        .processIcmpv6 = .tested,
+        .processNdisc = .tested,
+        .processMldQuery = .tested,
+        .icmpv6ParamProblem = .tested,
+        .processUdpV6 = .tested,
+        .processTcpV6 = .tested,
+    },
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 // -------------------------------------------------------------------------
 // Medium
@@ -104,6 +165,13 @@ pub const MAX_ROUTE_COUNT = 4;
 
 pub fn RouteFor(comptime Ip: type) type {
     return struct {
+        pub const assurance = .{
+            .newDefaultGateway = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         cidr: ip_generic.Cidr(Ip),
         via_router: Ip.Address,
         expires_at: ?time.Instant = null,
@@ -122,6 +190,14 @@ pub const RouteV6 = RouteFor(ipv6);
 
 pub fn RoutesFor(comptime Ip: type) type {
     return struct {
+        pub const assurance = .{
+            .add = .tested,
+            .lookup = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const R = RouteFor(Ip);
         entries: [MAX_ROUTE_COUNT]?R = @splat(null),
 
@@ -159,6 +235,19 @@ pub const RoutesV6 = RoutesFor(ipv6);
 
 pub fn NeighborCache(comptime Ip: type) type {
     return struct {
+        pub const assurance = .{
+            .fill = .checked,
+            .refreshIfExisting = .tested,
+            .lookup = .tested,
+            .lookupFull = .tested,
+            .limitRate = .tested,
+            .hasNeighbor = .tested,
+            .flush = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
         pub const SILENT_TIME = time.Duration.fromMillis(1000);
 
@@ -181,7 +270,12 @@ pub fn NeighborCache(comptime Ip: type) type {
             return !Ip.isUnspecified(entry.protocol_addr);
         }
 
+        /// Record a neighbor. Callers must have validated both addresses: an
+        /// unspecified, multicast or broadcast protocol address or a group MAC
+        /// would let any on-link host blackhole traffic.
         pub fn fill(self: *Self, ip: Ip.Address, mac: ethernet.Address, now: time.Instant) void {
+            zv.requires(!Ip.isUnspecified(ip) and !Ip.isMulticast(ip) and !Ip.isBroadcast(ip));
+            zv.requires(ethernet.isUnicast(mac));
             const expires = now.add(NEIGHBOR_LIFETIME);
             const new_entry = Entry{ .protocol_addr = ip, .hardware_addr = mac, .expires_at = expires };
 
@@ -206,6 +300,19 @@ pub fn NeighborCache(comptime Ip: type) type {
                 if (entry.expires_at.lessThan(oldest.expires_at)) oldest = entry;
             }
             oldest.* = new_entry;
+        }
+
+        /// Extend the lifetime of an entry the cache already holds for exactly
+        /// this (address, hardware address) pair. Data packets are not
+        /// authenticated, so they may keep a neighbor alive but never create
+        /// or change one (smoltcp reset_expiry_if_existing).
+        pub fn refreshIfExisting(self: *Self, ip: Ip.Address, mac: ethernet.Address, now: time.Instant) void {
+            for (&self.entries) |*entry| {
+                if (isOccupied(entry.*) and std.mem.eql(u8, &entry.protocol_addr, &ip) and std.mem.eql(u8, &entry.hardware_addr, &mac)) {
+                    entry.expires_at = now.add(NEIGHBOR_LIFETIME);
+                    return;
+                }
+            }
         }
 
         pub fn lookup(self: *const Self, ip: Ip.Address, now: time.Instant) ?ethernet.Address {
@@ -246,6 +353,11 @@ pub fn NeighborCache(comptime Ip: type) type {
 
 pub fn IpMetaFor(comptime Ip: type) type {
     return struct {
+        pub const assurance = .{};
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         src_addr: Ip.Address,
         dst_addr: Ip.Address,
         protocol: Ip.Protocol,
@@ -312,6 +424,20 @@ pub fn IpState(comptime Ip: type) type {
     const Cidr = ip_generic.Cidr(Ip);
 
     return struct {
+        pub const assurance = .{
+            .addIpAddr = .tested,
+            .removeIpAddr = .tested,
+            .setAddrs = .tested,
+            .ipAddrs = .tested,
+            .hasIpAddr = .tested,
+            .getSourceAddress = .tested,
+            .inSameNetwork = .tested,
+            .routeLookup = .tested,
+        };
+        comptime {
+            zv.requireAssurance(@This(), .tested);
+        }
+
         const Self = @This();
 
         ip_addrs: [MAX_ADDR_COUNT]Cidr = undefined,
@@ -835,6 +961,11 @@ pub const Interface = struct {
         const repr = arp.parse(data) catch return null;
         if (!self.any_ip and !self.v4.hasIpAddr(repr.target_protocol_addr)) return null;
 
+        const src = repr.source_protocol_addr;
+        if (ipv4.isUnspecified(src) or ipv4.isMulticast(src) or self.isBroadcast(src)) return null;
+        if (!ethernet.isUnicast(repr.source_hardware_addr)) return null;
+        if (!self.v4.inSameNetwork(src)) return null;
+
         self.neighbor_cache.fill(repr.source_protocol_addr, repr.source_hardware_addr, self.now);
 
         if (repr.operation == .request) {
@@ -878,6 +1009,9 @@ pub const Interface = struct {
             .echo => |echo| {
                 if (echo.icmp_type != .echo_request) return null;
                 if (!self.auto_icmp_echo_reply) return null;
+                const src_unicast = !ipv4.isUnspecified(ip_repr.src_addr) and !ipv4.isMulticast(ip_repr.src_addr) and !self.isBroadcast(ip_repr.src_addr);
+                if (!src_unicast) return null;
+                if (!is_broadcast and ipv4.isMulticast(ip_repr.dst_addr)) return null;
                 const echo_data = if (payload_data.len > icmp.HEADER_LEN)
                     payload_data[icmp.HEADER_LEN..]
                 else
@@ -1036,17 +1170,17 @@ pub const Interface = struct {
     pub fn processNdisc(self: *Interface, ip_repr: ipv6.Repr, ndisc_repr: ndisc.Repr) ?Response {
         switch (ndisc_repr) {
             .neighbor_solicit => |ns| {
-                if (ns.lladdr) |lladdr| {
-                    if (!ipv6.isUnspecified(ip_repr.src_addr)) {
-                        self.neighbor_cache_v6.fill(ip_repr.src_addr, lladdr, self.now);
-                    }
-                }
                 if (!self.v6.hasIpAddr(ns.target_addr)) return null;
                 // Multicast dst must be solicited-node for target
                 if (ipv6.isMulticast(ip_repr.dst_addr) and
                     !self.hasSolicitedNode(ip_repr.dst_addr))
                 {
                     return null;
+                }
+                if (ns.lladdr) |lladdr| {
+                    if (ipv6.isUnspecified(ip_repr.src_addr) or ipv6.isMulticast(ip_repr.src_addr)) return null;
+                    if (!ethernet.isUnicast(lladdr)) return null;
+                    self.neighbor_cache_v6.fill(ip_repr.src_addr, lladdr, self.now);
                 }
 
                 return .{ .ipv6 = .{
@@ -1072,9 +1206,10 @@ pub const Interface = struct {
             },
             .neighbor_advert => |na| {
                 if (na.lladdr) |lladdr| {
-                    if (na.flags.override_ or
-                        !self.neighbor_cache_v6.hasNeighbor(na.target_addr))
-                    {
+                    const target_ok = !ipv6.isUnspecified(na.target_addr) and !ipv6.isMulticast(na.target_addr);
+                    const acceptable = na.flags.override_ or
+                        (na.flags.solicited and !self.neighbor_cache_v6.hasNeighbor(na.target_addr));
+                    if (target_ok and acceptable and ethernet.isUnicast(lladdr)) {
                         self.neighbor_cache_v6.fill(na.target_addr, lladdr, self.now);
                     }
                 }
@@ -2418,7 +2553,7 @@ test "NA fills cache (override flag)" {
 
 test "NA does not overwrite without override" {
     var iface = testV6Interface();
-    const old_mac: ethernet.Address = .{ 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 };
+    const old_mac: ethernet.Address = .{ 0x12, 0x22, 0x33, 0x44, 0x55, 0x66 };
     iface.neighbor_cache_v6.fill(REMOTE_V6_LL, old_mac, time.Instant.ZERO);
 
     const new_mac: ethernet.Address = .{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF };

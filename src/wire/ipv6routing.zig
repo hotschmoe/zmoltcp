@@ -6,6 +6,17 @@
 // generic extension header's next_header + length bytes).
 
 const ipv6 = @import("ipv6.zig");
+const zv = @import("zv");
+
+pub const assurance = .{
+    .bufferLen = .tested,
+    .parse = .tested,
+    .emit = .tested,
+};
+
+comptime {
+    zv.requireAssurance(@This(), .tested);
+}
 
 pub const RoutingType = enum(u8) {
     type2 = 2,
