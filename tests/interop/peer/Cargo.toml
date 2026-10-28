@@ -1,0 +1,36 @@
+[package]
+name = "zmoltcp-interop-peer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "smoltcp peer driven over stdin/stdout by the zmoltcp interop harness"
+
+[[bin]]
+name = "peer"
+path = "src/main.rs"
+
+[dependencies]
+# The exact smoltcp revision that ref/smoltcp is pinned to (the reference zmoltcp is modeled on).
+smoltcp = { git = "https://github.com/smoltcp-rs/smoltcp.git", rev = "08bacc9821c4381272535e153c9aa68e9f60b3aa", default-features = false, features = [
+    "std",
+    "medium-ethernet",
+    "proto-ipv4",
+    "proto-ipv6",
+    "socket-tcp",
+    "socket-tcp-reno",
+    "socket-tcp-cubic",
+    "multicast",
+] }
+
+[workspace]
+
+[profile.release]
+opt-level = 2
+debug-assertions = false
+overflow-checks = false
+
+# smoltcp's own debug_assert!s and arithmetic overflow checks, at release speed.
+[profile.release-assert]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
