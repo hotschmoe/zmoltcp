@@ -68,7 +68,7 @@ pub fn parse(data: []const u8) ParseError!Repr {
         return error.ChecksumError;
     }
 
-    const msg_type: MessageType = @enumFromInt(data[0]);
+    const msg_type: MessageType = @fromBackingInt(@intCast(data[0]));
     const max_resp_code = data[1];
     const group_addr: ipv4.Address = data[4..8].*;
 
@@ -109,17 +109,17 @@ pub fn emit(repr: Repr, buf: []u8) !usize {
 
     switch (repr) {
         .membership_query => |q| {
-            buf[0] = @intFromEnum(MessageType.membership_query);
+            buf[0] = @backingInt(MessageType.membership_query);
             buf[1] = q.max_resp_time;
         },
         .membership_report => |r| {
             buf[0] = switch (r.version) {
-                .v1 => @intFromEnum(MessageType.membership_report_v1),
-                .v2 => @intFromEnum(MessageType.membership_report_v2),
+                .v1 => @backingInt(MessageType.membership_report_v1),
+                .v2 => @backingInt(MessageType.membership_report_v2),
             };
         },
         .leave_group => {
-            buf[0] = @intFromEnum(MessageType.leave_group);
+            buf[0] = @backingInt(MessageType.leave_group);
         },
     }
 

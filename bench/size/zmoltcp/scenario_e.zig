@@ -17,7 +17,7 @@ export fn bench_scenario_e(input: [*]const u8, input_len: usize) u32 {
     var result: u32 = 0;
 
     const eth_repr = ethernet.parse(frame) catch return 0;
-    result +%= @intFromEnum(eth_repr.ethertype);
+    result +%= @backingInt(eth_repr.ethertype);
 
     const ip_payload = ethernet.payload(frame) catch return result;
     const ip_repr = ipv4.parse(ip_payload) catch return result;

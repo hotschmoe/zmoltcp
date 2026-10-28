@@ -124,7 +124,7 @@ pub fn parse(
 
     if (!verifyChecksum(data, src_addr, dst_addr)) return error.BadChecksum;
 
-    const msg_type: Message = @enumFromInt(data[0]);
+    const msg_type: Message = @fromBackingInt(@intCast(data[0]));
     const body = data[HEADER_LEN..];
 
     switch (msg_type) {
@@ -148,7 +148,7 @@ pub fn parse(
             if (body.len < 4 + ipv6.HEADER_LEN) return error.Truncated;
             const inner = ipv6.parseHeader(body[4..]) catch return error.BadVersion;
             return .{ .dst_unreachable = .{
-                .reason = @enumFromInt(data[1]),
+                .reason = @fromBackingInt(@intCast(data[1])),
                 .header = inner,
                 .data = body[4 + ipv6.HEADER_LEN ..],
             } };
@@ -166,7 +166,7 @@ pub fn parse(
             if (body.len < 4 + ipv6.HEADER_LEN) return error.Truncated;
             const inner = ipv6.parseHeader(body[4..]) catch return error.BadVersion;
             return .{ .time_exceeded = .{
-                .reason = @enumFromInt(data[1]),
+                .reason = @fromBackingInt(@intCast(data[1])),
                 .header = inner,
                 .data = body[4 + ipv6.HEADER_LEN ..],
             } };
@@ -175,17 +175,17 @@ pub fn parse(
             if (body.len < 4 + ipv6.HEADER_LEN) return error.Truncated;
             const inner = ipv6.parseHeader(body[4..]) catch return error.BadVersion;
             return .{ .param_problem = .{
-                .reason = @enumFromInt(data[1]),
+                .reason = @fromBackingInt(@intCast(data[1])),
                 .pointer = readU32(body[0..4]),
                 .header = inner,
                 .data = body[4 + ipv6.HEADER_LEN ..],
             } };
         },
         .router_solicit, .router_advert, .neighbor_solicit, .neighbor_advert, .redirect => {
-            return .{ .ndisc = try ndisc.parse(@intFromEnum(msg_type), body) };
+            return .{ .ndisc = try ndisc.parse(@backingInt(msg_type), body) };
         },
         .mld_query, .mld_report => {
-            return .{ .mld = try mld.parse(@intFromEnum(msg_type), body) };
+            return .{ .mld = try mld.parse(@backingInt(msg_type), body) };
         },
         .rpl_control => {
             const rpl_repr = rpl_mod.parse(data[1], body) catch return error.Unrecognized;
@@ -208,28 +208,28 @@ pub fn emit(
     // Type and code
     switch (repr) {
         .echo_request => {
-            buf[0] = @intFromEnum(Message.echo_request);
+            buf[0] = @backingInt(Message.echo_request);
             buf[1] = 0;
         },
         .echo_reply => {
-            buf[0] = @intFromEnum(Message.echo_reply);
+            buf[0] = @backingInt(Message.echo_reply);
             buf[1] = 0;
         },
         .dst_unreachable => |d| {
-            buf[0] = @intFromEnum(Message.dst_unreachable);
-            buf[1] = @intFromEnum(d.reason);
+            buf[0] = @backingInt(Message.dst_unreachable);
+            buf[1] = @backingInt(d.reason);
         },
         .pkt_too_big => {
-            buf[0] = @intFromEnum(Message.pkt_too_big);
+            buf[0] = @backingInt(Message.pkt_too_big);
             buf[1] = 0;
         },
         .time_exceeded => |t| {
-            buf[0] = @intFromEnum(Message.time_exceeded);
-            buf[1] = @intFromEnum(t.reason);
+            buf[0] = @backingInt(Message.time_exceeded);
+            buf[1] = @backingInt(t.reason);
         },
         .param_problem => |pp| {
-            buf[0] = @intFromEnum(Message.param_problem);
-            buf[1] = @intFromEnum(pp.reason);
+            buf[0] = @backingInt(Message.param_problem);
+            buf[1] = @backingInt(pp.reason);
         },
         .ndisc => |n| {
             buf[0] = switch (n) {
@@ -243,18 +243,18 @@ pub fn emit(
         },
         .mld => |m| {
             buf[0] = switch (m) {
-                .query => @intFromEnum(Message.mld_query),
-                .report => @intFromEnum(Message.mld_report),
+                .query => @backingInt(Message.mld_query),
+                .report => @backingInt(Message.mld_report),
             };
             buf[1] = 0;
         },
         .rpl => |r| {
-            buf[0] = @intFromEnum(Message.rpl_control);
+            buf[0] = @backingInt(Message.rpl_control);
             buf[1] = switch (r) {
-                .dis => @intFromEnum(rpl_mod.RplControlMessage.dis),
-                .dio => @intFromEnum(rpl_mod.RplControlMessage.dio),
-                .dao => @intFromEnum(rpl_mod.RplControlMessage.dao),
-                .dao_ack => @intFromEnum(rpl_mod.RplControlMessage.dao_ack),
+                .dis => @backingInt(rpl_mod.RplControlMessage.dis),
+                .dio => @backingInt(rpl_mod.RplControlMessage.dio),
+                .dao => @backingInt(rpl_mod.RplControlMessage.dao),
+                .dao_ack => @backingInt(rpl_mod.RplControlMessage.dao_ack),
             };
         },
     }
@@ -308,7 +308,7 @@ pub fn verifyChecksum(data: []const u8, src_addr: ipv6.Address, dst_addr: ipv6.A
     const pseudo = checksum.pseudoHeaderChecksumV6(
         src_addr,
         dst_addr,
-        @intFromEnum(ipv6.Protocol.icmpv6),
+        @backingInt(ipv6.Protocol.icmpv6),
         @intCast(data.len),
     );
     return checksum.finish(checksum.calculate(data, pseudo)) == 0;
@@ -326,7 +326,7 @@ fn fillChecksum(data: []u8, src_addr: ipv6.Address, dst_addr: ipv6.Address) void
     const pseudo = checksum.pseudoHeaderChecksumV6(
         src_addr,
         dst_addr,
-        @intFromEnum(ipv6.Protocol.icmpv6),
+        @backingInt(ipv6.Protocol.icmpv6),
         @intCast(data.len),
     );
     const cksum = checksum.finish(checksum.calculate(data, pseudo));

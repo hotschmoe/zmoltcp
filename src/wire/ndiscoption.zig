@@ -68,7 +68,7 @@ pub fn parse(data: []const u8) error{ Truncated, BadLength }!Repr {
     if (data.len < 2) return error.Truncated;
     if (data[1] == 0) return error.BadLength;
 
-    const opt_type: Type = @enumFromInt(data[0]);
+    const opt_type: Type = @fromBackingInt(@intCast(data[0]));
     const length = data[1];
     const total: usize = @as(usize, length) * 8;
     if (data.len < total) return error.Truncated;
@@ -124,15 +124,15 @@ pub fn emit(repr: Repr, buf: []u8) error{ BufferTooSmall, BadLength }!usize {
     switch (repr) {
         .source_link_layer_addr, .target_link_layer_addr => |addr| {
             buf[0] = switch (repr) {
-                .source_link_layer_addr => @intFromEnum(Type.source_link_layer_addr),
-                .target_link_layer_addr => @intFromEnum(Type.target_link_layer_addr),
+                .source_link_layer_addr => @backingInt(Type.source_link_layer_addr),
+                .target_link_layer_addr => @backingInt(Type.target_link_layer_addr),
                 else => unreachable,
             };
             buf[1] = 1;
             @memcpy(buf[2..8], &addr);
         },
         .prefix_information => |pi| {
-            buf[0] = @intFromEnum(Type.prefix_information);
+            buf[0] = @backingInt(Type.prefix_information);
             buf[1] = 4;
             buf[2] = pi.prefix_len;
             var flags: u8 = 0;
@@ -145,7 +145,7 @@ pub fn emit(repr: Repr, buf: []u8) error{ BufferTooSmall, BadLength }!usize {
             @memcpy(buf[16..32], &pi.prefix);
         },
         .mtu => |val| {
-            buf[0] = @intFromEnum(Type.mtu);
+            buf[0] = @backingInt(Type.mtu);
             buf[1] = 1;
             buf[2] = 0; // reserved
             buf[3] = 0;
@@ -190,8 +190,10 @@ test "parse prefix information" {
         0x00, 0x00, 0x03, 0xE8, // preferred_lifetime=1000
         0x00, 0x00, 0x00, 0x00, // reserved
         // prefix = fe80::1
-        0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        0xfe, 0x80, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01,
     };
     const repr = try parse(&data);
     const pi = repr.prefix_information;
@@ -237,8 +239,10 @@ test "prefix information roundtrip" {
         0x00, 0x00, 0x03, 0x84,
         0x00, 0x00, 0x03, 0xE8,
         0x00, 0x00, 0x00, 0x00,
-        0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        0xfe, 0x80, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01,
     };
     const repr = try parse(&original);
     var buf: [32]u8 = undefined;

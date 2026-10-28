@@ -7,7 +7,7 @@ const std = @import("std");
 
 pub fn assertIsIp(comptime Ip: type) void {
     const required = .{
-        "Address",     "ADDRESS_LEN", "UNSPECIFIED", "Protocol",
+        "Address",       "ADDRESS_LEN", "UNSPECIFIED", "Protocol",
         "isUnspecified", "isBroadcast", "isMulticast", "isLoopback",
         "isLinkLocal",   "formatAddr",
     };

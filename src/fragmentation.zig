@@ -306,12 +306,14 @@ pub fn SixlowpanFragmenter(comptime buffer_size: usize) type {
                     .datagram_tag = self.datagram_tag,
                 } }
             else
-                .{ .next_fragment = .{
-                    .datagram_size = self.datagram_size,
-                    .datagram_tag = self.datagram_tag,
-                    // Offset accounts for header size difference (uncompressed - compressed).
-                    .datagram_offset = @intCast((self.sent_bytes + self.header_diff) / 8),
-                } };
+                .{
+                    .next_fragment = .{
+                        .datagram_size = self.datagram_size,
+                        .datagram_tag = self.datagram_tag,
+                        // Offset accounts for header size difference (uncompressed - compressed).
+                        .datagram_offset = @intCast((self.sent_bytes + self.header_diff) / 8),
+                    },
+                };
             pos += sixlowpan_frag.emit(frag_repr, buf[pos..]) catch return null;
 
             @memcpy(buf[pos..][0..this_payload], self.buffer[self.sent_bytes..][0..this_payload]);

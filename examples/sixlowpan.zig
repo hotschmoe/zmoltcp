@@ -32,10 +32,18 @@ fn Ieee802154LoopbackDevice(comptime max_frames: usize) type {
         pub const medium: iface_mod.Medium = .ieee802154;
         inner: stack_mod.LoopbackDevice(max_frames) = .{},
 
-        pub fn receive(self: *Self) ?[]const u8 { return self.inner.receive(); }
-        pub fn transmit(self: *Self, frame: []const u8) void { self.inner.transmit(frame); }
-        pub fn enqueueRx(self: *Self, data: []const u8) void { self.inner.enqueueRx(data); }
-        pub fn dequeueTx(self: *Self) ?[]const u8 { return self.inner.dequeueTx(); }
+        pub fn receive(self: *Self) ?[]const u8 {
+            return self.inner.receive();
+        }
+        pub fn transmit(self: *Self, frame: []const u8) void {
+            self.inner.transmit(frame);
+        }
+        pub fn enqueueRx(self: *Self, data: []const u8) void {
+            self.inner.enqueueRx(data);
+        }
+        pub fn dequeueTx(self: *Self) ?[]const u8 {
+            return self.inner.dequeueTx();
+        }
         pub fn capabilities() iface_mod.DeviceCapabilities {
             return .{ .max_transmission_unit = ieee802154.MAX_FRAME_LEN };
         }
