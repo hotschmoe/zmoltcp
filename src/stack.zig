@@ -451,6 +451,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     self.processIgmp(ip_payload, device);
                 },
                 .tcp => {
+                    if (is_broadcast or is_multicast or ipv4.isUnspecified(ip_repr.src_addr)) return;
                     const tcp_ingress = parseTcp4Ingress(ip_repr, ip_payload) orelse return;
                     const result = self.routeToTcpSockets(timestamp, ip_repr, tcp_ingress);
                     if (result.reply) |reply| {
@@ -710,6 +711,7 @@ pub fn Stack(comptime Device: type, comptime SocketConfig: type) type {
                     }
                 },
                 .tcp => {
+                    if (ipv6.isMulticast(ip_repr.dst_addr) or ipv6.isUnspecified(ip_repr.src_addr)) return;
                     const tcp_ingress = parseTcp6Ingress(ip_repr, ip_payload) orelse return;
                     const result = self.routeToTcpV6Sockets(timestamp, ip_repr, tcp_ingress);
                     if (result.reply) |reply| {
@@ -6964,4 +6966,53 @@ test "802.15.4 non-data frame is dropped" {
     try testing.expect(activity);
 
     try testing.expectEqual(@as(?[]const u8, null), device.dequeueTx());
+}
+
+fn tcpSynFrame(buf: []u8, src: ipv4.Address, dst: ipv4.Address) []const u8 {
+    var syn_buf: [tcp_wire.HEADER_LEN]u8 = undefined;
+    _ = tcp_wire.emit(.{ .src_port = 4242, .dst_port = 4243, .seq_number = 1000, .ack_number = 0, .data_offset = 5, .flags = .{ .syn = true }, .window_size = 1024, .checksum = 0, .urgent_pointer = 0 }, &syn_buf) catch unreachable;
+    return buildIpv4FrameFrom(buf, src, dst, .tcp, &syn_buf);
+}
+
+// [audit:4]
+test "TCP SYN from the unspecified address does not open a connection" {
+    const TcpSock = tcp_socket.Socket(ipv4, 4);
+    const Sockets = struct { tcp4_sockets: []*TcpSock };
+    const TcpStack = Stack(TestDevice, Sockets);
+    var device = TestDevice.init();
+    const SB = struct {
+        var rx_buf: [256]u8 = @splat(0);
+        var tx_buf: [256]u8 = @splat(0);
+    };
+    var sock = TcpSock.init(&SB.rx_buf, &SB.tx_buf);
+    try sock.listen(.{ .port = 4243 });
+    var arr = [_]*TcpSock{&sock};
+    var stack = TcpStack.init(LOCAL_HW, .{ .tcp4_sockets = &arr });
+    stack.iface.v4.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+    var frame: [256]u8 = undefined;
+    device.enqueueRx(tcpSynFrame(&frame, ipv4.UNSPECIFIED, LOCAL_IP));
+    _ = stack.poll(Instant.ZERO, &device);
+    try testing.expectEqual(tcp_socket.State.listen, sock.state);
+    try testing.expectEqual(@as(?[]const u8, null), device.dequeueTx());
+}
+
+// [audit:4]
+test "TCP SYN to the broadcast address does not open a connection" {
+    const TcpSock = tcp_socket.Socket(ipv4, 4);
+    const Sockets = struct { tcp4_sockets: []*TcpSock };
+    const TcpStack = Stack(TestDevice, Sockets);
+    var device = TestDevice.init();
+    const SB = struct {
+        var rx_buf: [256]u8 = @splat(0);
+        var tx_buf: [256]u8 = @splat(0);
+    };
+    var sock = TcpSock.init(&SB.rx_buf, &SB.tx_buf);
+    try sock.listen(.{ .port = 4243 });
+    var arr = [_]*TcpSock{&sock};
+    var stack = TcpStack.init(LOCAL_HW, .{ .tcp4_sockets = &arr });
+    stack.iface.v4.addIpAddr(.{ .address = LOCAL_IP, .prefix_len = 24 });
+    var frame: [256]u8 = undefined;
+    device.enqueueRx(tcpSynFrame(&frame, REMOTE_IP, ipv4.BROADCAST));
+    _ = stack.poll(Instant.ZERO, &device);
+    try testing.expectEqual(tcp_socket.State.listen, sock.state);
 }
