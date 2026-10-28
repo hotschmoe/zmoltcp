@@ -1132,7 +1132,7 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
             // Compute window and payload bounds.
             const window_start = self.remote_seq_no.add(self.rx_buffer.len());
             const window_end = if (self.remote_last_ack) |last_ack|
-                last_ack.add(@as(usize, self.remote_last_win) << @intCast(self.remote_win_shift))
+                window_start.max(last_ack.add(@as(usize, self.remote_last_win) << @intCast(self.remote_win_shift)))
             else
                 window_start;
 
@@ -7384,4 +7384,37 @@ test "closure send returns zero when tx buffer full" {
     const ctx: *const u0 = &0;
     const written = try s.send(ctx, &testSendCallback);
     try testing.expectEqual(0, written);
+}
+
+// [audit:zirakzigil-law] A FIN consumes sequence space before our ACK
+// refreshes remote_last_ack, leaving the window edge before window_start. An
+// empty segment at window_start then used a negative overlap.
+test "empty segment after FIN with a full receive buffer does not underflow" {
+    var s = socketEstablished();
+    var data: [64]u8 = @splat(0x41);
+    _ = sendPacketAt0(&s, .{
+        .src_port = REMOTE_PORT,
+        .dst_port = LOCAL_PORT,
+        .seq_number = REMOTE_SEQ.add(1),
+        .ack_number = LOCAL_SEQ.add(1),
+        .window_len = 256,
+        .payload = &data,
+    });
+    _ = sendPacketAt0(&s, .{
+        .src_port = REMOTE_PORT,
+        .dst_port = LOCAL_PORT,
+        .control = .fin,
+        .seq_number = REMOTE_SEQ.add(1).add(64),
+        .ack_number = LOCAL_SEQ.add(1),
+        .window_len = 256,
+    });
+    try testing.expectEqual(State.close_wait, s.state);
+    _ = sendPacketAt0(&s, .{
+        .src_port = REMOTE_PORT,
+        .dst_port = LOCAL_PORT,
+        .seq_number = REMOTE_SEQ.add(1).add(65),
+        .ack_number = LOCAL_SEQ.add(1),
+        .window_len = 256,
+    });
+    try testing.expectEqual(State.close_wait, s.state);
 }
