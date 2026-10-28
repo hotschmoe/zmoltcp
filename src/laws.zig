@@ -987,6 +987,235 @@ const local_v4 = ipv4.Address{ 10, 0, 0, 1 };
 const peer_v4 = ipv4.Address{ 10, 0, 0, 2 };
 
 pub const tcp_state = struct {
+    pub const pinned = .{
+        .ringsStayInBounds = .{
+            .{
+                166,
+                0,
+                .{ .v6 = false, .ws = false, .ts = false, .sack = true },
+                .{
+                    .{ .kind = 222, .a = 54317, .b = 48549, .c = 1 },
+                    .{ .kind = 178, .a = 8610, .b = 1, .c = 255 },
+                    .{ .kind = 1, .a = 45385, .b = 64307, .c = 1 },
+                    .{ .kind = 0, .a = 0, .b = 1, .c = 0 },
+                    .{ .kind = 140, .a = 0, .b = 0, .c = 1 },
+                    .{ .kind = 159, .a = 35355, .b = 0, .c = 0 },
+                    .{ .kind = 0, .a = 51164, .b = 56572, .c = 84 },
+                    .{ .kind = 0, .a = 65535, .b = 4314, .c = 0 },
+                    .{ .kind = 1, .a = 41895, .b = 1, .c = 178 },
+                    .{ .kind = 1, .a = 0, .b = 0, .c = 161 },
+                    .{ .kind = 255, .a = 847, .b = 0, .c = 0 },
+                    .{ .kind = 1, .a = 65535, .b = 1001, .c = 1 },
+                    .{ .kind = 1, .a = 0, .b = 26340, .c = 245 },
+                    .{ .kind = 79, .a = 0, .b = 61477, .c = 255 },
+                    .{ .kind = 1, .a = 5439, .b = 8888, .c = 1 },
+                    .{ .kind = 0, .a = 45440, .b = 1, .c = 206 },
+                    .{ .kind = 195, .a = 1, .b = 0, .c = 248 },
+                    .{ .kind = 131, .a = 21558, .b = 1, .c = 0 },
+                    .{ .kind = 0, .a = 55989, .b = 0, .c = 89 },
+                    .{ .kind = 0, .a = 8831, .b = 33141, .c = 255 },
+                    .{ .kind = 1, .a = 65535, .b = 0, .c = 147 },
+                    .{ .kind = 1, .a = 32419, .b = 65535, .c = 9 },
+                    .{ .kind = 1, .a = 31877, .b = 0, .c = 206 },
+                    .{ .kind = 97, .a = 42976, .b = 20219, .c = 0 },
+                    .{ .kind = 0, .a = 29430, .b = 65535, .c = 0 },
+                    .{ .kind = 172, .a = 57199, .b = 0, .c = 0 },
+                    .{ .kind = 26, .a = 1, .b = 65535, .c = 1 },
+                    .{ .kind = 83, .a = 1, .b = 37376, .c = 1 },
+                    .{ .kind = 1, .a = 0, .b = 8212, .c = 105 },
+                    .{ .kind = 255, .a = 0, .b = 31722, .c = 255 },
+                    .{ .kind = 130, .a = 2293, .b = 0, .c = 68 },
+                    .{ .kind = 197, .a = 23654, .b = 0, .c = 90 },
+                    .{ .kind = 0, .a = 1, .b = 0, .c = 255 },
+                    .{ .kind = 0, .a = 45635, .b = 1, .c = 1 },
+                    .{ .kind = 0, .a = 33310, .b = 62874, .c = 0 },
+                    .{ .kind = 225, .a = 19148, .b = 1, .c = 255 },
+                    .{ .kind = 87, .a = 0, .b = 54154, .c = 0 },
+                    .{ .kind = 78, .a = 51028, .b = 43900, .c = 93 },
+                    .{ .kind = 47, .a = 65535, .b = 51588, .c = 140 },
+                    .{ .kind = 255, .a = 0, .b = 0, .c = 0 },
+                    .{ .kind = 169, .a = 55786, .b = 0, .c = 58 },
+                    .{ .kind = 0, .a = 22201, .b = 18204, .c = 0 },
+                    .{ .kind = 1, .a = 0, .b = 1, .c = 40 },
+                    .{ .kind = 26, .a = 65367, .b = 0, .c = 255 },
+                    .{ .kind = 1, .a = 13851, .b = 65535, .c = 1 },
+                    .{ .kind = 0, .a = 65535, .b = 0, .c = 1 },
+                    .{ .kind = 17, .a = 1, .b = 65535, .c = 0 },
+                    .{ .kind = 0, .a = 41440, .b = 1, .c = 149 },
+                },
+            },
+            .{
+                6,
+                0,
+                .{ .v6 = false, .ws = true, .ts = false, .sack = false },
+                .{
+                    .{ .kind = 0, .a = 0, .b = 56848, .c = 208 },
+                    .{ .kind = 255, .a = 36753, .b = 65535, .c = 230 },
+                    .{ .kind = 219, .a = 24188, .b = 65535, .c = 155 },
+                    .{ .kind = 0, .a = 1, .b = 0, .c = 116 },
+                    .{ .kind = 0, .a = 65535, .b = 0, .c = 0 },
+                    .{ .kind = 215, .a = 25443, .b = 1, .c = 255 },
+                    .{ .kind = 0, .a = 33846, .b = 65535, .c = 156 },
+                    .{ .kind = 95, .a = 1, .b = 16699, .c = 0 },
+                    .{ .kind = 244, .a = 20627, .b = 42219, .c = 1 },
+                    .{ .kind = 103, .a = 3526, .b = 0, .c = 248 },
+                    .{ .kind = 40, .a = 0, .b = 6765, .c = 255 },
+                    .{ .kind = 238, .a = 65535, .b = 0, .c = 0 },
+                    .{ .kind = 255, .a = 0, .b = 53279, .c = 126 },
+                    .{ .kind = 0, .a = 0, .b = 0, .c = 188 },
+                    .{ .kind = 73, .a = 65535, .b = 0, .c = 255 },
+                    .{ .kind = 255, .a = 1, .b = 1, .c = 8 },
+                    .{ .kind = 255, .a = 51139, .b = 44032, .c = 0 },
+                    .{ .kind = 0, .a = 48768, .b = 0, .c = 0 },
+                    .{ .kind = 251, .a = 65535, .b = 65535, .c = 198 },
+                    .{ .kind = 0, .a = 0, .b = 65535, .c = 0 },
+                    .{ .kind = 1, .a = 44427, .b = 1, .c = 100 },
+                    .{ .kind = 0, .a = 0, .b = 13655, .c = 0 },
+                    .{ .kind = 0, .a = 0, .b = 0, .c = 0 },
+                    .{ .kind = 1, .a = 1, .b = 21181, .c = 0 },
+                    .{ .kind = 200, .a = 35953, .b = 32309, .c = 211 },
+                    .{ .kind = 92, .a = 46116, .b = 57614, .c = 185 },
+                    .{ .kind = 180, .a = 46160, .b = 12342, .c = 97 },
+                    .{ .kind = 1, .a = 33429, .b = 46506, .c = 62 },
+                    .{ .kind = 1, .a = 0, .b = 23731, .c = 85 },
+                    .{ .kind = 255, .a = 65535, .b = 1, .c = 255 },
+                    .{ .kind = 121, .a = 59625, .b = 7371, .c = 1 },
+                    .{ .kind = 255, .a = 0, .b = 62779, .c = 0 },
+                    .{ .kind = 159, .a = 43854, .b = 0, .c = 31 },
+                    .{ .kind = 255, .a = 2979, .b = 22086, .c = 162 },
+                    .{ .kind = 0, .a = 33334, .b = 1, .c = 0 },
+                    .{ .kind = 0, .a = 41523, .b = 0, .c = 116 },
+                    .{ .kind = 168, .a = 2509, .b = 49758, .c = 0 },
+                    .{ .kind = 0, .a = 41299, .b = 1, .c = 140 },
+                    .{ .kind = 111, .a = 0, .b = 59657, .c = 1 },
+                    .{ .kind = 2, .a = 5923, .b = 38417, .c = 42 },
+                    .{ .kind = 132, .a = 18161, .b = 0, .c = 1 },
+                    .{ .kind = 22, .a = 0, .b = 63607, .c = 113 },
+                    .{ .kind = 91, .a = 1, .b = 8970, .c = 232 },
+                    .{ .kind = 255, .a = 30002, .b = 1, .c = 126 },
+                    .{ .kind = 238, .a = 0, .b = 1, .c = 255 },
+                    .{ .kind = 255, .a = 63863, .b = 48245, .c = 0 },
+                    .{ .kind = 117, .a = 0, .b = 0, .c = 255 },
+                    .{ .kind = 72, .a = 0, .b = 32195, .c = 6 },
+                },
+            },
+        },
+        .finConsumesAllPrecedingData = .{
+            .{
+                0,
+                826401848,
+                .{ .v6 = false, .ws = true, .ts = false, .sack = true },
+                .{
+                    .{ .kind = 231, .a = 0, .b = 1, .c = 240 },
+                    .{ .kind = 226, .a = 0, .b = 39105, .c = 1 },
+                    .{ .kind = 0, .a = 0, .b = 1, .c = 43 },
+                    .{ .kind = 1, .a = 39655, .b = 65535, .c = 221 },
+                    .{ .kind = 0, .a = 0, .b = 43450, .c = 71 },
+                    .{ .kind = 1, .a = 60121, .b = 43878, .c = 0 },
+                    .{ .kind = 122, .a = 19730, .b = 0, .c = 0 },
+                    .{ .kind = 0, .a = 59409, .b = 0, .c = 1 },
+                    .{ .kind = 195, .a = 0, .b = 50021, .c = 1 },
+                    .{ .kind = 64, .a = 64210, .b = 65535, .c = 53 },
+                    .{ .kind = 220, .a = 16530, .b = 45535, .c = 167 },
+                    .{ .kind = 187, .a = 33499, .b = 1, .c = 246 },
+                    .{ .kind = 118, .a = 4322, .b = 35297, .c = 139 },
+                    .{ .kind = 169, .a = 6604, .b = 1, .c = 220 },
+                    .{ .kind = 17, .a = 65535, .b = 52460, .c = 255 },
+                    .{ .kind = 255, .a = 65535, .b = 0, .c = 1 },
+                    .{ .kind = 255, .a = 65535, .b = 30709, .c = 0 },
+                    .{ .kind = 43, .a = 0, .b = 1, .c = 158 },
+                    .{ .kind = 255, .a = 4375, .b = 55238, .c = 0 },
+                    .{ .kind = 0, .a = 58539, .b = 1, .c = 0 },
+                    .{ .kind = 96, .a = 1, .b = 0, .c = 0 },
+                    .{ .kind = 255, .a = 0, .b = 30607, .c = 208 },
+                    .{ .kind = 204, .a = 51101, .b = 28880, .c = 0 },
+                    .{ .kind = 0, .a = 0, .b = 0, .c = 86 },
+                    .{ .kind = 36, .a = 1, .b = 37734, .c = 0 },
+                    .{ .kind = 1, .a = 10371, .b = 0, .c = 178 },
+                    .{ .kind = 134, .a = 61912, .b = 57351, .c = 1 },
+                    .{ .kind = 255, .a = 0, .b = 0, .c = 255 },
+                    .{ .kind = 0, .a = 12722, .b = 65535, .c = 144 },
+                    .{ .kind = 173, .a = 39192, .b = 33393, .c = 174 },
+                    .{ .kind = 1, .a = 0, .b = 21960, .c = 1 },
+                    .{ .kind = 13, .a = 62099, .b = 41592, .c = 255 },
+                    .{ .kind = 2, .a = 23168, .b = 0, .c = 1 },
+                    .{ .kind = 221, .a = 0, .b = 0, .c = 6 },
+                    .{ .kind = 255, .a = 65535, .b = 18224, .c = 255 },
+                    .{ .kind = 41, .a = 0, .b = 0, .c = 37 },
+                    .{ .kind = 240, .a = 65535, .b = 65535, .c = 1 },
+                    .{ .kind = 231, .a = 35040, .b = 31545, .c = 109 },
+                    .{ .kind = 166, .a = 0, .b = 39828, .c = 241 },
+                    .{ .kind = 63, .a = 34567, .b = 3135, .c = 151 },
+                    .{ .kind = 30, .a = 51182, .b = 41409, .c = 230 },
+                    .{ .kind = 174, .a = 1, .b = 0, .c = 0 },
+                    .{ .kind = 107, .a = 25356, .b = 7282, .c = 0 },
+                    .{ .kind = 1, .a = 23360, .b = 25800, .c = 127 },
+                    .{ .kind = 0, .a = 4833, .b = 0, .c = 143 },
+                    .{ .kind = 210, .a = 65535, .b = 219, .c = 0 },
+                    .{ .kind = 204, .a = 62415, .b = 65535, .c = 0 },
+                    .{ .kind = 1, .a = 18415, .b = 1, .c = 132 },
+                },
+            },
+        },
+        .dispatchedSegmentsFitEgress = .{
+            .{
+                94,
+                2641736916,
+                .{ .v6 = false, .ws = true, .ts = true, .sack = false },
+                .{
+                    .{ .kind = 179, .a = 33162, .b = 32395, .c = 0 },
+                    .{ .kind = 0, .a = 61433, .b = 32209, .c = 198 },
+                    .{ .kind = 212, .a = 0, .b = 18190, .c = 112 },
+                    .{ .kind = 255, .a = 58683, .b = 65535, .c = 234 },
+                    .{ .kind = 0, .a = 65535, .b = 49641, .c = 93 },
+                    .{ .kind = 89, .a = 40403, .b = 0, .c = 124 },
+                    .{ .kind = 67, .a = 14787, .b = 65535, .c = 1 },
+                    .{ .kind = 42, .a = 1633, .b = 64935, .c = 161 },
+                    .{ .kind = 255, .a = 0, .b = 62141, .c = 172 },
+                    .{ .kind = 0, .a = 60983, .b = 15769, .c = 255 },
+                    .{ .kind = 0, .a = 1, .b = 1, .c = 0 },
+                    .{ .kind = 168, .a = 65535, .b = 0, .c = 114 },
+                    .{ .kind = 107, .a = 64025, .b = 1944, .c = 1 },
+                    .{ .kind = 89, .a = 65178, .b = 0, .c = 204 },
+                    .{ .kind = 116, .a = 30739, .b = 1, .c = 255 },
+                    .{ .kind = 255, .a = 62666, .b = 65535, .c = 0 },
+                    .{ .kind = 249, .a = 65535, .b = 1, .c = 155 },
+                    .{ .kind = 1, .a = 42884, .b = 65535, .c = 255 },
+                    .{ .kind = 228, .a = 0, .b = 0, .c = 0 },
+                    .{ .kind = 1, .a = 65214, .b = 1, .c = 215 },
+                    .{ .kind = 1, .a = 0, .b = 1, .c = 13 },
+                    .{ .kind = 233, .a = 54482, .b = 65535, .c = 0 },
+                    .{ .kind = 1, .a = 0, .b = 64276, .c = 0 },
+                    .{ .kind = 23, .a = 1, .b = 1, .c = 1 },
+                    .{ .kind = 0, .a = 4748, .b = 53380, .c = 255 },
+                    .{ .kind = 1, .a = 0, .b = 0, .c = 100 },
+                    .{ .kind = 37, .a = 0, .b = 1, .c = 190 },
+                    .{ .kind = 44, .a = 36825, .b = 0, .c = 57 },
+                    .{ .kind = 178, .a = 0, .b = 0, .c = 255 },
+                    .{ .kind = 189, .a = 0, .b = 0, .c = 0 },
+                    .{ .kind = 0, .a = 12738, .b = 50004, .c = 147 },
+                    .{ .kind = 1, .a = 0, .b = 0, .c = 32 },
+                    .{ .kind = 222, .a = 65535, .b = 63078, .c = 244 },
+                    .{ .kind = 1, .a = 0, .b = 42365, .c = 255 },
+                    .{ .kind = 174, .a = 47134, .b = 65535, .c = 26 },
+                    .{ .kind = 2, .a = 27508, .b = 0, .c = 215 },
+                    .{ .kind = 109, .a = 19523, .b = 65535, .c = 246 },
+                    .{ .kind = 109, .a = 51727, .b = 65535, .c = 255 },
+                    .{ .kind = 154, .a = 0, .b = 0, .c = 228 },
+                    .{ .kind = 187, .a = 41102, .b = 60361, .c = 255 },
+                    .{ .kind = 255, .a = 1, .b = 2409, .c = 1 },
+                    .{ .kind = 184, .a = 18931, .b = 0, .c = 0 },
+                    .{ .kind = 36, .a = 0, .b = 0, .c = 1 },
+                    .{ .kind = 0, .a = 38209, .b = 0, .c = 20 },
+                    .{ .kind = 1, .a = 31016, .b = 2873, .c = 0 },
+                    .{ .kind = 0, .a = 65535, .b = 145, .c = 0 },
+                    .{ .kind = 0, .a = 0, .b = 47326, .c = 0 },
+                    .{ .kind = 235, .a = 0, .b = 65535, .c = 0 },
+                },
+            },
+        },
+    };
+
     const Seq = tcp.SeqNumber;
 
     const Check = enum { rings_in_bounds, window_fits_ring, fin_follows_all_data, dispatch_fits_egress };
@@ -1218,6 +1447,13 @@ const ArpFrame = struct { reply: bool, to_us: bool, ip: ipv4.Address, mac: ether
 const NeighborOp = struct { ip_last: u8, mac_first: u8, mac_last: u8, dt: u8 };
 
 pub const icmp_replies = struct {
+    pub const pinned = .{
+        .echoReplyRules = .{
+            .{ .{ 10, 0, 0, 2 }, .{ 224, 0, 0, 251 }, false },
+            .{ .{ 0, 0, 0, 0 }, .{ 10, 0, 0, 1 }, false },
+        },
+    };
+
     /// Echo replies only go to unicast sources, from the address the request targeted.
     pub fn echoReplyRules(src: ipv4.Address, dst: ipv4.Address, broadcast: bool) bool {
         var iface = lawInterface();
@@ -1266,6 +1502,29 @@ const raw_socket = @import("socket/raw.zig");
 pub const handles = struct {
     const Dns = dns_socket.Socket(ipv4);
 
+    pub const pinned = .{
+        .staleDnsHandlesAreRejected = .{
+            .{.{
+                .{ .kind = 0, .a = 0, .b = 0 },
+                .{ .kind = 1, .a = 0, .b = 0 },
+                .{ .kind = 2, .a = 0, .b = 0 },
+                .{ .kind = 0, .a = 0, .b = 0 },
+                .{ .kind = 2, .a = 0, .b = 0 },
+                .{ .kind = 0, .a = 0, .b = 0 },
+                .{ .kind = 1, .a = 1, .b = 0 },
+                .{ .kind = 2, .a = 1, .b = 0 },
+                .{ .kind = 0, .a = 0, .b = 0 },
+                .{ .kind = 0, .a = 0, .b = 0 },
+                .{ .kind = 2, .a = 0, .b = 0 },
+                .{ .kind = 2, .a = 1, .b = 0 },
+                .{ .kind = 1, .a = 0, .b = 0 },
+                .{ .kind = 0, .a = 0, .b = 0 },
+                .{ .kind = 2, .a = 0, .b = 0 },
+                .{ .kind = 2, .a = 0, .b = 0 },
+            }},
+        },
+    };
+
     /// A query handle works until the query is cancelled or read; afterwards
     /// it is stale even when its slot has been reused.
     pub fn staleDnsHandlesAreRejected(ops: [16]Op) bool {
@@ -1302,6 +1561,11 @@ pub const handles = struct {
 };
 
 pub const send_limits = struct {
+    pub const pinned = .{
+        .udpSendLimit = .{ .{ 4, false }, .{ 4, true } },
+        .icmpSendLimit = .{ .{ 4, false }, .{ 4, true } },
+    };
+
     /// A payload up to MAX_PAYLOAD_LEN is accepted; one byte more is refused
     /// at send time instead of being dropped by the stack.
     pub fn udpSendLimit(extra: u8, v6: bool) bool {
@@ -1350,40 +1614,6 @@ pub const send_limits = struct {
 // before the named fix; replay regenerates the exact arguments.
 // -------------------------------------------------------------------------
 
-test "laws: pinned regressions" {
-    // negative window edge after a FIN (fix(socket/tcp): clamp the receive window edge)
-    try zv.laws.replay(tcp_state, "ringsStayInBounds", 6, 8);
-    // SYN-ACK window shifted (fix: bound in-window data by the unscaled SYN window)
-    try zv.laws.replay(tcp_state, "ringsStayInBounds", 6, 28);
-    // FIN after truncated payload
-    try zv.laws.replay(tcp_state, "finConsumesAllPrecedingData", 6, 0);
-    // segment larger than the egress buffer (IPv4 with timestamps)
-    try zv.laws.replay(tcp_state, "dispatchedSegmentsFitEgress", 6, 284);
-    // echo to a joined multicast group and from the unspecified address
-    try std.testing.expect(icmp_replies.echoReplyRules(.{ 10, 0, 0, 2 }, .{ 224, 0, 0, 251 }, false));
-    try std.testing.expect(icmp_replies.echoReplyRules(.{ 0, 0, 0, 0 }, .{ 10, 0, 0, 1 }, false));
-    // IPv6 payload_len 65535 on a 40-byte packet must not yield a partial payload
-    var over_declared: zv.Bytes(64) = .{ .buf = @splat(0), .len = 8 };
-    @memset(over_declared.buf[0..8], 255);
-    try std.testing.expect(framing.ipv6PayloadInsideInput(over_declared));
-    // one byte over each socket's send limit
-    try std.testing.expect(send_limits.udpSendLimit(4, false));
-    try std.testing.expect(send_limits.udpSendLimit(4, true));
-    try std.testing.expect(send_limits.icmpSendLimit(4, false));
-    try std.testing.expect(send_limits.icmpSendLimit(4, true));
-    // query handle used after cancel, and after its slot was reused
-    try std.testing.expect(handles.staleDnsHandlesAreRejected(.{
-        .{ .kind = 0, .a = 0, .b = 0 }, .{ .kind = 1, .a = 0, .b = 0 },
-        .{ .kind = 2, .a = 0, .b = 0 }, .{ .kind = 0, .a = 0, .b = 0 },
-        .{ .kind = 2, .a = 0, .b = 0 }, .{ .kind = 0, .a = 0, .b = 0 },
-        .{ .kind = 1, .a = 1, .b = 0 }, .{ .kind = 2, .a = 1, .b = 0 },
-        .{ .kind = 0, .a = 0, .b = 0 }, .{ .kind = 0, .a = 0, .b = 0 },
-        .{ .kind = 2, .a = 0, .b = 0 }, .{ .kind = 2, .a = 1, .b = 0 },
-        .{ .kind = 1, .a = 0, .b = 0 }, .{ .kind = 0, .a = 0, .b = 0 },
-        .{ .kind = 2, .a = 0, .b = 0 }, .{ .kind = 2, .a = 0, .b = 0 },
-    }));
-}
-
 test "laws: handles and send limits" {
     try zv.checkLaws(handles, .{ .iterations = iterations, .seed = 10 });
     try zv.checkLaws(send_limits, .{ .iterations = 2_000, .seed = 11 });
@@ -1420,6 +1650,12 @@ fn within(outer: []const u8, inner: []const u8) bool {
 }
 
 pub const framing = struct {
+    pub const pinned = .{
+        .ipv6PayloadInsideInput = .{
+            .{.{ 255, 255, 255, 255, 255, 255, 255, 255 }},
+        },
+    };
+
     /// Payload views handed to upper layers lie inside the input and respect the declared length.
     pub fn ipv4PayloadInsideInput(in: zv.Bytes(80)) bool {
         var buf: [80]u8 = undefined;
