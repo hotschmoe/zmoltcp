@@ -834,6 +834,14 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
             return self.rx_buffer.capacity();
         }
 
+        /// The peer will not scale our windows; re-express the last advertised
+        /// window in bytes so it stays correct under a zero shift.
+        fn disableWindowScaling(self: *Self) void {
+            const bytes = @as(usize, self.remote_last_win) << @intCast(self.remote_win_shift);
+            self.remote_last_win = @intCast(@min(bytes, std.math.maxInt(u16)));
+            self.remote_win_shift = 0;
+        }
+
         fn scaledWindow(self: Self) u16 {
             const shifted = self.rx_buffer.window() >> @intCast(self.remote_win_shift);
             return if (shifted > std.math.maxInt(u16)) std.math.maxInt(u16) else @intCast(shifted);
@@ -1234,7 +1242,7 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
                         self.remote_last_seq = self.local_seq_no;
                         self.remote_has_sack = repr.sack_permitted;
                         self.remote_win_scale = repr.window_scale;
-                        if (self.remote_win_scale == null) self.remote_win_shift = 0;
+                        if (self.remote_win_scale == null) self.disableWindowScaling();
                         if (repr.timestamp == null) self.tsval_generator = null;
                         self.state = .syn_received;
                         self.timer.setForIdle(timestamp, self.keep_alive);
@@ -1277,7 +1285,7 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
                         self.remote_last_ack = repr.seq_number;
                         self.remote_has_sack = repr.sack_permitted;
                         self.remote_win_scale = repr.window_scale;
-                        if (self.remote_win_scale == null) self.remote_win_shift = 0;
+                        if (self.remote_win_scale == null) self.disableWindowScaling();
                         if (repr.timestamp == null) self.tsval_generator = null;
 
                         if (repr.ack_number != null) {
@@ -1621,7 +1629,8 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
 
             self.remote_last_seq = repr.seq_number.add(repr.segmentLen());
             self.remote_last_ack = repr.ack_number;
-            self.remote_last_win = repr.window_len;
+            // A SYN carries an unscaled window; keep the field in units of the current shift.
+            self.remote_last_win = if (repr.control == .syn) repr.window_len >> @intCast(self.remote_win_shift) else repr.window_len;
 
             if (repr.segmentLen() > 0) {
                 self.rtte.onSend(timestamp, repr.seq_number.add(repr.segmentLen()));
@@ -7417,4 +7426,50 @@ test "empty segment after FIN with a full receive buffer does not underflow" {
         .window_len = 256,
     });
     try testing.expectEqual(State.close_wait, s.state);
+}
+
+// [audit:1] The window in a SYN-ACK is never scaled by the peer, but the
+// in-window check shifted it, admitting segments up to twice the ring size.
+test "SYN-ACK window is not scaled when bounding in-window data" {
+    var s = socketWithBuffers(64, 65536);
+    s.state = .listen;
+    s.listen_endpoint = LISTEN_END;
+    _ = sendPacketAt0(&s, .{
+        .src_port = REMOTE_PORT,
+        .dst_port = LOCAL_PORT,
+        .control = .syn,
+        .seq_number = REMOTE_SEQ,
+        .window_len = 1000,
+        .window_scale = 0,
+    });
+    const synack = recvAt0(&s).?;
+    _ = sendPacketAt0(&s, .{
+        .src_port = REMOTE_PORT,
+        .dst_port = LOCAL_PORT,
+        .seq_number = REMOTE_SEQ.add(1),
+        .ack_number = synack.seq_number.add(1),
+        .window_len = 1000,
+    });
+    try testing.expectEqual(State.established, s.state);
+    try testing.expectEqual(@as(u8, 1), s.remote_win_shift);
+
+    var big: [60000]u8 = @splat(0xAA);
+    var small: [6000]u8 = @splat(0xBB);
+    _ = sendPacketAt0(&s, .{
+        .src_port = REMOTE_PORT,
+        .dst_port = LOCAL_PORT,
+        .seq_number = REMOTE_SEQ.add(1 + 60000),
+        .ack_number = s.local_seq_no,
+        .window_len = 1000,
+        .payload = &small,
+    });
+    _ = sendPacketAt0(&s, .{
+        .src_port = REMOTE_PORT,
+        .dst_port = LOCAL_PORT,
+        .seq_number = REMOTE_SEQ.add(1),
+        .ack_number = s.local_seq_no,
+        .window_len = 1000,
+        .payload = &big,
+    });
+    try testing.expect(s.rx_buffer.len() <= s.rx_buffer.capacity());
 }
