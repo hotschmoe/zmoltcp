@@ -39,7 +39,7 @@ pub const MessageType = enum(u8) {
         return switch (self) {
             .discover, .inform, .request, .decline, .release => .request,
             .offer, .ack, .nak => .reply,
-            _ => @enumFromInt(0),
+            _ => @fromBackingInt(0),
         };
     }
 };
@@ -121,7 +121,7 @@ pub fn parse(data: []const u8) ParseError!Repr {
 
     if (readU32Be(data, 236) != MAGIC_NUMBER) return error.InvalidMagic;
 
-    const op: OpCode = @enumFromInt(data[0]);
+    const op: OpCode = @fromBackingInt(data[0]);
     const transaction_id = readU32Be(data, 4);
     const secs = readU16Be(data, 8);
     const broadcast = (readU16Be(data, 10) & 0x8000) != 0;
@@ -156,7 +156,7 @@ pub fn parse(data: []const u8) ParseError!Repr {
         switch (kind) {
             OPT_DHCP_MESSAGE_TYPE => {
                 if (opt_data.len == 1) {
-                    const value: MessageType = @enumFromInt(opt_data[0]);
+                    const value: MessageType = @fromBackingInt(opt_data[0]);
                     if (value.opCode() == op) {
                         message_type = value;
                     }
@@ -266,7 +266,7 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
 
     @memset(buf[34..236], 0);
 
-    buf[0] = @intFromEnum(repr.message_type.opCode());
+    buf[0] = @backingInt(repr.message_type.opCode());
     buf[1] = 1; // htype = Ethernet
     buf[2] = 6; // hlen = 6
     buf[3] = 0; // hops
@@ -292,7 +292,7 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
 
     var pos: usize = MIN_HEADER_LEN;
 
-    pos = emitOption(buf, pos, OPT_DHCP_MESSAGE_TYPE, &[_]u8{@intFromEnum(repr.message_type)});
+    pos = emitOption(buf, pos, OPT_DHCP_MESSAGE_TYPE, &[_]u8{@backingInt(repr.message_type)});
 
     if (repr.client_identifier) |addr| {
         var data: [7]u8 = undefined;

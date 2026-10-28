@@ -46,7 +46,7 @@ pub fn parse(data: []const u8) error{ Truncated, BadChecksum }!Repr {
     if (data.len < HEADER_LEN) return error.Truncated;
     if (!verifyChecksum(data)) return error.BadChecksum;
 
-    const icmp_type: Type = @enumFromInt(data[0]);
+    const icmp_type: Type = @fromBackingInt(data[0]);
     const code = data[1];
     const cksum: u16 = @as(u16, data[2]) << 8 | @as(u16, data[3]);
 
@@ -78,7 +78,7 @@ pub fn emitEcho(repr: EchoRepr, payload_data: []const u8, buf: []u8) error{Buffe
     const total = HEADER_LEN + payload_data.len;
     if (buf.len < total) return error.BufferTooSmall;
 
-    buf[0] = @intFromEnum(repr.icmp_type);
+    buf[0] = @backingInt(repr.icmp_type);
     buf[1] = repr.code;
     // Checksum zeroed before computation
     buf[2] = 0;
@@ -104,7 +104,7 @@ pub fn emitOther(repr: OtherRepr, payload_data: []const u8, buf: []u8) error{Buf
     const total = HEADER_LEN + payload_data.len;
     if (buf.len < total) return error.BufferTooSmall;
 
-    buf[0] = @intFromEnum(repr.icmp_type);
+    buf[0] = @backingInt(repr.icmp_type);
     buf[1] = repr.code;
     buf[2] = 0;
     buf[3] = 0;

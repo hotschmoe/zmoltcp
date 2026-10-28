@@ -123,7 +123,7 @@ pub const RouteV6 = RouteFor(ipv6);
 pub fn RoutesFor(comptime Ip: type) type {
     return struct {
         const R = RouteFor(Ip);
-        entries: [MAX_ROUTE_COUNT]?R = .{null} ** MAX_ROUTE_COUNT,
+        entries: [MAX_ROUTE_COUNT]?R = @splat(null),
 
         pub fn add(self: *@This(), route: R) bool {
             for (&self.entries) |*slot| {
@@ -174,7 +174,7 @@ pub fn NeighborCache(comptime Ip: type) type {
             expires_at: time.Instant = time.Instant.ZERO,
         };
 
-        entries: [NEIGHBOR_CACHE_SIZE]Entry = [_]Entry{.{}} ** NEIGHBOR_CACHE_SIZE,
+        entries: [NEIGHBOR_CACHE_SIZE]Entry = @splat(.{}),
         silent_until: time.Instant = time.Instant.ZERO,
 
         fn isOccupied(entry: Entry) bool {
@@ -238,7 +238,7 @@ pub fn NeighborCache(comptime Ip: type) type {
         }
 
         pub fn flush(self: *Self) void {
-            self.entries = [_]Entry{.{}} ** NEIGHBOR_CACHE_SIZE;
+            self.entries = @splat(.{});
             self.silent_until = time.Instant.ZERO;
         }
     };
@@ -404,7 +404,7 @@ pub const SlaacState = struct {
     };
 
     phase: enum { idle, soliciting, configured } = .idle,
-    prefixes: [MAX_PREFIXES]?PrefixEntry = .{null} ** MAX_PREFIXES,
+    prefixes: [MAX_PREFIXES]?PrefixEntry = @splat(null),
     rs_retries_left: u8 = MAX_RS_RETRIES,
     next_rs_at: time.Instant = time.Instant.ZERO,
     default_router: ?ipv6.Address = null,
@@ -420,8 +420,8 @@ pub const Interface = struct {
     now: time.Instant = time.Instant.ZERO,
     any_ip: bool = false,
     auto_icmp_echo_reply: bool = true,
-    multicast_groups: [MAX_MULTICAST_GROUPS]?ipv4.Address = .{null} ** MAX_MULTICAST_GROUPS,
-    multicast_groups_v6: [MAX_MULTICAST_GROUPS_V6]?MulticastGroupEntryV6 = .{null} ** MAX_MULTICAST_GROUPS_V6,
+    multicast_groups: [MAX_MULTICAST_GROUPS]?ipv4.Address = @splat(null),
+    multicast_groups_v6: [MAX_MULTICAST_GROUPS_V6]?MulticastGroupEntryV6 = @splat(null),
     slaac: ?SlaacState = null,
 
     pub fn init(hw_addr: ethernet.Address) Interface {
@@ -911,19 +911,23 @@ pub const Interface = struct {
 
     pub fn icmpProtoUnreachable(self: *const Interface, ip_repr: ipv4.Repr, ip_payload: []const u8) ?Response {
         const src = self.v4.getSourceAddress(ip_repr.src_addr) orelse return null;
-        return .{ .ipv4 = .{
-            .ip = .{
-                .src_addr = src,
-                .dst_addr = ip_repr.src_addr,
-                .protocol = .icmp,
-                .hop_limit = DEFAULT_HOP_LIMIT,
+        return .{
+            .ipv4 = .{
+                .ip = .{
+                    .src_addr = src,
+                    .dst_addr = ip_repr.src_addr,
+                    .protocol = .icmp,
+                    .hop_limit = DEFAULT_HOP_LIMIT,
+                },
+                .payload = .{
+                    .icmp_dest_unreachable = .{
+                        .code = 2, // protocol unreachable
+                        .invoking_repr = ip_repr,
+                        .data = ip_payload,
+                    },
+                },
             },
-            .payload = .{ .icmp_dest_unreachable = .{
-                .code = 2, // protocol unreachable
-                .invoking_repr = ip_repr,
-                .data = ip_payload,
-            } },
-        } };
+        };
     }
 
     pub fn processUdp(self: *const Interface, ip_repr: ipv4.Repr, udp_data: []const u8, socket_handled: bool) ?Response {
@@ -931,19 +935,23 @@ pub const Interface = struct {
         if (self.isBroadcast(ip_repr.dst_addr)) return null;
         const src = self.v4.getSourceAddress(ip_repr.src_addr) orelse return null;
         const data = udp_data[0..@min(udp_data.len, ICMP_ERROR_MAX_DATA)];
-        return .{ .ipv4 = .{
-            .ip = .{
-                .src_addr = src,
-                .dst_addr = ip_repr.src_addr,
-                .protocol = .icmp,
-                .hop_limit = DEFAULT_HOP_LIMIT,
+        return .{
+            .ipv4 = .{
+                .ip = .{
+                    .src_addr = src,
+                    .dst_addr = ip_repr.src_addr,
+                    .protocol = .icmp,
+                    .hop_limit = DEFAULT_HOP_LIMIT,
+                },
+                .payload = .{
+                    .icmp_dest_unreachable = .{
+                        .code = 3, // port unreachable
+                        .invoking_repr = ip_repr,
+                        .data = data,
+                    },
+                },
             },
-            .payload = .{ .icmp_dest_unreachable = .{
-                .code = 3, // port unreachable
-                .invoking_repr = ip_repr,
-                .data = data,
-            } },
-        } };
+        };
     }
 
     fn generateTcpRst(comptime Ip: type, src_addr: Ip.Address, dst_addr: Ip.Address, tcp_data: []const u8, socket_handled: bool) ?tcp_socket.TcpRepr {
@@ -1391,7 +1399,7 @@ test "handle IPv4 broadcast" {
 test "no ICMP for unknown protocol to broadcast" {
     var iface = testInterface();
 
-    const ip_repr = testIpv4Repr(@enumFromInt(0x0C), LOCAL_IP, .{ 255, 255, 255, 255 }, 0);
+    const ip_repr = testIpv4Repr(@fromBackingInt(0x0C), LOCAL_IP, .{ 255, 255, 255, 255 }, 0);
 
     var frame_buf: [128]u8 = undefined;
     const frame = buildIpv4Frame(&frame_buf, ip_repr, &.{});
@@ -1404,7 +1412,7 @@ test "no ICMP for unknown protocol to broadcast" {
 test "ICMP error no payload" {
     var iface = testInterface();
 
-    const ip_repr = testIpv4Repr(@enumFromInt(0x0C), REMOTE_IP, LOCAL_IP, 0);
+    const ip_repr = testIpv4Repr(@fromBackingInt(0x0C), REMOTE_IP, LOCAL_IP, 0);
 
     var frame_buf: [128]u8 = undefined;
     const frame = buildIpv4Frame(&frame_buf, ip_repr, &.{});
@@ -1593,7 +1601,7 @@ test "ICMP socket receives echo request and auto-reply" {
     var sock = IcmpSocket.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
     try sock.bind(.{ .ident = 0x1234 });
 
-    const echo_data = [_]u8{0xAA} ** 16;
+    const echo_data: [16]u8 = @splat(0xAA);
     const echo_repr = icmp.EchoRepr{
         .icmp_type = .echo_request,
         .code = 0,
@@ -2459,12 +2467,12 @@ test "NDP rejected when hop_limit != 255" {
 
 test "IPv6 param problem for unrecognized next header" {
     var iface = testV6Interface();
-    const unknown_payload = [_]u8{0xFF} ** 8;
+    const unknown_payload: [8]u8 = @splat(0xFF);
     var buf: [512]u8 = undefined;
     const frame = buildIpv6Frame(&buf, .{
         .src_addr = REMOTE_V6_LL,
         .dst_addr = LOCAL_V6_LL,
-        .next_header = @enumFromInt(253), // experimental
+        .next_header = @fromBackingInt(253), // experimental
         .payload_len = unknown_payload.len,
         .hop_limit = 64,
     }, &unknown_payload);

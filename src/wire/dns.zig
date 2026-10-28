@@ -72,13 +72,13 @@ pub fn flags(data: []const u8) ParseError!u16 {
 pub fn opcode(data: []const u8) ParseError!Opcode {
     if (data.len < HEADER_LEN) return error.Truncated;
     const f = readU16Be(data, 2);
-    return @enumFromInt(@as(u8, @truncate((f >> 11) & 0xF)));
+    return @fromBackingInt(@truncate((f >> 11) & 0xF));
 }
 
 pub fn rcode(data: []const u8) ParseError!Rcode {
     if (data.len < HEADER_LEN) return error.Truncated;
     const f = readU16Be(data, 2);
-    return @enumFromInt(@as(u8, @truncate(f & 0xF)));
+    return @fromBackingInt(@truncate(f & 0xF));
 }
 
 pub fn questionCount(data: []const u8) ParseError!u16 {
@@ -211,7 +211,7 @@ pub fn parseQuestion(bytes: []const u8) ParseError!struct { rest: []const u8, qu
         .rest = rest[4..],
         .question = .{
             .name = name,
-            .type_ = @enumFromInt(type_val),
+            .type_ = @fromBackingInt(type_val),
         },
     };
 }
@@ -245,7 +245,7 @@ pub fn parseRecord(bytes: []const u8) ParseError!struct { rest: []const u8, reco
     if (after_fixed.len < rdlength) return error.Truncated;
 
     const rdata = after_fixed[0..rdlength];
-    const type_: Type = @enumFromInt(type_val);
+    const type_: Type = @fromBackingInt(type_val);
 
     if (type_ == .a and rdata.len != 4) return error.Truncated;
     if (type_ == .aaaa and rdata.len != 16) return error.Truncated;
@@ -284,7 +284,7 @@ pub fn emit(repr: Repr, buf: []u8) ParseError!usize {
     buf[0] = @truncate(repr.transaction_id >> 8);
     buf[1] = @truncate(repr.transaction_id);
 
-    const flags_val = repr.flags | @as(u16, @intFromEnum(repr.opcode)) << 11;
+    const flags_val = repr.flags | @as(u16, @backingInt(repr.opcode)) << 11;
     buf[2] = @truncate(flags_val >> 8);
     buf[3] = @truncate(flags_val);
 
@@ -295,7 +295,7 @@ pub fn emit(repr: Repr, buf: []u8) ParseError!usize {
     const name_len = repr.question.name.len;
     @memcpy(buf[HEADER_LEN..][0..name_len], repr.question.name);
     const qoff = HEADER_LEN + name_len;
-    const type_val = @intFromEnum(repr.question.type_);
+    const type_val = @backingInt(repr.question.type_);
     buf[qoff] = @truncate(type_val >> 8);
     buf[qoff + 1] = @truncate(type_val);
     buf[qoff + 2] = @truncate(CLASS_IN >> 8);

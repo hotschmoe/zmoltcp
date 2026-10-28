@@ -289,7 +289,7 @@ pub fn parse(data: []const u8) error{ Truncated, Malformed, UnsupportedSecurity 
 
     const fc = readU16Le(data[0..2]);
 
-    const frame_type: FrameType = @enumFromInt(@as(u3, @truncate(fc & 0b111)));
+    const frame_type: FrameType = @fromBackingInt(@truncate(fc));
     const security: bool = (fc >> 3) & 1 == 1;
     if (security) return error.UnsupportedSecurity;
 
@@ -297,13 +297,13 @@ pub fn parse(data: []const u8) error{ Truncated, Malformed, UnsupportedSecurity 
     const ack_request: bool = (fc >> 5) & 1 == 1;
     const pan_id_compression: bool = (fc >> 6) & 1 == 1;
     const seq_suppressed: bool = (fc >> 8) & 1 == 1;
-    const dst_mode: AddressingMode = @enumFromInt(@as(u2, @truncate((fc >> 10) & 0b11)));
-    const frame_version: FrameVersion = @enumFromInt(@as(u2, @truncate((fc >> 12) & 0b11)));
-    const src_mode: AddressingMode = @enumFromInt(@as(u2, @truncate((fc >> 14) & 0b11)));
+    const dst_mode: AddressingMode = @fromBackingInt(@truncate(fc >> 10));
+    const frame_version: FrameVersion = @fromBackingInt(@truncate(fc >> 12));
+    const src_mode: AddressingMode = @fromBackingInt(@truncate(fc >> 14));
 
-    if (@intFromEnum(dst_mode) == 1 or @intFromEnum(src_mode) == 1)
+    if (@backingInt(dst_mode) == 1 or @backingInt(src_mode) == 1)
         return error.Malformed;
-    if (@intFromEnum(frame_version) == 3)
+    if (@backingInt(frame_version) == 3)
         return error.Malformed;
 
     var offset: usize = 2;
@@ -352,15 +352,15 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
     if (buf.len < needed) return error.BufferTooSmall;
 
     var fc: u16 = 0;
-    fc |= @as(u16, @intFromEnum(repr.frame_type));
+    fc |= @as(u16, @backingInt(repr.frame_type));
     if (repr.security) fc |= 1 << 3;
     if (repr.frame_pending) fc |= 1 << 4;
     if (repr.ack_request) fc |= 1 << 5;
     if (repr.pan_id_compression) fc |= 1 << 6;
     if (repr.sequence_number == null) fc |= 1 << 8;
-    fc |= @as(u16, @intFromEnum(repr.dst_addr.addressingMode())) << 10;
-    fc |= @as(u16, @intFromEnum(repr.frame_version)) << 12;
-    fc |= @as(u16, @intFromEnum(repr.src_addr.addressingMode())) << 14;
+    fc |= @as(u16, @backingInt(repr.dst_addr.addressingMode())) << 10;
+    fc |= @as(u16, @backingInt(repr.frame_version)) << 12;
+    fc |= @as(u16, @backingInt(repr.src_addr.addressingMode())) << 14;
     writeU16Le(buf[0..2], fc);
 
     var offset: usize = 2;
@@ -482,9 +482,12 @@ test "reject frame with security" {
         0x05, // security control
         0x31, 0x01, 0x00, 0x00, // frame counter
         // encrypted data + MIC follow
-        0x3e, 0xe8, 0xfb, 0x85, 0xe4, 0xcc, 0xf4, 0x48,
-        0x90, 0xfe, 0x56, 0x66, 0xf7, 0x1c, 0x65, 0x9e,
-        0xf9, 0x93, 0xc8, 0x34, 0x2e,
+        0x3e, 0xe8, 0xfb, 0x85,
+        0xe4, 0xcc, 0xf4, 0x48,
+        0x90, 0xfe, 0x56, 0x66,
+        0xf7, 0x1c, 0x65, 0x9e,
+        0xf9, 0x93, 0xc8, 0x34,
+        0x2e,
     };
     try testing.expectError(error.UnsupportedSecurity, parse(&frame));
     try testing.expectError(error.UnsupportedSecurity, payloadSlice(&frame));

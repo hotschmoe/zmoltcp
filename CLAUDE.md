@@ -145,7 +145,7 @@ zig build demo                                    # Run integration demos
 zig build -Dtarget=aarch64-freestanding-none      # Cross-compile check
 ```
 
-Zig version: 0.16.0
+Zig version: 0.17.0
 
 ## Release Flow
 

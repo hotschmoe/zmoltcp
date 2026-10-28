@@ -30,7 +30,7 @@ pub fn parse(data: []const u8) error{Truncated}!Repr {
     return .{
         .dst_addr = data[0..ADDR_LEN].*,
         .src_addr = data[ADDR_LEN..][0..ADDR_LEN].*,
-        .ethertype = @enumFromInt(@as(u16, data[12]) << 8 | @as(u16, data[13])),
+        .ethertype = @fromBackingInt(@as(u16, data[12]) << 8 | data[13]),
     };
 }
 
@@ -40,8 +40,8 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
     if (buf.len < HEADER_LEN) return error.BufferTooSmall;
     @memcpy(buf[0..ADDR_LEN], &repr.dst_addr);
     @memcpy(buf[ADDR_LEN..][0..ADDR_LEN], &repr.src_addr);
-    buf[12] = @truncate(@intFromEnum(repr.ethertype) >> 8);
-    buf[13] = @truncate(@intFromEnum(repr.ethertype) & 0xFF);
+    buf[12] = @truncate(@backingInt(repr.ethertype) >> 8);
+    buf[13] = @truncate(@backingInt(repr.ethertype) & 0xFF);
     return HEADER_LEN;
 }
 
@@ -107,8 +107,7 @@ test "payload extraction" {
     const frame = [_]u8{
         0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
         0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
-        0x08, 0x00,
-        0xCA, 0xFE, 0xBA, 0xBE,
+        0x08, 0x00, 0xCA, 0xFE, 0xBA, 0xBE,
     };
     const p = try payload(&frame);
     try testing.expectEqual(@as(usize, 4), p.len);

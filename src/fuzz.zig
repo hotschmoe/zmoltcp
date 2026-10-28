@@ -63,13 +63,13 @@ fn fuzzInstant(s: *std.testing.Smith) time.Instant {
 }
 
 fn fuzzV4(s: *std.testing.Smith) ipv4.Address {
-    var addr: ipv4.Address = .{0} ** ipv4.ADDRESS_LEN;
+    var addr: ipv4.Address = @splat(0);
     _ = s.slice(&addr);
     return addr;
 }
 
 fn fuzzV6(s: *std.testing.Smith) ipv6.Address {
-    var addr: ipv6.Address = .{0} ** ipv6.ADDRESS_LEN;
+    var addr: ipv6.Address = @splat(0);
     _ = s.slice(&addr);
     return addr;
 }
@@ -78,12 +78,12 @@ fn fuzzIeeeAddr(s: *std.testing.Smith) ieee802154.Address {
     switch (s.value(u8) % 3) {
         0 => return .absent,
         1 => {
-            var short: [2]u8 = .{0} ** 2;
+            var short: [2]u8 = @splat(0);
             _ = s.slice(&short);
             return .{ .short = short };
         },
         else => {
-            var extended: [8]u8 = .{0} ** 8;
+            var extended: [8]u8 = @splat(0);
             _ = s.slice(&extended);
             return .{ .extended = extended };
         },
@@ -339,7 +339,7 @@ fn fuzzReassemblerV4(s: *std.testing.Smith) !void {
             .id = s.value(u16),
             .src_addr = fuzzV4(s),
             .dst_addr = fuzzV4(s),
-            .protocol = @enumFromInt(s.value(u8)),
+            .protocol = @fromBackingInt(s.value(u8)),
         };
         switch (s.value(u8) % 5) {
             0 => r.accept(key, fuzzInstant(s)),
@@ -516,7 +516,7 @@ test "fuzz P1 protocol parsers" {
 
 fn fuzzRingBuffer(s: *std.testing.Smith) !void {
     const Ring = ring_buffer_mod.RingBuffer(u8);
-    var backing: [16]u8 = .{0} ** 16;
+    var backing: [16]u8 = @splat(0);
     var ring = Ring.init(&backing);
     var model: [16]u8 = undefined;
     var model_len: usize = 0;
@@ -567,8 +567,8 @@ fn fuzzRingBuffer(s: *std.testing.Smith) !void {
 fn fuzzPacketBuffer(s: *std.testing.Smith) !void {
     const PacketBuffer = packet_buffer_mod.PacketBuffer(u8);
     const Meta = packet_buffer_mod.PacketMeta(u8);
-    var meta: [4]Meta = .{Meta{}} ** 4;
-    var payload: [16]u8 = .{0} ** 16;
+    var meta: [4]Meta = @splat(.{});
+    var payload: [16]u8 = @splat(0);
     var packets = PacketBuffer.init(&meta, &payload);
 
     var budget: usize = 64;
@@ -632,9 +632,9 @@ test "fuzz P2 storage operation streams" {
 
 fn fuzzUdpSocket(s: *std.testing.Smith, payload: []const u8) !void {
     const Sock = udp_socket.Socket(ipv4);
-    var rx_meta: [4]Sock.PacketMeta = .{Sock.PacketMeta{}} ** 4;
+    var rx_meta: [4]Sock.PacketMeta = @splat(.{});
     var rx_payload: [128]u8 = undefined;
-    var tx_meta: [4]Sock.PacketMeta = .{Sock.PacketMeta{}} ** 4;
+    var tx_meta: [4]Sock.PacketMeta = @splat(.{});
     var tx_payload: [128]u8 = undefined;
     var sock = Sock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
 
@@ -659,9 +659,9 @@ fn fuzzUdpSocket(s: *std.testing.Smith, payload: []const u8) !void {
 
 fn fuzzIcmpSocket(s: *std.testing.Smith, payload: []const u8) !void {
     const Sock = icmp_socket.Socket(ipv4);
-    var rx_meta: [4]Sock.PacketMeta = .{Sock.PacketMeta{}} ** 4;
+    var rx_meta: [4]Sock.PacketMeta = @splat(.{});
     var rx_payload: [128]u8 = undefined;
-    var tx_meta: [4]Sock.PacketMeta = .{Sock.PacketMeta{}} ** 4;
+    var tx_meta: [4]Sock.PacketMeta = @splat(.{});
     var tx_payload: [128]u8 = undefined;
     var sock = Sock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
 
@@ -690,7 +690,7 @@ fn fuzzRawSocket(s: *std.testing.Smith, payload: []const u8) !void {
     var tx_store: [4]Sock.Packet = undefined;
     var sock = Sock.init(&rx_store, &tx_store);
 
-    const proto: ipv4.Protocol = @enumFromInt(s.value(u8));
+    const proto: ipv4.Protocol = @fromBackingInt(s.value(u8));
     sock.bind(proto) catch {};
     if (sock.accepts(proto)) {
         sock.process(REMOTE_V4, proto, payload);
@@ -704,7 +704,7 @@ fn fuzzRawSocket(s: *std.testing.Smith, payload: []const u8) !void {
 
 fn fuzzDnsSocket(s: *std.testing.Smith, payload: []const u8) !void {
     const Sock = dns_socket.Socket(ipv4);
-    var slots: [2]Sock.QuerySlot = .{Sock.QuerySlot{}} ** 2;
+    var slots: [2]Sock.QuerySlot = @splat(.{});
     const servers = [_]ipv4.Address{.{ 8, 8, 8, 8 }};
     var sock = Sock.init(&slots, &servers);
 

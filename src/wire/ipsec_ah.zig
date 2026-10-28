@@ -21,7 +21,7 @@ pub fn parse(data: []const u8) error{Truncated}!Repr {
     if (total < MIN_HEADER_LEN) return error.Truncated;
     if (data.len < total) return error.Truncated;
     return .{
-        .next_header = @enumFromInt(data[0]),
+        .next_header = @fromBackingInt(data[0]),
         .spi = checksum.readU32(data[4..8]),
         .sequence_number = checksum.readU32(data[8..12]),
         .icv_len = (@as(usize, payload_len) + 2) * 4 - MIN_HEADER_LEN,
@@ -32,7 +32,7 @@ pub fn emit(repr: Repr, icv: []const u8, buf: []u8) error{Truncated}!void {
     const total = bufferLen(repr);
     if (buf.len < total) return error.Truncated;
     if (icv.len != repr.icv_len) return error.Truncated;
-    buf[0] = @intFromEnum(repr.next_header);
+    buf[0] = @backingInt(repr.next_header);
     buf[1] = @intCast((total / 4) - 2);
     buf[2] = 0; // reserved
     buf[3] = 0;
@@ -72,7 +72,7 @@ const ICV2 = [_]u8{ 0xaf, 0xd2, 0xe7, 0xa1, 0x73, 0xd3, 0x29, 0x0b, 0xfe, 0x6b, 
 
 fn packetRepr1() Repr {
     return .{
-        .next_header = @enumFromInt(0x32), // ipsec_esp = 50
+        .next_header = @fromBackingInt(0x32), // ipsec_esp = 50
         .spi = 0x8179b705,
         .sequence_number = 1,
         .icv_len = 12,
@@ -81,7 +81,7 @@ fn packetRepr1() Repr {
 
 fn packetRepr2() Repr {
     return .{
-        .next_header = @enumFromInt(0x32),
+        .next_header = @fromBackingInt(0x32),
         .spi = 0xba8bd060,
         .sequence_number = 1,
         .icv_len = 12,
@@ -91,7 +91,7 @@ fn packetRepr2() Repr {
 // [smoltcp:wire/ipsec_ah.rs:test_deconstruct]
 test "parse AH header fields" {
     const repr = try parse(&PACKET_BYTES1);
-    try testing.expectEqual(@as(u8, 0x32), @intFromEnum(repr.next_header));
+    try testing.expectEqual(@as(u8, 0x32), @backingInt(repr.next_header));
     try testing.expectEqual(@as(u32, 0x8179b705), repr.spi);
     try testing.expectEqual(@as(u32, 1), repr.sequence_number);
     try testing.expectEqual(@as(usize, 12), repr.icv_len);
@@ -113,8 +113,8 @@ test "AH parse rejects truncated buffers" {
 }
 
 test "AH parse rejects payload length below minimum header size" {
-    var packet: [MIN_HEADER_LEN]u8 = .{0} ** MIN_HEADER_LEN;
-    packet[0] = @intFromEnum(ipv4.Protocol.ipsec_esp);
+    var packet: [MIN_HEADER_LEN]u8 = @splat(0);
+    packet[0] = @backingInt(ipv4.Protocol.ipsec_esp);
     packet[1] = 0;
     try testing.expectError(error.Truncated, parse(&packet));
 }

@@ -47,7 +47,7 @@ pub fn parse(data: []const u8) error{ Truncated, UnsupportedHardware, Unsupporte
     if (operation != 1 and operation != 2) return error.UnsupportedOperation;
 
     return .{
-        .operation = @enumFromInt(operation),
+        .operation = @fromBackingInt(operation),
         .source_hardware_addr = data[8..14].*,
         .source_protocol_addr = data[14..18].*,
         .target_hardware_addr = data[18..24].*,
@@ -70,8 +70,8 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
     // Protocol address length
     buf[5] = 4;
     // Operation
-    buf[6] = @truncate(@intFromEnum(repr.operation) >> 8);
-    buf[7] = @truncate(@intFromEnum(repr.operation) & 0xFF);
+    buf[6] = @truncate(@backingInt(repr.operation) >> 8);
+    buf[7] = @truncate(@backingInt(repr.operation) & 0xFF);
     // Addresses
     @memcpy(buf[8..14], &repr.source_hardware_addr);
     @memcpy(buf[14..18], &repr.source_protocol_addr);

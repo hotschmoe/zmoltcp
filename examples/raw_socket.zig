@@ -36,7 +36,7 @@ const MAC_B: ethernet.Address = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 };
 const IP_A: ipv4.Address = .{ 10, 0, 0, 1 };
 const IP_B: ipv4.Address = .{ 10, 0, 0, 2 };
 
-const PROTO_EXPERIMENTAL: ipv4.Protocol = @enumFromInt(253);
+const PROTO_EXPERIMENTAL: ipv4.Protocol = @fromBackingInt(253);
 
 fn shuttleFrames(dev_a: *Device, dev_b: *Device) void {
     while (dev_a.dequeueTx()) |frame| dev_b.enqueueRx(frame);

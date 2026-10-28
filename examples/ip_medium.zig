@@ -31,10 +31,18 @@ fn IpLoopbackDevice(comptime max_frames: usize) type {
         pub const medium: iface_mod.Medium = .ip;
         inner: stack_mod.LoopbackDevice(max_frames) = .{},
 
-        pub fn receive(self: *Self) ?[]const u8 { return self.inner.receive(); }
-        pub fn transmit(self: *Self, frame: []const u8) void { self.inner.transmit(frame); }
-        pub fn enqueueRx(self: *Self, frame: []const u8) void { self.inner.enqueueRx(frame); }
-        pub fn dequeueTx(self: *Self) ?[]const u8 { return self.inner.dequeueTx(); }
+        pub fn receive(self: *Self) ?[]const u8 {
+            return self.inner.receive();
+        }
+        pub fn transmit(self: *Self, frame: []const u8) void {
+            self.inner.transmit(frame);
+        }
+        pub fn enqueueRx(self: *Self, frame: []const u8) void {
+            self.inner.enqueueRx(frame);
+        }
+        pub fn dequeueTx(self: *Self) ?[]const u8 {
+            return self.inner.dequeueTx();
+        }
     };
 }
 

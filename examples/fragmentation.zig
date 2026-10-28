@@ -36,10 +36,18 @@ fn SmallMtuDevice(comptime max_frames: usize) type {
         pub fn capabilities() iface_mod.DeviceCapabilities {
             return .{ .max_transmission_unit = 576 };
         }
-        pub fn receive(self: *Self) ?[]const u8 { return self.inner.receive(); }
-        pub fn transmit(self: *Self, frame: []const u8) void { self.inner.transmit(frame); }
-        pub fn enqueueRx(self: *Self, frame: []const u8) void { self.inner.enqueueRx(frame); }
-        pub fn dequeueTx(self: *Self) ?[]const u8 { return self.inner.dequeueTx(); }
+        pub fn receive(self: *Self) ?[]const u8 {
+            return self.inner.receive();
+        }
+        pub fn transmit(self: *Self, frame: []const u8) void {
+            self.inner.transmit(frame);
+        }
+        pub fn enqueueRx(self: *Self, frame: []const u8) void {
+            self.inner.enqueueRx(frame);
+        }
+        pub fn dequeueTx(self: *Self) ?[]const u8 {
+            return self.inner.dequeueTx();
+        }
     };
 }
 

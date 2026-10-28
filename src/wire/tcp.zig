@@ -210,7 +210,7 @@ pub fn parse(data: []const u8) error{ Truncated, BadDataOffset }!Repr {
 fn parseOptions(options: []const u8, repr: *Repr) void {
     var i: usize = 0;
     while (i < options.len) {
-        const kind: OptionKind = @enumFromInt(options[i]);
+        const kind: OptionKind = @fromBackingInt(options[i]);
         switch (kind) {
             .end => return,
             .nop => {
@@ -354,7 +354,7 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
         var i: usize = HEADER_LEN;
 
         if (repr.max_seg_size) |mss| {
-            buf[i] = @intFromEnum(OptionKind.mss);
+            buf[i] = @backingInt(OptionKind.mss);
             buf[i + 1] = 4;
             buf[i + 2] = @truncate(mss >> 8);
             buf[i + 3] = @truncate(mss);
@@ -362,20 +362,20 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
         }
 
         if (repr.window_scale) |ws| {
-            buf[i] = @intFromEnum(OptionKind.window_scale);
+            buf[i] = @backingInt(OptionKind.window_scale);
             buf[i + 1] = 3;
             buf[i + 2] = ws;
             i += 3;
         }
 
         if (repr.sack_permitted) {
-            buf[i] = @intFromEnum(OptionKind.sack_permitted);
+            buf[i] = @backingInt(OptionKind.sack_permitted);
             buf[i + 1] = 2;
             i += 2;
         } else {
             const count = sackCount(repr.sack_ranges);
             if (count > 0) {
-                buf[i] = @intFromEnum(OptionKind.sack);
+                buf[i] = @backingInt(OptionKind.sack);
                 buf[i + 1] = @intCast(2 + 8 * count);
                 i += 2;
                 for (repr.sack_ranges) |maybe_range| {
@@ -395,7 +395,7 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
         }
 
         if (repr.timestamp) |ts| {
-            buf[i] = @intFromEnum(OptionKind.timestamps);
+            buf[i] = @backingInt(OptionKind.timestamps);
             buf[i + 1] = 10;
             buf[i + 2] = @truncate(ts.tsval >> 24);
             buf[i + 3] = @truncate(ts.tsval >> 16);
@@ -409,7 +409,7 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
         }
 
         if (i < header_len) {
-            buf[i] = @intFromEnum(OptionKind.end);
+            buf[i] = @backingInt(OptionKind.end);
             i += 1;
         }
         @memset(buf[i..header_len], 0);

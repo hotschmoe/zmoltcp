@@ -7,7 +7,7 @@
 #
 # Prerequisites:
 #   rustup target add aarch64-unknown-none
-#   zig (0.16.x), cargo, llvm-size on PATH
+#   zig (0.17.x), cargo, llvm-size on PATH
 
 set -euo pipefail
 

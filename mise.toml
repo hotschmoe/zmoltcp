@@ -1,5 +1,5 @@
 [tools]
-zig = "0.16.0"
+zig = "0.17.0"
 
 [tasks.test]
 description = "Run unit, conformance, regression, and fuzz smoke tests"

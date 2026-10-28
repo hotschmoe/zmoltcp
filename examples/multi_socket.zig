@@ -59,8 +59,8 @@ fn earliestPollTime(a: ?Instant, b: ?Instant) ?Instant {
 }
 
 test "TCP + UDP + ICMP concurrent exchange" {
-    var tcp_srv_rx: [256]u8 = .{0} ** 256;
-    var tcp_srv_tx: [256]u8 = .{0} ** 256;
+    var tcp_srv_rx: [256]u8 = @splat(0);
+    var tcp_srv_tx: [256]u8 = @splat(0);
     var tcp_srv = TcpSock.init(&tcp_srv_rx, &tcp_srv_tx);
     tcp_srv.ack_delay = null;
     try tcp_srv.listen(.{ .port = 4000 });
@@ -79,8 +79,8 @@ test "TCP + UDP + ICMP concurrent exchange" {
     var icmp_a = IcmpSock.init(&icmp_rx_meta, &icmp_rx_pay, &icmp_tx_meta, &icmp_tx_pay);
     try icmp_a.bind(.{ .ident = 0x1234 });
 
-    var tcp_cli_rx: [256]u8 = .{0} ** 256;
-    var tcp_cli_tx: [256]u8 = .{0} ** 256;
+    var tcp_cli_rx: [256]u8 = @splat(0);
+    var tcp_cli_tx: [256]u8 = @splat(0);
     var tcp_cli = TcpSock.init(&tcp_cli_rx, &tcp_cli_tx);
     tcp_cli.ack_delay = null;
     try tcp_cli.connect(IP_A, 4000, IP_B, 50000);

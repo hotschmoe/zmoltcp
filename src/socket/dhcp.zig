@@ -420,7 +420,6 @@ pub const Socket = struct {
     fn minInstant(a: Instant, b: Instant) Instant {
         return if (a.lessThan(b)) a else b;
     }
-
 };
 
 const ParseAckResult = struct {
@@ -550,7 +549,7 @@ fn dnsServers() wire.DnsServers {
 
 fn dhcpDefault() wire.Repr {
     return .{
-        .message_type = @enumFromInt(99),
+        .message_type = @fromBackingInt(99),
         .transaction_id = TXID,
         .secs = 0,
         .client_hardware_address = MY_MAC,

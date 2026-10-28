@@ -238,15 +238,15 @@ fn makeSocket(
     comptime tx_payload_n: usize,
 ) TestSocket {
     const S = struct {
-        var rx_meta: [rx_meta_n]TestSocket.PacketMeta = .{TestSocket.PacketMeta{}} ** rx_meta_n;
-        var rx_payload: [rx_payload_n]u8 = .{0} ** rx_payload_n;
-        var tx_meta: [tx_meta_n]TestSocket.PacketMeta = .{TestSocket.PacketMeta{}} ** tx_meta_n;
-        var tx_payload: [tx_payload_n]u8 = .{0} ** tx_payload_n;
+        var rx_meta: [rx_meta_n]TestSocket.PacketMeta = @splat(.{});
+        var rx_payload: [rx_payload_n]u8 = @splat(0);
+        var tx_meta: [tx_meta_n]TestSocket.PacketMeta = @splat(.{});
+        var tx_payload: [tx_payload_n]u8 = @splat(0);
     };
-    S.rx_meta = .{TestSocket.PacketMeta{}} ** rx_meta_n;
-    S.rx_payload = .{0} ** rx_payload_n;
-    S.tx_meta = .{TestSocket.PacketMeta{}} ** tx_meta_n;
-    S.tx_payload = .{0} ** tx_payload_n;
+    S.rx_meta = @splat(.{});
+    S.rx_payload = @splat(0);
+    S.tx_meta = @splat(.{});
+    S.tx_payload = @splat(0);
     return TestSocket.init(&S.rx_meta, &S.rx_payload, &S.tx_meta, &S.tx_payload);
 }
 

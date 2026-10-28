@@ -100,7 +100,7 @@ fn parseDodagId(flags_byte: u8, d_flag_bit: u8, data: []const u8) error{Truncate
 }
 
 pub fn parse(code: u8, data: []const u8) error{ Truncated, Malformed }!Repr {
-    const msg: RplControlMessage = @enumFromInt(code);
+    const msg: RplControlMessage = @fromBackingInt(code);
     switch (msg) {
         .dis => {
             if (data.len < 2) return error.Truncated;
@@ -114,7 +114,7 @@ pub fn parse(code: u8, data: []const u8) error{ Truncated, Malformed }!Repr {
                 .version_number = data[1],
                 .rank = readU16(data[2..4]),
                 .grounded = flags_byte & 0x80 != 0,
-                .mode_of_operation = @enumFromInt(@as(u2, @truncate(flags_byte >> 3))),
+                .mode_of_operation = @fromBackingInt(@truncate(flags_byte >> 3)),
                 .dodag_preference = @truncate(flags_byte & 0x07),
                 .dtsn = data[5],
                 .dodag_id = data[8..24].*,
@@ -172,7 +172,7 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
             writeU16(buf[2..4], d.rank);
             var flags: u8 = @as(u8, d.dodag_preference);
             if (d.grounded) flags |= 0x80;
-            flags |= @as(u8, @intFromEnum(d.mode_of_operation)) << 3;
+            flags |= @as(u8, @backingInt(d.mode_of_operation)) << 3;
             buf[4] = flags;
             buf[5] = d.dtsn;
             buf[6] = 0;
@@ -235,7 +235,7 @@ pub const OptionIterator = struct {
     pub fn next(self: *OptionIterator) ?struct { option_type: OptionType, value: []const u8 } {
         if (self.offset >= self.data.len) return null;
 
-        const typ: OptionType = @enumFromInt(self.data[self.offset]);
+        const typ: OptionType = @fromBackingInt(self.data[self.offset]);
         if (typ == .pad1) {
             self.offset += 1;
             return .{ .option_type = .pad1, .value = &.{} };
@@ -311,7 +311,7 @@ pub const RplTargetOption = struct {
 
     pub fn parseOption(data: []const u8) error{Truncated}!RplTargetOption {
         if (data.len < 2) return error.Truncated;
-        var prefix: [16]u8 = .{0} ** 16;
+        var prefix: [16]u8 = @splat(0);
         const avail = @min(data.len - 2, 16);
         @memcpy(prefix[0..avail], data[2 .. 2 + avail]);
         return .{
@@ -697,7 +697,7 @@ test "truncated messages" {
 }
 
 test "DIO with grounded flag and preference" {
-    var data: [24]u8 = .{0} ** 24;
+    var data: [24]u8 = @splat(0);
     data[0] = 0x00; // instance id
     data[1] = 0x01; // version
     data[2] = 0x01;

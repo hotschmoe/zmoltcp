@@ -18,7 +18,7 @@ pub const FailureType = enum(u2) {
 };
 
 pub fn failureTypeFromOptionType(opt_type: u8) FailureType {
-    return @enumFromInt(@as(u2, @truncate(opt_type >> 6)));
+    return @fromBackingInt(@truncate(opt_type >> 6));
 }
 
 pub const RouterAlert = enum(u16) {
@@ -51,7 +51,7 @@ pub const Repr = union(enum) {
 pub fn parse(data: []const u8) error{ Truncated, BadOption }!Repr {
     if (data.len < 1) return error.Truncated;
 
-    const opt_type: Type = @enumFromInt(data[0]);
+    const opt_type: Type = @fromBackingInt(data[0]);
 
     if (opt_type == .pad1) return .pad1;
 
@@ -64,7 +64,7 @@ pub fn parse(data: []const u8) error{ Truncated, BadOption }!Repr {
         .router_alert => blk: {
             if (length != 2) break :blk error.BadOption;
             const val: u16 = @as(u16, data[2]) << 8 | @as(u16, data[3]);
-            break :blk .{ .router_alert = @enumFromInt(val) };
+            break :blk .{ .router_alert = @fromBackingInt(val) };
         },
         else => .{ .unknown = .{
             .option_type = data[0],
@@ -83,14 +83,14 @@ pub fn emit(repr: Repr, buf: []u8) error{BufferTooSmall}!usize {
             buf[0] = 0x00;
         },
         .padn => |n| {
-            buf[0] = @intFromEnum(Type.padn);
+            buf[0] = @backingInt(Type.padn);
             buf[1] = n;
             @memset(buf[2 .. 2 + @as(usize, n)], 0);
         },
         .router_alert => |alert| {
-            buf[0] = @intFromEnum(Type.router_alert);
+            buf[0] = @backingInt(Type.router_alert);
             buf[1] = 2;
-            const val: u16 = @intFromEnum(alert);
+            const val: u16 = @backingInt(alert);
             buf[2] = @truncate(val >> 8);
             buf[3] = @truncate(val);
         },

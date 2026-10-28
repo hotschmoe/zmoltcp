@@ -122,7 +122,8 @@ test "parse UDP datagram" {
         0x00, 0x1C, // length = 28
         0xAB, 0xCD, // checksum
         // payload follows...
-        0xDE, 0xAD, 0xBE, 0xEF,
+        0xDE, 0xAD,
+        0xBE, 0xEF,
     };
     const repr = try parse(&data);
     try testing.expectEqual(@as(u16, 53), repr.src_port);
@@ -205,7 +206,7 @@ test "UDP deconstruct raw fields" {
 
 // [smoltcp:wire/udp.rs:test_construct]
 test "UDP construct with checksum" {
-    var buf: [12]u8 = [_]u8{0xa5} ** 12;
+    var buf: [12]u8 = @splat(0xa5);
     _ = try emit(.{
         .src_port = 48896,
         .dst_port = 53,
@@ -219,7 +220,7 @@ test "UDP construct with checksum" {
 
 // [smoltcp:wire/udp.rs:test_zero_checksum]
 test "UDP zero checksum becomes 0xFFFF" {
-    var buf: [8]u8 = [_]u8{0} ** 8;
+    var buf: [8]u8 = @splat(0);
     _ = try emit(.{
         .src_port = 1,
         .dst_port = 31881,
@@ -244,7 +245,7 @@ test "UDP disabled checksum passes verify" {
 }
 
 test "UDP checksum verifies declared length with trailing padding" {
-    var buf: [18]u8 = [_]u8{0} ** 18;
+    var buf: [18]u8 = @splat(0);
     _ = try emit(.{
         .src_port = 48896,
         .dst_port = 53,
@@ -304,7 +305,7 @@ test "UDP v6 zero checksum is forbidden" {
 test "UDP v6 fillChecksum avoids zero" {
     // Same port combo that produces zero checksum over IPv4 should still
     // produce non-zero (0xFFFF) over IPv6 if the raw sum is zero.
-    var buf: [8]u8 = [_]u8{0} ** 8;
+    var buf: [8]u8 = @splat(0);
     _ = try emit(.{
         .src_port = 1,
         .dst_port = 31881,
