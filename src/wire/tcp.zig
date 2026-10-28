@@ -3,6 +3,7 @@
 // Reference: RFC 793, smoltcp src/wire/tcp.rs
 
 const std = @import("std");
+const zv = @import("zv");
 const checksum = @import("checksum.zig");
 
 pub const HEADER_LEN = 20; // Minimum (no options)
@@ -27,19 +28,22 @@ pub const SeqNumber = struct {
         return @bitCast(self.value);
     }
 
+    /// Caller contract: `n` is a distance within the 2^31 comparison window.
     pub fn add(self: SeqNumber, n: usize) SeqNumber {
-        std.debug.assert(n <= std.math.maxInt(i32));
+        zv.requires(n <= std.math.maxInt(i32));
         return .{ .value = self.value +% @as(i32, @intCast(n)) };
     }
 
     pub fn sub(self: SeqNumber, n: usize) SeqNumber {
-        std.debug.assert(n <= std.math.maxInt(i32));
+        zv.requires(n <= std.math.maxInt(i32));
         return .{ .value = self.value -% @as(i32, @intCast(n)) };
     }
 
+    /// Caller contract: `self` is at or after `other`. Use `cmp` first when the
+    /// order is not known.
     pub fn diff(self: SeqNumber, other: SeqNumber) usize {
         const result = self.value -% other.value;
-        std.debug.assert(result >= 0);
+        zv.requires(result >= 0);
         return @intCast(result);
     }
 
