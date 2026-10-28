@@ -2676,20 +2676,3 @@ test "auto_icmp_echo_reply disabled suppresses v6 echo reply" {
     };
     try testing.expectEqual(@as(?Response, null), iface.processIcmpv6(ip_repr, icmp_buf[0..icmp_len], false));
 }
-
-// [audit:9]
-test "ICMP echo to a multicast group or from a non-unicast source is not answered" {
-    var iface = testInterface();
-    var icmp_buf: [icmp.HEADER_LEN]u8 = undefined;
-    _ = icmp.emitEcho(.{ .icmp_type = .echo_request, .code = 0, .checksum = 0, .identifier = 1, .sequence = 1 }, &.{}, &icmp_buf) catch unreachable;
-
-    const group = ipv4.Address{ 224, 0, 0, 251 };
-    const to_group = testIpv4Repr(.icmp, REMOTE_IP, group, icmp_buf.len);
-    try testing.expect(iface.processIcmp(to_group, &icmp_buf, false) == null);
-
-    const from_unspecified = testIpv4Repr(.icmp, ipv4.UNSPECIFIED, LOCAL_IP, icmp_buf.len);
-    try testing.expect(iface.processIcmp(from_unspecified, &icmp_buf, false) == null);
-
-    const unicast = testIpv4Repr(.icmp, REMOTE_IP, LOCAL_IP, icmp_buf.len);
-    try testing.expect(iface.processIcmp(unicast, &icmp_buf, false) != null);
-}

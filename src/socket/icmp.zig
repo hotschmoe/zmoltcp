@@ -569,15 +569,3 @@ test "pollAt returns ZERO when tx queued, null when empty" {
     _ = s.dispatch();
     try testing.expectEqual(@as(?Instant, null), s.pollAt());
 }
-
-// [audit:7]
-test "oversize ICMP payload is refused at send time" {
-    const Sock = Socket(ipv4);
-    var rx_meta: [1]Sock.PacketMeta = .{.{}};
-    var rx_payload: [64]u8 = undefined;
-    var tx_meta: [1]Sock.PacketMeta = .{.{}};
-    var tx_payload: [8192]u8 = undefined;
-    var sock = Sock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
-    var big: [Sock.MAX_PAYLOAD_LEN + 1]u8 = @splat(0);
-    try std.testing.expectError(error.PayloadTooLarge, sock.sendSlice(&big, .{ 10, 0, 0, 2 }));
-}

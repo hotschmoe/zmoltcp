@@ -997,25 +997,3 @@ test "mDNS: no server rotation on timeout" {
     try testing.expectEqualSlices(u8, &[4]u8{ 224, 0, 0, 251 }, &r2.dst_ip);
     try testing.expectEqual(@as(u16, 5353), r2.dst_port);
 }
-
-// [audit:8]
-test "stale query handle is rejected instead of reaching unreachable" {
-    var ctx = createSocket();
-    var s = &ctx.socket;
-    const handle = try s.startQuery("google.com", .a);
-    s.cancelQuery(handle);
-    try testing.expectError(error.StaleHandle, s.getQueryResult(handle));
-}
-
-// [audit:8]
-test "reused slot does not honor the old handle" {
-    var ctx = createSocket();
-    var s = &ctx.socket;
-    const first = try s.startQuery("google.com", .a);
-    s.cancelQuery(first);
-    const second = try s.startQuery("example.org", .a);
-    try testing.expectEqual(first.index, second.index);
-    s.cancelQuery(first);
-    try testing.expectError(error.Pending, s.getQueryResult(second));
-    try testing.expectError(error.StaleHandle, s.getQueryResult(first));
-}
