@@ -1,6 +1,6 @@
-// Executable laws (zirakzigil) for the wire parsers, sequence numbers and
-// storage. Imported only from root.zig's test block;
-// run by `zig build test`.
+//! Executable laws (zirakzigil) for the wire parsers, sequence numbers and
+//! storage. Imported only from root.zig's test block;
+//! run by `zig build test`.
 
 const std = @import("std");
 const zv = @import("zv");
@@ -30,6 +30,10 @@ const sixlowpan = @import("wire/sixlowpan.zig");
 const sixlowpan_frag = @import("wire/sixlowpan_frag.zig");
 const tcp = @import("wire/tcp.zig");
 const udp = @import("wire/udp.zig");
+
+const ring_buffer = @import("storage/ring_buffer.zig");
+const assembler = @import("storage/assembler.zig");
+const packet_buffer = @import("storage/packet_buffer.zig");
 
 const iterations = 50_000;
 
@@ -274,4 +278,308 @@ pub const roundtrip = struct {
 
 test "laws: parse/emit round-trips" {
     try zv.checkLaws(roundtrip, .{ .iterations = iterations, .seed = 2 });
+}
+
+const Op = struct { kind: u8, a: u8, b: u8 };
+
+fn shiftDown(cells: []?u8, len: *usize, k: usize) void {
+    std.debug.assert(k <= len.*);
+    var i: usize = 0;
+    while (i + k < cells.len) : (i += 1) cells[i] = cells[i + k];
+    for (cells[cells.len - k ..]) |*c| c.* = null;
+    len.* -= k;
+}
+
+pub const storage = struct {
+    /// A ring buffer behaves like a FIFO whose unallocated tail can be
+    /// written ahead of time. Cells never written are unknown (null).
+    pub fn ringMatchesModel(cap_raw: u8, ops: [32]Op) bool {
+        const cap: usize = cap_raw % 17;
+        var backing: [16]u8 = @splat(0);
+        var ring = ring_buffer.RingBuffer(u8).init(backing[0..cap]);
+        var cells: [96]?u8 = @splat(null);
+        var len: usize = 0;
+        var counter: u8 = 1;
+
+        for (ops) |op| {
+            const window = cap - len;
+            switch (op.kind % 9) {
+                0 => {
+                    var data: [20]u8 = undefined;
+                    const n = op.b % 21;
+                    for (data[0..n]) |*d| {
+                        d.* = counter;
+                        counter +%= 1;
+                    }
+                    if (len == 0) cells = @splat(null);
+                    const got = ring.enqueueSlice(data[0..n]);
+                    if (got != @min(n, window)) return false;
+                    for (data[0..got], 0..) |d, i| cells[len + i] = d;
+                    len += got;
+                },
+                1 => {
+                    var out: [20]u8 = undefined;
+                    const n = op.b % 21;
+                    const got = ring.dequeueSlice(out[0..n]);
+                    if (got != @min(n, len)) return false;
+                    for (out[0..got], cells[0..got]) |o, c| if (c != null and c.? != o) return false;
+                    shiftDown(&cells, &len, got);
+                },
+                2 => {
+                    var data: [12]u8 = undefined;
+                    const off: usize = op.a % 21;
+                    const n = op.b % 13;
+                    for (data[0..n]) |*d| {
+                        d.* = counter;
+                        counter +%= 1;
+                    }
+                    const got = ring.writeUnallocated(off, data[0..n]);
+                    const want = if (off > window) 0 else @min(n, window - off);
+                    if (got != want) return false;
+                    for (data[0..got], 0..) |d, i| cells[len + off + i] = d;
+                },
+                3 => {
+                    var out: [20]u8 = undefined;
+                    const off: usize = op.a % 21;
+                    const n = op.b % 21;
+                    const got = ring.readAllocated(off, out[0..n]);
+                    const want = if (off > len) 0 else @min(n, len - off);
+                    if (got != want) return false;
+                    for (out[0..got], cells[off..][0..got]) |o, c| if (c != null and c.? != o) return false;
+                },
+                4 => {
+                    const k = op.a % (len + 1);
+                    ring.dequeueAllocated(k);
+                    shiftDown(&cells, &len, k);
+                },
+                5 => {
+                    const k = op.a % (window + 1);
+                    ring.enqueueUnallocated(k);
+                    len += k;
+                },
+                6 => {
+                    const max = op.b % 21;
+                    if (len == 0) cells = @splat(null);
+                    const slice = ring.enqueueMany(max);
+                    if (slice.len > @min(max, window)) return false;
+                    for (slice, 0..) |*d, i| {
+                        d.* = counter;
+                        cells[len + i] = counter;
+                        counter +%= 1;
+                    }
+                    len += slice.len;
+                },
+                7 => {
+                    const max = op.b % 21;
+                    const slice = ring.dequeueMany(max);
+                    if (slice.len > @min(max, len)) return false;
+                    if (len > 0 and max > 0 and slice.len == 0) return false;
+                    for (slice, cells[0..slice.len]) |o, c| if (c != null and c.? != o) return false;
+                    const k = slice.len;
+                    shiftDown(&cells, &len, k);
+                },
+                else => {
+                    if (op.b & 1 == 0) {
+                        const slot = ring.enqueueOne() catch {
+                            if (window != 0) return false;
+                            continue;
+                        };
+                        if (window == 0) return false;
+                        slot.* = counter;
+                        cells[len] = counter;
+                        counter +%= 1;
+                        len += 1;
+                    } else {
+                        const slot = ring.dequeueOne() catch {
+                            if (len != 0) return false;
+                            continue;
+                        };
+                        if (len == 0) return false;
+                        if (cells[0] != null and cells[0].? != slot.*) return false;
+                        shiftDown(&cells, &len, 1);
+                    }
+                },
+            }
+            if (ring.len() != len or ring.window() != cap - len) return false;
+            if (ring.contiguousWindow() > ring.window()) return false;
+        }
+        return true;
+    }
+
+    /// Packets come out in order, intact, and an empty buffer always accepts
+    /// a packet that fits the payload ring.
+    pub fn packetBufferIsFifo(meta_cap_raw: u8, payload_cap_raw: u8, ops: [32]Op) bool {
+        const Buf = packet_buffer.PacketBuffer(u8);
+        const meta_cap = meta_cap_raw % 5;
+        const payload_cap: usize = payload_cap_raw % 33;
+        var meta_storage: [4]packet_buffer.PacketMeta(u8) = @splat(.{});
+        var payload_storage: [32]u8 = @splat(0);
+        var buf = Buf.init(meta_storage[0..meta_cap], payload_storage[0..payload_cap]);
+
+        var queued_id: [8]u8 = undefined;
+        var queued_size: [8]usize = undefined;
+        var count: usize = 0;
+        var next_id: u8 = 1;
+        var used: usize = 0;
+
+        for (ops) |op| {
+            if (op.kind % 3 == 0) {
+                const size: usize = op.b % 40;
+                const fits_when_empty = count == 0 and size <= payload_cap and meta_cap >= 1;
+                const slice = buf.enqueue(size, next_id) catch {
+                    if (fits_when_empty) return false;
+                    continue;
+                };
+                if (slice.len != size or count == queued_id.len) return false;
+                @memset(slice, next_id);
+                queued_id[count] = next_id;
+                queued_size[count] = size;
+                count += 1;
+                used += size;
+                next_id +%= 1;
+                if (used > payload_cap) return false;
+            } else {
+                const peeked = buf.peek() catch {
+                    if (count != 0) return false;
+                    if (buf.dequeue()) |_| return false else |_| {}
+                    continue;
+                };
+                if (count == 0) return false;
+                if (peeked.header.* != queued_id[0] or peeked.payload.len != queued_size[0]) return false;
+                if (op.kind % 3 == 2) continue;
+                const got = buf.dequeue() catch return false;
+                if (got.header != queued_id[0] or got.payload.len != queued_size[0]) return false;
+                for (got.payload) |byte| if (byte != got.header) return false;
+                used -= queued_size[0];
+                for (0..count - 1) |k| {
+                    queued_id[k] = queued_id[k + 1];
+                    queued_size[k] = queued_size[k + 1];
+                }
+                count -= 1;
+            }
+            if (buf.isEmpty() != (count == 0)) return false;
+        }
+        return true;
+    }
+
+    /// The assembler tracks received byte ranges: compare with a bitmap.
+    pub fn assemblerMatchesModel(ops: [32]Op) bool {
+        const max_segments = 3;
+        var asmb = assembler.Assembler(max_segments).init();
+        var bits: u128 = 0;
+
+        for (ops) |op| {
+            const offset: u7 = @intCast(op.a % 72);
+            const size: u7 = @intCast(op.b % 24);
+            switch (op.kind % 3) {
+                0, 1 => {
+                    const range: u128 = if (size == 0) 0 else ((@as(u128, 1) << size) - 1) << offset;
+                    const after = bits | range;
+                    const in_order = op.kind % 3 == 1;
+                    const hole_before_data = bits != 0 and size < @ctz(bits);
+                    const consumed_in_place = in_order and offset == 0 and hole_before_data;
+                    const fits = consumed_in_place or runCount(after) <= max_segments;
+                    if (in_order) {
+                        const got = asmb.addThenRemoveFront(offset, size) catch {
+                            if (fits) return false;
+                            if (!sameRuns(&asmb, bits)) return false;
+                            continue;
+                        };
+                        if (!fits) return false;
+                        const lead = leadingRun(after);
+                        if (got != lead) return false;
+                        bits = after >> @intCast(lead);
+                    } else {
+                        asmb.add(offset, size) catch {
+                            if (fits) return false;
+                            if (!sameRuns(&asmb, bits)) return false;
+                            continue;
+                        };
+                        if (!fits) return false;
+                        bits = after;
+                    }
+                },
+                else => {
+                    const lead = leadingRun(bits);
+                    const got = asmb.removeFront();
+                    if (got != lead) return false;
+                    bits >>= @intCast(lead);
+                },
+            }
+            if (!sameRuns(&asmb, bits)) return false;
+            if (asmb.peekFront() != leadingRun(bits)) return false;
+            if (asmb.isEmpty() != (bits == 0)) return false;
+        }
+        return true;
+    }
+};
+
+fn leadingRun(bits: u128) usize {
+    return @ctz(~bits);
+}
+
+fn runCount(bits: u128) usize {
+    return @popCount(bits & ~(bits << 1));
+}
+
+fn sameRuns(asmb: anytype, bits: u128) bool {
+    var it = asmb.iterData(0);
+    var pos: usize = 0;
+    var seen: u128 = 0;
+    while (it.next()) |run| {
+        if (run[0] >= run[1] or run[1] > 128 or run[0] < pos) return false;
+        pos = run[1];
+        seen |= ((@as(u128, 1) << @intCast(run[1] - run[0])) - 1) << @intCast(run[0]);
+    }
+    return seen == bits;
+}
+
+test "laws: storage models" {
+    try zv.checkLaws(storage, .{ .iterations = iterations, .seed = 3 });
+}
+
+pub const seq = struct {
+    const Seq = tcp.SeqNumber;
+    const window_max = std.math.maxInt(i32);
+
+    pub fn u32RoundTrip(v: u32) bool {
+        return Seq.fromU32(v).toU32() == v;
+    }
+    pub fn addSubInverse(a: u32, n_raw: u32) bool {
+        const n: usize = n_raw & window_max;
+        const s = Seq.fromU32(a);
+        return s.add(n).sub(n).eql(s) and s.sub(n).add(n).eql(s) and s.add(n).toU32() == a +% @as(u32, @intCast(n));
+    }
+    pub fn diffRecoversDistance(a: u32, n_raw: u32) bool {
+        const n: usize = n_raw & window_max;
+        const s = Seq.fromU32(a);
+        return s.add(n).diff(s) == n;
+    }
+    pub fn orderWithinWindow(a: u32, n_raw: u32) bool {
+        const n: usize = n_raw & window_max;
+        const s = Seq.fromU32(a);
+        const t = s.add(n);
+        if (n == 0) return s.cmp(t) == .eq and s.eql(t);
+        return s.lessThan(t) and t.greaterThan(s) and !t.lessThan(s) and !s.greaterThan(t) and
+            s.lessThanOrEqual(t) and t.greaterThanOrEqual(s) and !s.greaterThanOrEqual(t);
+    }
+    pub fn orderIsTransitiveWithinWindow(a: u32, n_raw: u32, m_raw: u32) bool {
+        const n: usize = n_raw & 0x3fffffff;
+        const m: usize = m_raw & 0x3fffffff;
+        const s = Seq.fromU32(a);
+        const t = s.add(n);
+        const u = t.add(m);
+        if (!s.lessThanOrEqual(t) or !t.lessThanOrEqual(u)) return false;
+        return s.lessThanOrEqual(u) and u.diff(s) == n + m;
+    }
+    pub fn minMaxAgreeWithOrder(a: u32, n_raw: u32) bool {
+        const n: usize = n_raw & window_max;
+        const s = Seq.fromU32(a);
+        const t = s.add(n);
+        return s.max(t).eql(t) and t.max(s).eql(t) and s.min(t).eql(s) and t.min(s).eql(s);
+    }
+};
+
+test "laws: sequence numbers" {
+    try zv.checkLaws(seq, .{ .iterations = iterations, .seed = 4 });
 }
