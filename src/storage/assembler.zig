@@ -12,7 +12,6 @@
 // [smoltcp:storage/assembler.rs]
 
 const std = @import("std");
-const zv = @import("zv");
 
 pub fn Assembler(comptime max_segment_count: usize) type {
     return struct {
@@ -37,7 +36,7 @@ pub fn Assembler(comptime max_segment_count: usize) type {
             }
 
             fn shrinkHoleTo(self: *Contig, size: usize) void {
-                zv.requires(self.hole_size >= size);
+                std.debug.assert(self.hole_size >= size);
                 const total = self.totalSize();
                 self.hole_size = size;
                 self.data_size = total - size;
@@ -67,7 +66,7 @@ pub fn Assembler(comptime max_segment_count: usize) type {
         }
 
         fn removeContigAt(self: *Self, at: usize) void {
-            zv.requires(self.contigs[at].hasData());
+            std.debug.assert(self.contigs[at].hasData());
             for (at..max_segment_count - 1) |i| {
                 if (!self.contigs[i].hasData()) return;
                 self.contigs[i] = self.contigs[i + 1];

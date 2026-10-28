@@ -1386,6 +1386,26 @@ test "laws: handles and send limits" {
     try zv.checkLaws(send_limits, .{ .iterations = 2_000, .seed = 11 });
 }
 
+// -------------------------------------------------------------------------
+// Every address-family generic is instantiated and analyzed for both families,
+// so a method that only compiles for one (an uninstantiated Socket(ipv6) once
+// hid a compile error) fails here.
+// -------------------------------------------------------------------------
+
+test "generics compile for both IP families" {
+    inline for (.{ ipv4, ipv6 }) |Ip| {
+        std.testing.refAllDecls(tcp_socket.Socket(Ip, 4));
+        std.testing.refAllDecls(udp_socket.Socket(Ip));
+        std.testing.refAllDecls(icmp_socket.Socket(Ip));
+        std.testing.refAllDecls(raw_socket.Socket(Ip, .{ .payload_size = 64 }));
+        std.testing.refAllDecls(dns_socket.Socket(Ip));
+        std.testing.refAllDecls(iface_mod.NeighborCache(Ip));
+        std.testing.refAllDecls(iface_mod.IpState(Ip));
+        std.testing.refAllDecls(iface_mod.RoutesFor(Ip));
+        std.testing.refAllDecls(@import("wire/ip.zig").Cidr(Ip));
+    }
+}
+
 test "laws: reach report" {
     std.debug.print("\nlaw reach (parser result counts)\n", .{});
     for (probes[0..probe_count]) |p| {
