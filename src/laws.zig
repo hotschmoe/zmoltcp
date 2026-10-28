@@ -288,8 +288,8 @@ fn shiftDown(cells: []?u8, len: *usize, k: usize) void {
 pub const storage = struct {
     /// A ring buffer behaves like a FIFO whose unallocated tail can be
     /// written ahead of time. Cells never written are unknown (null).
-    pub fn ringMatchesModel(cap_raw: u8, ops: [32]Op) bool {
-        const cap: usize = cap_raw % 17;
+    pub fn ringMatchesModel(capacity: zv.Ranged(0, 16), ops: [32]Op) bool {
+        const cap: usize = capacity.get();
         var backing: [16]u8 = @splat(0);
         var ring = ring_buffer.RingBuffer(u8).init(backing[0..cap]);
         var cells: [96]?u8 = @splat(null);
@@ -403,10 +403,10 @@ pub const storage = struct {
 
     /// Packets come out in order, intact, and an empty buffer always accepts
     /// a packet that fits the payload ring.
-    pub fn packetBufferIsFifo(meta_cap_raw: u8, payload_cap_raw: u8, ops: [32]Op) bool {
+    pub fn packetBufferIsFifo(meta_capacity: zv.Ranged(0, 4), payload_capacity: zv.Ranged(0, 32), ops: [32]Op) bool {
         const Buf = packet_buffer.PacketBuffer(u8);
-        const meta_cap = meta_cap_raw % 5;
-        const payload_cap: usize = payload_cap_raw % 33;
+        const meta_cap: usize = meta_capacity.get();
+        const payload_cap: usize = payload_capacity.get();
         var meta_storage: [4]packet_buffer.PacketMeta(u8) = @splat(.{});
         var payload_storage: [32]u8 = @splat(0);
         var buf = Buf.init(meta_storage[0..meta_cap], payload_storage[0..payload_cap]);
@@ -540,35 +540,38 @@ pub const seq = struct {
     pub fn u32RoundTrip(v: u32) bool {
         return Seq.fromU32(v).toU32() == v;
     }
-    pub fn addSubInverse(a: u32, n_raw: u32) bool {
-        const n: usize = n_raw & window_max;
+    const Distance = zv.Ranged(0, window_max);
+    const HalfWindow = zv.Ranged(0, window_max / 2);
+
+    pub fn addSubInverse(a: u32, distance: Distance) bool {
+        const n: usize = distance.get();
         const s = Seq.fromU32(a);
         return s.add(n).sub(n).eql(s) and s.sub(n).add(n).eql(s) and s.add(n).toU32() == a +% @as(u32, @intCast(n));
     }
-    pub fn diffRecoversDistance(a: u32, n_raw: u32) bool {
-        const n: usize = n_raw & window_max;
+    pub fn diffRecoversDistance(a: u32, distance: Distance) bool {
+        const n: usize = distance.get();
         const s = Seq.fromU32(a);
         return s.add(n).diff(s) == n;
     }
-    pub fn orderWithinWindow(a: u32, n_raw: u32) bool {
-        const n: usize = n_raw & window_max;
+    pub fn orderWithinWindow(a: u32, distance: Distance) bool {
+        const n: usize = distance.get();
         const s = Seq.fromU32(a);
         const t = s.add(n);
         if (n == 0) return s.cmp(t) == .eq and s.eql(t);
         return s.lessThan(t) and t.greaterThan(s) and !t.lessThan(s) and !s.greaterThan(t) and
             s.lessThanOrEqual(t) and t.greaterThanOrEqual(s) and !s.greaterThanOrEqual(t);
     }
-    pub fn orderIsTransitiveWithinWindow(a: u32, n_raw: u32, m_raw: u32) bool {
-        const n: usize = n_raw & 0x3fffffff;
-        const m: usize = m_raw & 0x3fffffff;
+    pub fn orderIsTransitiveWithinWindow(a: u32, first: HalfWindow, second: HalfWindow) bool {
+        const n: usize = first.get();
+        const m: usize = second.get();
         const s = Seq.fromU32(a);
         const t = s.add(n);
         const u = t.add(m);
         if (!s.lessThanOrEqual(t) or !t.lessThanOrEqual(u)) return false;
         return s.lessThanOrEqual(u) and u.diff(s) == n + m;
     }
-    pub fn minMaxAgreeWithOrder(a: u32, n_raw: u32) bool {
-        const n: usize = n_raw & window_max;
+    pub fn minMaxAgreeWithOrder(a: u32, distance: Distance) bool {
+        const n: usize = distance.get();
         const s = Seq.fromU32(a);
         const t = s.add(n);
         return s.max(t).eql(t) and t.max(s).eql(t) and s.min(t).eql(s) and t.min(s).eql(s);
@@ -977,6 +980,7 @@ const TcpOp = struct { kind: u8, a: u16, b: u16, c: u8 };
 const TcpOpts = struct { v6: bool, ws: bool, ts: bool, sack: bool };
 
 const rx_sizes = [_]usize{ 32, 64, 1000, 4096, 65535, 65536, 70000, 140000 };
+const RxPick = zv.Ranged(0, rx_sizes.len - 1);
 const max_rx = 140_000;
 
 var rx_mem: [max_rx]u8 = undefined;
@@ -990,7 +994,7 @@ pub const tcp_state = struct {
     pub const pinned = .{
         .ringsStayInBounds = .{
             .{
-                166,
+                6,
                 0,
                 .{ .v6 = false, .ws = false, .ts = false, .sack = true },
                 .{
@@ -1159,7 +1163,7 @@ pub const tcp_state = struct {
         },
         .dispatchedSegmentsFitEgress = .{
             .{
-                94,
+                6,
                 2641736916,
                 .{ .v6 = false, .ws = true, .ts = true, .sack = false },
                 .{
@@ -1221,26 +1225,26 @@ pub const tcp_state = struct {
     const Check = enum { rings_in_bounds, window_fits_ring, fin_follows_all_data, dispatch_fits_egress };
 
     /// No operation sequence overflows the buffers or panics.
-    pub fn ringsStayInBounds(rx_pick: u8, peer_isn: u32, o: TcpOpts, ops: [48]TcpOp) bool {
+    pub fn ringsStayInBounds(rx_pick: RxPick, peer_isn: u32, o: TcpOpts, ops: [48]TcpOp) bool {
         return pick(.rings_in_bounds, rx_pick, peer_isn, o, ops);
     }
 
     /// What the in-window test admits fits the free space of the receive ring.
-    pub fn advertisedWindowFitsRing(rx_pick: u8, peer_isn: u32, o: TcpOpts, ops: [48]TcpOp) bool {
+    pub fn advertisedWindowFitsRing(rx_pick: RxPick, peer_isn: u32, o: TcpOpts, ops: [48]TcpOp) bool {
         return pick(.window_fits_ring, rx_pick, peer_isn, o, ops);
     }
 
     /// A FIN is only consumed once every byte before it was accepted.
-    pub fn finConsumesAllPrecedingData(rx_pick: u8, peer_isn: u32, o: TcpOpts, ops: [48]TcpOp) bool {
+    pub fn finConsumesAllPrecedingData(rx_pick: RxPick, peer_isn: u32, o: TcpOpts, ops: [48]TcpOp) bool {
         return pick(.fin_follows_all_data, rx_pick, peer_isn, o, ops);
     }
 
     /// Every segment the socket dispatches serializes into the stack's scratch buffer.
-    pub fn dispatchedSegmentsFitEgress(rx_pick: u8, peer_isn: u32, o: TcpOpts, ops: [48]TcpOp) bool {
+    pub fn dispatchedSegmentsFitEgress(rx_pick: RxPick, peer_isn: u32, o: TcpOpts, ops: [48]TcpOp) bool {
         return pick(.dispatch_fits_egress, rx_pick, peer_isn, o, ops);
     }
 
-    fn pick(comptime check: Check, rx_pick: u8, peer_isn: u32, o: TcpOpts, ops: [48]TcpOp) bool {
+    fn pick(comptime check: Check, rx_pick: RxPick, peer_isn: u32, o: TcpOpts, ops: [48]TcpOp) bool {
         return if (o.v6) run(ipv6, check, rx_pick, peer_isn, o, ops) else run(ipv4, check, rx_pick, peer_isn, o, ops);
     }
 
@@ -1255,12 +1259,12 @@ pub const tcp_state = struct {
         return 7;
     }
 
-    fn run(comptime Ip: type, comptime check: Check, rx_pick: u8, peer_isn: u32, o: TcpOpts, ops: [48]TcpOp) bool {
+    fn run(comptime Ip: type, comptime check: Check, rx_pick: RxPick, peer_isn: u32, o: TcpOpts, ops: [48]TcpOp) bool {
         const Sock = tcp_socket.Socket(Ip, 4);
         const local_addr = addrOf(Ip, 1);
         const peer_addr = addrOf(Ip, 2);
         const egress_limit: usize = if (Ip.ADDRESS_LEN == 16) 1460 else 1480;
-        const cap = rx_sizes[rx_pick % rx_sizes.len];
+        const cap = rx_sizes[rx_pick.get()];
         var s = Sock.initWithInitialSequenceSecret(rx_mem[0..cap], &tx_mem, peer_isn);
         s.listen(.{ .port = 80 }) catch unreachable;
         if (o.ts) s.setTsvalGenerator(&tsGen);
