@@ -63,6 +63,9 @@ jobs:
       - name: Verifier (every .verified function proved from the checked-in AIR packs)
         run: zig build verify
 
+      - name: Ownership (every function of the checked-in AIR pack is clean; the seeded mistakes are found)
+        run: zig build own own-seeded
+
       - name: Cross-compile check (aarch64-freestanding)
         run: zig build -Dtarget=aarch64-freestanding-none
 
