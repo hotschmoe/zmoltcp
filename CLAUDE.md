@@ -148,6 +148,7 @@ zig build interop                                 # zmoltcp vs real smoltcp scen
 zig build interop-upstream                        # raw-segment probes of smoltcp itself (needs cargo)
 zig build demo                                    # Run integration demos
 zig build assurance                               # Phase 0 gate: every classified fn executed by a law or scenario (plain `zig build` runs it)
+zig build own own-seeded                       # zv-own on the checked-in AIR pack (own/); own/export.sh re-exports it after editing a pinned source
 zig build -Dtarget=aarch64-freestanding-none      # Cross-compile check
 ```
 

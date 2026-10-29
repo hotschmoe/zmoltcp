@@ -1,0 +1,8 @@
+# Mistakes in the shape of zmoltcp's API, and the same calls used correctly (own/seeded.zig).
+seeded.badDnsOverLocalSlots error
+seeded.badSocketKeepsLocalBuffers error
+seeded.badSocketStoredOverLocalBuffers error
+seeded.badStaleQueryHandle error
+seeded.okQueryRoundTrip clean
+seeded.okSocketOnLocalStorageUsedHere clean
+seeded.okSocketOverCallerStorage clean

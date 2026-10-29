@@ -211,6 +211,26 @@ pub fn build(b: *std.Build) void {
         .max_trusted = 0,
     });
 
+    // `zig build own`: zv-own checks the ownership of every function in the checked-in AIR pack (own/): linear values,
+    // allocation lifetimes, pointers into storage that moves, pointers to locals that escape. `own-seeded` pins the
+    // verdicts on mistakes in the shape of this API (own/seeded.zig).
+    _ = zirakzigil.addOwnershipGate(b, .{
+        .packs = &.{"own/zmoltcp.zvp"},
+        .pins = "own/PINS",
+        .src = "src",
+        .max_unproven = 0,
+        .max_trusted = 0,
+    });
+    _ = zirakzigil.addOwnershipGate(b, .{
+        .step = "own-seeded",
+        .packs = &.{"own/seeded.zvp"},
+        .pins = "own/PINS",
+        .src = "own",
+        .files = &.{"seeded.zig"},
+        .modules = &.{"zmoltcp=src"},
+        .expect = "own/seeded.expect",
+    });
+
     addInterop(b, zmoltcp_mod, zv, optimize);
 }
 
