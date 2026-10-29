@@ -79,12 +79,12 @@ pub const Flags = struct {
 pub const ParseError = error{Truncated};
 
 fn readU16Be(data: []const u8, off: usize) u16 {
-    return @as(u16, data[off]) << 8 | @as(u16, data[off + 1]);
+    return (@as(u16, data[off]) << 8) | @as(u16, data[off + 1]);
 }
 
 fn readU32Be(data: []const u8, off: usize) u32 {
-    return @as(u32, data[off]) << 24 | @as(u32, data[off + 1]) << 16 |
-        @as(u32, data[off + 2]) << 8 | @as(u32, data[off + 3]);
+    return (@as(u32, data[off]) << 24) | (@as(u32, data[off + 1]) << 16) |
+        (@as(u32, data[off + 2]) << 8) | @as(u32, data[off + 3]);
 }
 
 pub fn transactionId(data: []const u8) ParseError!u16 {
@@ -312,7 +312,7 @@ pub fn emit(repr: Repr, buf: []u8) ParseError!usize {
     buf[0] = @truncate(repr.transaction_id >> 8);
     buf[1] = @truncate(repr.transaction_id);
 
-    const flags_val = repr.flags | @as(u16, @backingInt(repr.opcode)) << 11;
+    const flags_val = repr.flags | (@as(u16, @backingInt(repr.opcode)) << 11);
     buf[2] = @truncate(flags_val >> 8);
     buf[3] = @truncate(flags_val);
 

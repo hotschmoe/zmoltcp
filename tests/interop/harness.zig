@@ -583,8 +583,8 @@ pub const PeerProc = struct {
         std.mem.writeInt(u32, p[1..5], cfg.rx_buf, .little);
         std.mem.writeInt(u32, p[5..9], cfg.tx_buf, .little);
         std.mem.writeInt(u16, p[9..11], cfg.mtu, .little);
-        p[11] = @as(u8, @intFromBool(cfg.timestamps)) | @as(u8, @intFromBool(cfg.nagle_off)) << 1 |
-            @as(u8, @intFromBool(cfg.ack_delay_off)) << 2 | @as(u8, @intFromBool(cfg.auto_close_on_eof)) << 3;
+        p[11] = @as(u8, @intFromBool(cfg.timestamps)) | (@as(u8, @intFromBool(cfg.nagle_off)) << 1) |
+            (@as(u8, @intFromBool(cfg.ack_delay_off)) << 2) | (@as(u8, @intFromBool(cfg.auto_close_on_eof)) << 3);
         p[12] = @backingInt(cfg.cc);
         std.mem.writeInt(u64, p[13..21], cfg.seed, .little);
         _ = try self.request('H', p[0..21], null);

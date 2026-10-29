@@ -697,7 +697,7 @@ pub const structured = struct {
         const slice = ipv4.payloadSlice(data);
         if (checked) |_| {
             const p = slice catch return false;
-            const total = @as(usize, buf[2]) << 8 | buf[3];
+            const total = (@as(usize, buf[2]) << 8) | buf[3];
             return p.len == total - ihl * 4 and p.ptr == data.ptr + ihl * 4;
         } else |_| {
             _ = slice catch return true;
@@ -831,7 +831,7 @@ pub const structured = struct {
         var buf: [64]u8 = undefined;
         const n = @max(load(64, in, &buf), ipv6.HEADER_LEN);
         buf[0] = 0x60 | (buf[0] & 0x0f);
-        putU16(buf[4..6], @intCast((@as(usize, buf[4]) << 8 | buf[5]) % (n - ipv6.HEADER_LEN + 2)));
+        putU16(buf[4..6], @intCast(((@as(usize, buf[4]) << 8) | buf[5]) % (n - ipv6.HEADER_LEN + 2)));
         _ = tally("ipv6*", ipv6.checkLen(buf[0..n]));
         return tally("ipv6*", ipv6.parse(buf[0..n]));
     }
@@ -1693,7 +1693,7 @@ pub const framing = struct {
         buf[0] = 0x40 | @as(u8, @intCast(ihl));
         const data = buf[0..@max(n, ihl * 4)];
         const p = ipv4.payloadSlice(data) catch return true;
-        const declared = @as(usize, data[2]) << 8 | data[3];
+        const declared = (@as(usize, data[2]) << 8) | data[3];
         return within(data, p) and p.len + ihl * 4 == declared;
     }
     pub fn ipv6PayloadInsideInput(in: zv.Bytes(64)) bool {
@@ -1702,7 +1702,7 @@ pub const framing = struct {
         buf[0] = 0x60 | (buf[0] & 0x0f);
         const data = buf[0..n];
         const p = ipv6.payloadSlice(data) catch return true;
-        const declared = @as(usize, data[4]) << 8 | data[5];
+        const declared = (@as(usize, data[4]) << 8) | data[5];
         return within(data, p) and p.len == declared;
     }
     pub fn udpPayloadInsideInput(in: zv.Bytes(48)) bool {
@@ -1710,7 +1710,7 @@ pub const framing = struct {
         const n = load(48, in, &buf);
         const data = buf[0..n];
         const p = udp.payloadSlice(data) catch return true;
-        const declared = if (n >= 6) @as(usize, data[4]) << 8 | data[5] else 0;
+        const declared = if (n >= 6) (@as(usize, data[4]) << 8) | data[5] else 0;
         return within(data, p) and p.len + udp.HEADER_LEN == declared;
     }
     pub fn ethernetPayloadInsideInput(in: zv.Bytes(32)) bool {

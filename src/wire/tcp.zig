@@ -216,12 +216,12 @@ pub fn parse(data: []const u8) error{ Truncated, BadDataOffset }!Repr {
     const flags_byte = data[13];
 
     var repr = Repr{
-        .src_port = @as(u16, data[0]) << 8 | @as(u16, data[1]),
-        .dst_port = @as(u16, data[2]) << 8 | @as(u16, data[3]),
-        .seq_number = @as(u32, data[4]) << 24 | @as(u32, data[5]) << 16 |
-            @as(u32, data[6]) << 8 | @as(u32, data[7]),
-        .ack_number = @as(u32, data[8]) << 24 | @as(u32, data[9]) << 16 |
-            @as(u32, data[10]) << 8 | @as(u32, data[11]),
+        .src_port = (@as(u16, data[0]) << 8) | @as(u16, data[1]),
+        .dst_port = (@as(u16, data[2]) << 8) | @as(u16, data[3]),
+        .seq_number = (@as(u32, data[4]) << 24) | (@as(u32, data[5]) << 16) |
+            (@as(u32, data[6]) << 8) | @as(u32, data[7]),
+        .ack_number = (@as(u32, data[8]) << 24) | (@as(u32, data[9]) << 16) |
+            (@as(u32, data[10]) << 8) | @as(u32, data[11]),
         .data_offset = data_offset,
         .flags = .{
             .fin = (flags_byte & 0x01) != 0,
@@ -233,9 +233,9 @@ pub fn parse(data: []const u8) error{ Truncated, BadDataOffset }!Repr {
             .ece = (flags_byte & 0x40) != 0,
             .cwr = (flags_byte & 0x80) != 0,
         },
-        .window_size = @as(u16, data[14]) << 8 | @as(u16, data[15]),
-        .checksum = @as(u16, data[16]) << 8 | @as(u16, data[17]),
-        .urgent_pointer = @as(u16, data[18]) << 8 | @as(u16, data[19]),
+        .window_size = (@as(u16, data[14]) << 8) | @as(u16, data[15]),
+        .checksum = (@as(u16, data[16]) << 8) | @as(u16, data[17]),
+        .urgent_pointer = (@as(u16, data[18]) << 8) | @as(u16, data[19]),
     };
 
     // Parse options
@@ -260,7 +260,7 @@ fn parseOptions(options: []const u8, repr: *Repr) void {
                 if (i + 1 >= options.len) return;
                 const opt_len = options[i + 1];
                 if (opt_len != 4 or i + opt_len > options.len) return;
-                repr.max_seg_size = @as(u16, options[i + 2]) << 8 | @as(u16, options[i + 3]);
+                repr.max_seg_size = (@as(u16, options[i + 2]) << 8) | @as(u16, options[i + 3]);
                 i += opt_len;
             },
             .window_scale => {
@@ -289,10 +289,10 @@ fn parseOptions(options: []const u8, repr: *Repr) void {
                     const start = i + 2 + ri * 8;
                     if (start + 8 > i + opt_len) break;
                     repr.sack_ranges[ri] = .{
-                        .left = @as(u32, options[start]) << 24 | @as(u32, options[start + 1]) << 16 |
-                            @as(u32, options[start + 2]) << 8 | @as(u32, options[start + 3]),
-                        .right = @as(u32, options[start + 4]) << 24 | @as(u32, options[start + 5]) << 16 |
-                            @as(u32, options[start + 6]) << 8 | @as(u32, options[start + 7]),
+                        .left = (@as(u32, options[start]) << 24) | (@as(u32, options[start + 1]) << 16) |
+                            (@as(u32, options[start + 2]) << 8) | @as(u32, options[start + 3]),
+                        .right = (@as(u32, options[start + 4]) << 24) | (@as(u32, options[start + 5]) << 16) |
+                            (@as(u32, options[start + 6]) << 8) | @as(u32, options[start + 7]),
                     };
                 }
                 i += opt_len;
@@ -302,10 +302,10 @@ fn parseOptions(options: []const u8, repr: *Repr) void {
                 const opt_len = options[i + 1];
                 if (opt_len != 10 or i + 10 > options.len) return;
                 repr.timestamp = .{
-                    .tsval = @as(u32, options[i + 2]) << 24 | @as(u32, options[i + 3]) << 16 |
-                        @as(u32, options[i + 4]) << 8 | @as(u32, options[i + 5]),
-                    .tsecr = @as(u32, options[i + 6]) << 24 | @as(u32, options[i + 7]) << 16 |
-                        @as(u32, options[i + 8]) << 8 | @as(u32, options[i + 9]),
+                    .tsval = (@as(u32, options[i + 2]) << 24) | (@as(u32, options[i + 3]) << 16) |
+                        (@as(u32, options[i + 4]) << 8) | @as(u32, options[i + 5]),
+                    .tsecr = (@as(u32, options[i + 6]) << 24) | (@as(u32, options[i + 7]) << 16) |
+                        (@as(u32, options[i + 8]) << 8) | @as(u32, options[i + 9]),
                 };
                 i += 10;
             },

@@ -630,7 +630,7 @@ fn emitNextHeader(nh: NextHeader, buf: []u8) usize {
 /// Extract 20-bit flow label from 3 bytes (low 4 bits of byte 0 + bytes 1..2).
 fn readFlowLabel(bytes: *const [3]u8) u20 {
     const hi: u20 = @as(u20, bytes[0] & 0x0F) << 16;
-    const lo: u20 = @as(u20, bytes[1]) << 8 | @as(u20, bytes[2]);
+    const lo: u20 = (@as(u20, bytes[1]) << 8) | @as(u20, bytes[2]);
     return hi | lo;
 }
 

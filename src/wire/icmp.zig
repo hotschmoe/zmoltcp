@@ -60,7 +60,7 @@ pub fn parse(data: []const u8) error{ Truncated, BadChecksum }!Repr {
 
     const icmp_type: Type = @fromBackingInt(data[0]);
     const code = data[1];
-    const cksum: u16 = @as(u16, data[2]) << 8 | @as(u16, data[3]);
+    const cksum: u16 = (@as(u16, data[2]) << 8) | @as(u16, data[3]);
 
     switch (icmp_type) {
         .echo_request, .echo_reply => {
@@ -68,8 +68,8 @@ pub fn parse(data: []const u8) error{ Truncated, BadChecksum }!Repr {
                 .icmp_type = icmp_type,
                 .code = code,
                 .checksum = cksum,
-                .identifier = @as(u16, data[4]) << 8 | @as(u16, data[5]),
-                .sequence = @as(u16, data[6]) << 8 | @as(u16, data[7]),
+                .identifier = (@as(u16, data[4]) << 8) | @as(u16, data[5]),
+                .sequence = (@as(u16, data[6]) << 8) | @as(u16, data[7]),
             } };
         },
         else => {
@@ -77,8 +77,8 @@ pub fn parse(data: []const u8) error{ Truncated, BadChecksum }!Repr {
                 .icmp_type = icmp_type,
                 .code = code,
                 .checksum = cksum,
-                .data = @as(u32, data[4]) << 24 | @as(u32, data[5]) << 16 |
-                    @as(u32, data[6]) << 8 | @as(u32, data[7]),
+                .data = (@as(u32, data[4]) << 24) | (@as(u32, data[5]) << 16) |
+                    (@as(u32, data[6]) << 8) | @as(u32, data[7]),
             } };
         },
     }

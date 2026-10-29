@@ -3655,7 +3655,7 @@ test "stack reassembles two-fragment ICMP echo" {
     var cksum: u32 = 0;
     var ci: usize = 0;
     while (ci < icmp_payload.len) : (ci += 2) {
-        cksum += @as(u32, icmp_payload[ci]) << 8 | icmp_payload[ci + 1];
+        cksum += (@as(u32, icmp_payload[ci]) << 8) | icmp_payload[ci + 1];
     }
     while (cksum >> 16 != 0) cksum = (cksum & 0xFFFF) + (cksum >> 16);
     const final_cksum: u16 = @truncate(~cksum);
@@ -4050,7 +4050,7 @@ test "TCP checksum offload skips computation" {
 
     // Checksum field should be left zeroed (hardware computes TX checksum).
     const tcp_data = try ipv4.payloadSlice(ip_data);
-    const tcp_cksum = @as(u16, tcp_data[16]) << 8 | @as(u16, tcp_data[17]);
+    const tcp_cksum = (@as(u16, tcp_data[16]) << 8) | @as(u16, tcp_data[17]);
     try testing.expectEqual(@as(u16, 0), tcp_cksum);
 }
 
@@ -4693,7 +4693,7 @@ fn verifyMldReport(tx_frame: []const u8) !struct { record_type: mld.RecordType, 
 
     // MLD Report body: reserved(2) + nr_records(2) = 4 bytes at ICMPv6 byte 4
     const mld_body = icmpv6_data[4..];
-    const nr_records = @as(u16, mld_body[2]) << 8 | @as(u16, mld_body[3]);
+    const nr_records = (@as(u16, mld_body[2]) << 8) | @as(u16, mld_body[3]);
     try testing.expectEqual(@as(u16, 1), nr_records);
 
     // Address record at byte 4
@@ -5769,7 +5769,7 @@ test "stack v6 UDP egress dispatches datagram with mandatory checksum" {
     try testing.expectEqualSlices(u8, "Hello", payload);
 
     // Verify mandatory IPv6 UDP checksum (must be non-zero and valid)
-    const stored_cksum: u16 = @as(u16, udp_data[6]) << 8 | @as(u16, udp_data[7]);
+    const stored_cksum: u16 = (@as(u16, udp_data[6]) << 8) | @as(u16, udp_data[7]);
     try testing.expect(stored_cksum != 0);
     try testing.expect(udp_wire.verifyChecksumV6(udp_data, ip_repr.src_addr, ip_repr.dst_addr));
 }
