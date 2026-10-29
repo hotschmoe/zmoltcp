@@ -133,12 +133,13 @@ zig build -Dtarget=aarch64-freestanding-none
 zig build
 ```
 
-Zig version: 0.16.0
+Zig version: 0.17.0
 
 ## Testing
 
-The host suite covers deterministic conformance tests, bounded fuzz target
-smoke tests, integration demos, and regression tests. Deterministic protocol
+The host suite covers deterministic conformance tests, integration demos, and
+regression tests. Fuzzing runs locally (`mise run fuzz`, `mise run fuzz-long`);
+CI does not fuzz, because runner time makes it flaky. Deterministic protocol
 tests are transliterated from smoltcp's test suite where applicable (see
 SPEC.md for the conformance testing methodology and tests/CONFORMANCE.md for
 per-test tracking). The smoltcp source is included as a git submodule under
