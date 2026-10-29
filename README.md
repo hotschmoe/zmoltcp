@@ -171,6 +171,22 @@ Verification uses [zirakzigil](https://github.com/hotschmoe/zirakzigil) (`zv`), 
 - `zig build test` runs the executable laws in `src/laws.zig` with fixed seeds: parser totality and parse/emit round-trips for every wire format (plus structure-aware variants that get past checksum and version guards), framing and single-bit-integrity shapes, SeqNumber and storage model laws, a stateful TCP socket law, neighbor-cache and send-limit laws, and pinned counterexamples. A failing law prints its arguments and a `zv.laws.replay(...)` call; a law that panics is re-run with `.trace = true`. Set `report_reach = true` in `src/laws.zig` to print how often each parser reaches a value versus each error.
 - `zig build assurance` prints one line per module: every module carries `pub const assurance` and gates itself with `zv.requireAssurance(@This(), .tested)`, so a new public function without a classification fails the build. `-Dghost=true` compiles zv ghost code.
 
+### Interop with smoltcp
+
+`zig build interop` runs zmoltcp against a real smoltcp (a Rust peer in `tests/interop/peer`) over a link the
+harness controls: both stacks share one virtual clock and exchange Ethernet frames through
+`tests/interop/harness.zig`, which can drop, duplicate, reorder, delay and corrupt them from a seeded schedule.
+Nothing touches a real network, a TAP device or the wall clock, so a run is a pure function of its seeds.
+It needs `cargo` (stable Rust) on `PATH`, builds the peer twice (release, and release with debug assertions and
+overflow checks), and is deliberately not part of `zig build test` or `zig build matrix`.
+
+- `tests/interop/scenarios.zig`: handshake and echo, 1 MiB bulk, bulk over a lossy reordering link, window scaling,
+  zero window and persist, simultaneous close, half-close, abort, SACK and timestamp negotiation, MSS/MTU edges; both
+  directions, IPv4 and IPv6. `transferIsExact` is a `zv` law over link schedules, with `pinned` entries for failures.
+- `zig build interop-upstream` sends smoltcp (08bacc9 and upstream main, each in release, release with assertions,
+  and dev builds) the raw segment sequences behind four zmoltcp TCP fixes and checks what it does. `-Dinterop-filter=<text>`
+  narrows the scenario run to matching test names.
+
 ## Integration Demos
 
 Fifteen end-to-end demos exercise the full stack API (sockets -> Stack poll

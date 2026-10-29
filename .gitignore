@@ -2,3 +2,4 @@
 zig-out/
 zig-pkg/
 .archive/
+tests/interop/peer/target/

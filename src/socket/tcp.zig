@@ -1888,7 +1888,9 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
 
         fn windowToUpdate(self: Self) bool {
             return switch (self.state) {
-                .syn_sent, .syn_received, .established, .fin_wait_1, .fin_wait_2 => {
+                // Not in the SYN states: a SYN carries an unscaled window and cannot be updated, so
+                // asking for an update there would dispatch the SYN again, forever.
+                .established, .fin_wait_1, .fin_wait_2 => {
                     const new_win = self.scaledWindow();
                     if (new_win == 0) return false;
                     const last_win = self.lastScaledWindow() orelse return false;
