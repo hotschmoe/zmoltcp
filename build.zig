@@ -208,6 +208,7 @@ pub fn build(b: *std.Build) void {
         .packs = &.{"verify/zmoltcp.zvp"},
         .pins = "verify/PINS",
         .src = "src",
+        .max_trusted = 0,
     });
 
     addInterop(b, zmoltcp_mod, zv, optimize);
