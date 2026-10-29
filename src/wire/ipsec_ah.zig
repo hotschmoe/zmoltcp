@@ -18,6 +18,8 @@ comptime {
 }
 
 pub const MIN_HEADER_LEN: usize = 12;
+/// The length field is a byte counting 32-bit words minus two.
+pub const MAX_ICV_LEN: usize = (255 + 2) * 4 - MIN_HEADER_LEN;
 
 pub const Repr = struct {
     next_header: ipv4.Protocol,
@@ -40,7 +42,9 @@ pub fn parse(data: []const u8) error{ Truncated, Malformed }!Repr {
     };
 }
 
-pub fn emit(repr: Repr, icv: []const u8, buf: []u8) error{Truncated}!void {
+/// RFC 4302 2.2: the header is a multiple of 32 bits and its length field counts 32-bit words minus two.
+pub fn emit(repr: Repr, icv: []const u8, buf: []u8) error{ Truncated, BadIcvLen }!void {
+    if (repr.icv_len % 4 != 0 or repr.icv_len > MAX_ICV_LEN) return error.BadIcvLen;
     const total = bufferLen(repr);
     if (buf.len < total) return error.Truncated;
     if (icv.len != repr.icv_len) return error.Truncated;

@@ -79,6 +79,23 @@ const fuzz_targets = [_]FuzzTarget{
     },
 };
 
+const demos = [_][]const u8{
+    "examples/loopback_echo.zig",
+    "examples/back_to_back.zig",
+    "examples/udp_icmp.zig",
+    "examples/ipv6_echo.zig",
+    "examples/fault_tolerant.zig",
+    "examples/ip_medium.zig",
+    "examples/fragmentation.zig",
+    "examples/multi_socket.zig",
+    "examples/raw_socket.zig",
+    "examples/dual_stack.zig",
+    "examples/dns_resolve.zig",
+    "examples/phy_middleware.zig",
+    "examples/dhcp_client.zig",
+    "examples/sixlowpan.zig",
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -156,22 +173,7 @@ pub fn build(b: *std.Build) void {
 
     // Integration demos -- `zig build demo`
     const demo_step = b.step("demo", "Run zmoltcp integration demos");
-    for ([_][]const u8{
-        "examples/loopback_echo.zig",
-        "examples/back_to_back.zig",
-        "examples/udp_icmp.zig",
-        "examples/ipv6_echo.zig",
-        "examples/fault_tolerant.zig",
-        "examples/ip_medium.zig",
-        "examples/fragmentation.zig",
-        "examples/multi_socket.zig",
-        "examples/raw_socket.zig",
-        "examples/dual_stack.zig",
-        "examples/dns_resolve.zig",
-        "examples/phy_middleware.zig",
-        "examples/dhcp_client.zig",
-        "examples/sixlowpan.zig",
-    }) |path| {
+    for (demos) |path| {
         const demo_mod = b.createModule(.{
             .root_source_file = b.path(path),
             .target = target,
@@ -191,7 +193,15 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zmoltcp", .module = zmoltcp_mod },
         },
     }) });
-    b.step("assurance", "Print the per-module assurance table").dependOn(&b.addRunArtifact(report).step);
+    var demo_roots: [demos.len]std.Build.LazyPath = undefined;
+    for (demos, &demo_roots) |path, *root| root.* = b.path(path);
+    _ = zirakzigil.addAssuranceGate(b, .{
+        .report = report,
+        .src = b.path("src"),
+        .lib_name = "zmoltcp",
+        .laws = &.{"laws.zig"},
+        .scenarios = &demo_roots,
+    });
 
     addInterop(b, zmoltcp_mod, zv, optimize);
 }

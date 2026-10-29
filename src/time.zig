@@ -81,7 +81,7 @@ pub const Instant = struct {
     }
 
     pub fn millis(self: Instant) i64 {
-        return @mod(@divTrunc(self.micros, 1000), 1000);
+        return @rem(@divTrunc(self.micros, 1000), 1000);
     }
 
     pub fn add(self: Instant, d: Duration) Instant {
@@ -144,7 +144,7 @@ pub const Duration = struct {
     }
 
     pub fn millis(self: Duration) i64 {
-        return @mod(@divTrunc(self.micros, 1000), 1000);
+        return @rem(@divTrunc(self.micros, 1000), 1000);
     }
 
     pub fn add(self: Duration, other: Duration) Duration {

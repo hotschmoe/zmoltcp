@@ -44,6 +44,10 @@ const Duration = time.Duration;
 
 const DEFAULT_LEASE_DURATION = Duration.fromSecs(120);
 
+/// The request timeout doubles every two retries; the retry count is a configurable u16, so the
+/// doubling stops here (a day-long timeout shifted this far still fits).
+const MAX_REQUEST_BACKOFF_SHIFT: u16 = 16;
+
 const DEFAULT_PARAMETER_REQUEST_LIST = [_]u8{
     wire.OPT_SUBNET_MASK,
     wire.OPT_ROUTER,
@@ -346,7 +350,7 @@ pub const Socket = struct {
                 dhcp_repr.requested_ip = state.requested_ip;
                 dhcp_repr.server_identifier = state.server.identifier;
 
-                const shift: u5 = @intCast(state.retry / 2);
+                const shift: u5 = @intCast(@min(state.retry / 2, MAX_REQUEST_BACKOFF_SHIFT));
                 state.retry_at = now.add(self.retry_config.initial_request_timeout.shl(shift));
                 state.retry += 1;
 

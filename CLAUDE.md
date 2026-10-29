@@ -116,7 +116,7 @@ Only if all three answers are "yes" should you fix the code.
 
 **Don't test the type system**: When writing tests, do not add cases for invariants or errors already enforced by the static type system (e.g., type mismatches, missing required arguments, nullability violations, return type correctness, enum exhaustiveness). The type checker handles these at compile time. Test solely runtime behaviors, business rules, algorithmic logic, and edge cases using only valid typed inputs.
 
-**Project policy (zmoltcp)**: laws are the specification (`src/laws.zig`, run by `zig build test`). End-to-end scenario tests (stack-level exchanges, multi-step socket conversations, demos) are allowed. Do not add small single-function unit tests. A regression is a pinned law instance: a direct call of the law, or `zv.laws.replay`, with the exact counterexample; add a scenario test only where no law applies. Behavior is decided by correctness and smoltcp's design, never by what existing tests assume.
+**Project policy (zmoltcp)**: `.tested` in a manifest means a law or scenario executes the function (measured by `zig build assurance`; unit tests do not count). Laws are the specification (`src/laws.zig`, run by `zig build test`). End-to-end scenario tests (stack-level exchanges, multi-step socket conversations, demos) are allowed. Do not add small single-function unit tests. A regression is a pinned law instance: a direct call of the law, or `zv.laws.replay`, with the exact counterexample; add a scenario test only where no law applies. Behavior is decided by correctness and smoltcp's design, never by what existing tests assume.
 <!-- END:testing-philosophy -->
 
 <!-- BEGIN:footer -->
@@ -147,6 +147,7 @@ zig build matrix --summary all                    # All optimize modes, ghost on
 zig build interop                                 # zmoltcp vs real smoltcp scenarios (needs cargo)
 zig build interop-upstream                        # raw-segment probes of smoltcp itself (needs cargo)
 zig build demo                                    # Run integration demos
+zig build assurance                               # Phase 0 gate: every classified fn executed by a law or scenario (plain `zig build` runs it)
 zig build -Dtarget=aarch64-freestanding-none      # Cross-compile check
 ```
 

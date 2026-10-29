@@ -34,6 +34,8 @@ comptime {
 }
 
 pub const SEQUENCE_WINDOW: u8 = 16;
+/// Interval exponents arrive as 8-bit wire fields; 2^40 ms (about 35 years) keeps time arithmetic in range.
+const MAX_INTERVAL_EXP: u32 = 40;
 pub const DEFAULT_MIN_HOP_RANK_INCREASE: u16 = 256;
 pub const DEFAULT_DIO_INTERVAL_MIN: u32 = 12;
 pub const DEFAULT_DIO_REDUNDANCY_CONSTANT: u8 = 10;
@@ -99,7 +101,7 @@ pub const ObjectiveFunction0 = struct {
     const RANK_STRETCH: u16 = 0;
 
     pub fn computeRank(parent_rank: Rank) Rank {
-        const increase = (RANK_FACTOR * RANK_STEP + RANK_STRETCH) * parent_rank.min_hop_rank_increase;
+        const increase = (RANK_FACTOR * RANK_STEP + RANK_STRETCH) *| parent_rank.min_hop_rank_increase;
         return .{
             .value = parent_rank.value +| increase,
             .min_hop_rank_increase = parent_rank.min_hop_rank_increase,
@@ -309,7 +311,7 @@ pub const TrickleTimer = struct {
     i_expiration: time.Instant,
 
     pub fn init(i_min: u32, i_doublings: u32, k: u8, now: time.Instant, rand: u32) TrickleTimer {
-        const i_max = i_min + i_doublings;
+        const i_max = i_min +| i_doublings;
         var timer = TrickleTimer{
             .i_min_exp = i_min,
             .i_max_exp = i_max,
@@ -362,8 +364,7 @@ pub const TrickleTimer = struct {
     }
 
     fn intervalMs(exp: u32) u64 {
-        if (exp >= 64) return std.math.maxInt(u64);
-        return @as(u64, 1) << @intCast(exp);
+        return @as(u64, 1) << @intCast(@min(exp, MAX_INTERVAL_EXP));
     }
 };
 
