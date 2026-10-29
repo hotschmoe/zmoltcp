@@ -82,7 +82,7 @@ pub fn parse(data: []const u8) error{ Truncated, BadOption }!Repr {
         .padn => .{ .padn = length },
         .router_alert => blk: {
             if (length != 2) break :blk error.BadOption;
-            const val: u16 = @as(u16, data[2]) << 8 | @as(u16, data[3]);
+            const val: u16 = (@as(u16, data[2]) << 8) | @as(u16, data[3]);
             break :blk .{ .router_alert = @fromBackingInt(val) };
         },
         else => .{ .unknown = .{

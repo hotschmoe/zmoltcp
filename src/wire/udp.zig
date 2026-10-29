@@ -35,10 +35,10 @@ pub const Repr = struct {
 pub fn parse(data: []const u8) error{Truncated}!Repr {
     if (data.len < HEADER_LEN) return error.Truncated;
     return .{
-        .src_port = @as(u16, data[0]) << 8 | @as(u16, data[1]),
-        .dst_port = @as(u16, data[2]) << 8 | @as(u16, data[3]),
-        .length = @as(u16, data[4]) << 8 | @as(u16, data[5]),
-        .checksum = @as(u16, data[6]) << 8 | @as(u16, data[7]),
+        .src_port = (@as(u16, data[0]) << 8) | @as(u16, data[1]),
+        .dst_port = (@as(u16, data[2]) << 8) | @as(u16, data[3]),
+        .length = (@as(u16, data[4]) << 8) | @as(u16, data[5]),
+        .checksum = (@as(u16, data[6]) << 8) | @as(u16, data[7]),
     };
 }
 
@@ -75,7 +75,7 @@ pub fn computeChecksumV6(src_ip: [16]u8, dst_ip: [16]u8, udp_data: []const u8) u
 
 fn datagramLen(data: []const u8) error{Truncated}!usize {
     if (data.len < HEADER_LEN) return error.Truncated;
-    const length: usize = @as(usize, data[4]) << 8 | @as(usize, data[5]);
+    const length: usize = (@as(usize, data[4]) << 8) | @as(usize, data[5]);
     if (length < HEADER_LEN or length > data.len) return error.Truncated;
     return length;
 }

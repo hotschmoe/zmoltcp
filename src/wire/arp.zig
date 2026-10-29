@@ -42,18 +42,18 @@ pub fn parse(data: []const u8) error{ Truncated, UnsupportedHardware, Unsupporte
     if (data.len < HEADER_LEN) return error.Truncated;
 
     // Hardware type must be Ethernet (1)
-    const hw_type: u16 = @as(u16, data[0]) << 8 | @as(u16, data[1]);
+    const hw_type: u16 = (@as(u16, data[0]) << 8) | @as(u16, data[1]);
     if (hw_type != 1) return error.UnsupportedHardware;
 
     // Protocol type must be IPv4 (0x0800)
-    const proto_type: u16 = @as(u16, data[2]) << 8 | @as(u16, data[3]);
+    const proto_type: u16 = (@as(u16, data[2]) << 8) | @as(u16, data[3]);
     if (proto_type != 0x0800) return error.UnsupportedProtocol;
 
     // Address lengths must match the fixed Ethernet/IPv4 layout below.
     if (data[4] != 6) return error.UnsupportedHardware;
     if (data[5] != 4) return error.UnsupportedProtocol;
 
-    const operation: u16 = @as(u16, data[6]) << 8 | @as(u16, data[7]);
+    const operation: u16 = (@as(u16, data[6]) << 8) | @as(u16, data[7]);
     if (operation != 1 and operation != 2) return error.UnsupportedOperation;
 
     return .{

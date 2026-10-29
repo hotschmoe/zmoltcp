@@ -82,12 +82,12 @@ pub fn pseudoHeaderChecksumV6(
 // -------------------------------------------------------------------------
 
 pub fn readU16(data: *const [2]u8) u16 {
-    return @as(u16, data[0]) << 8 | @as(u16, data[1]);
+    return (@as(u16, data[0]) << 8) | @as(u16, data[1]);
 }
 
 pub fn readU32(data: *const [4]u8) u32 {
-    return @as(u32, data[0]) << 24 | @as(u32, data[1]) << 16 |
-        @as(u32, data[2]) << 8 | @as(u32, data[3]);
+    return (@as(u32, data[0]) << 24) | (@as(u32, data[1]) << 16) |
+        (@as(u32, data[2]) << 8) | @as(u32, data[3]);
 }
 
 pub fn writeU16(buf: *[2]u8, val: u16) void {

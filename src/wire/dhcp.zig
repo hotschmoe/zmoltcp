@@ -30,12 +30,12 @@ const MAGIC_NUMBER: u32 = 0x63825363;
 const MIN_HEADER_LEN = 240;
 
 fn readU16Be(data: []const u8, off: usize) u16 {
-    return @as(u16, data[off]) << 8 | @as(u16, data[off + 1]);
+    return (@as(u16, data[off]) << 8) | @as(u16, data[off + 1]);
 }
 
 fn readU32Be(data: []const u8, off: usize) u32 {
-    return @as(u32, data[off]) << 24 | @as(u32, data[off + 1]) << 16 |
-        @as(u32, data[off + 2]) << 8 | @as(u32, data[off + 3]);
+    return (@as(u32, data[off]) << 24) | (@as(u32, data[off + 1]) << 16) |
+        (@as(u32, data[off + 2]) << 8) | @as(u32, data[off + 3]);
 }
 
 pub const OpCode = enum(u8) {

@@ -107,7 +107,7 @@ fn eql(a: Address, b: Address) bool {
 pub fn formatAddr(addr: Address, buf: *[39]u8) []const u8 {
     var groups: [8]u16 = undefined;
     for (0..8) |i| {
-        groups[i] = @as(u16, addr[i * 2]) << 8 | @as(u16, addr[i * 2 + 1]);
+        groups[i] = (@as(u16, addr[i * 2]) << 8) | @as(u16, addr[i * 2 + 1]);
     }
 
     // Find the longest run of consecutive zero groups
@@ -197,7 +197,7 @@ pub fn parseHeader(data: []const u8) error{ Truncated, BadVersion }!Repr {
     return .{
         .next_header = @fromBackingInt(data[6]),
         .hop_limit = data[7],
-        .payload_len = @as(u16, data[4]) << 8 | @as(u16, data[5]),
+        .payload_len = (@as(u16, data[4]) << 8) | @as(u16, data[5]),
         .src_addr = data[8..24].*,
         .dst_addr = data[24..40].*,
     };
@@ -231,7 +231,7 @@ pub fn checkLen(data: []const u8) error{ Truncated, BadVersion }!void {
     if (data.len < HEADER_LEN) return error.Truncated;
     const version: u4 = @truncate(data[0] >> 4);
     if (version != 6) return error.BadVersion;
-    const payload_len: usize = @as(usize, data[4]) << 8 | @as(usize, data[5]);
+    const payload_len: usize = (@as(usize, data[4]) << 8) | @as(usize, data[5]);
     if (data.len < HEADER_LEN + payload_len) return error.Truncated;
 }
 
@@ -241,7 +241,7 @@ pub fn checkLen(data: []const u8) error{ Truncated, BadVersion }!void {
 /// rejected like the IPv4 and UDP views do, never converted into a partial payload.
 pub fn payloadSlice(data: []const u8) error{Truncated}![]const u8 {
     if (data.len < HEADER_LEN) return error.Truncated;
-    const payload_len: usize = @as(usize, data[4]) << 8 | @as(usize, data[5]);
+    const payload_len: usize = (@as(usize, data[4]) << 8) | @as(usize, data[5]);
     if (HEADER_LEN + payload_len > data.len) return error.Truncated;
     return data[HEADER_LEN..][0..payload_len];
 }

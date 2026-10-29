@@ -10,8 +10,24 @@ description = "Run integration demos"
 run = "zig build demo --summary all"
 
 [tasks.fuzz]
-description = "Run bounded native fuzz smoke"
-run = "bash scripts/fuzz-smoke.sh"
+description = "Run bounded P0 native fuzz smoke"
+run = "/bin/bash scripts/fuzz-smoke.sh"
+
+[tasks.fuzz-p1]
+description = "Run bounded P1 native fuzz smoke"
+run = "FUZZ_SMOKE_TARGETS='fuzz-protocol-parsers fuzz-rpl-state' /bin/bash scripts/fuzz-smoke.sh"
+
+[tasks.fuzz-p2]
+description = "Run bounded P2 native fuzz smoke"
+run = "FUZZ_SMOKE_TARGETS='fuzz-storage-streams fuzz-socket-state fuzz-phy-middleware' /bin/bash scripts/fuzz-smoke.sh"
+
+[tasks.fuzz-all]
+description = "Run bounded native fuzz smoke across all targets"
+run = "FUZZ_SMOKE_TARGETS='fuzz-dns fuzz-tcp-header fuzz-ip-header fuzz-ipv6-extension fuzz-stack-ingress fuzz-reassembly fuzz-protocol-parsers fuzz-rpl-state fuzz-storage-streams fuzz-socket-state fuzz-phy-middleware' /bin/bash scripts/fuzz-smoke.sh"
+
+[tasks.fuzz-long]
+description = "Run a longer wall-clock-bounded native fuzz campaign"
+run = "/bin/bash scripts/fuzz-long.sh"
 
 [tasks.cross]
 description = "Cross-compile for aarch64 freestanding"

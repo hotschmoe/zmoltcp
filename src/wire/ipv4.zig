@@ -112,20 +112,20 @@ pub fn parse(data: []const u8) error{ Truncated, BadVersion, BadHeaderLen }!Repr
     const header_len: usize = @as(usize, ihl) * 4;
     if (data.len < header_len) return error.Truncated;
 
-    const flags_frag: u16 = @as(u16, data[6]) << 8 | @as(u16, data[7]);
+    const flags_frag: u16 = (@as(u16, data[6]) << 8) | @as(u16, data[7]);
 
     return .{
         .version = version,
         .ihl = ihl,
         .dscp_ecn = data[1],
-        .total_length = @as(u16, data[2]) << 8 | @as(u16, data[3]),
-        .identification = @as(u16, data[4]) << 8 | @as(u16, data[5]),
+        .total_length = (@as(u16, data[2]) << 8) | @as(u16, data[3]),
+        .identification = (@as(u16, data[4]) << 8) | @as(u16, data[5]),
         .dont_fragment = (flags_frag & 0x4000) != 0,
         .more_fragments = (flags_frag & 0x2000) != 0,
         .fragment_offset = @truncate(flags_frag & 0x1FFF),
         .ttl = data[8],
         .protocol = @fromBackingInt(data[9]),
-        .checksum = @as(u16, data[10]) << 8 | @as(u16, data[11]),
+        .checksum = (@as(u16, data[10]) << 8) | @as(u16, data[11]),
         .src_addr = data[12..16].*,
         .dst_addr = data[16..20].*,
     };
@@ -189,7 +189,7 @@ fn validatedHeaderLen(data: []const u8) error{ Truncated, BadHeaderLen }!usize {
 }
 
 fn totalLength(data: []const u8) usize {
-    return @as(usize, data[2]) << 8 | @as(usize, data[3]);
+    return (@as(usize, data[2]) << 8) | @as(usize, data[3]);
 }
 
 /// Validate that the buffer is consistent: total_length must not exceed

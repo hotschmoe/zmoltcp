@@ -450,11 +450,11 @@ const PcapTestState = struct {
 };
 
 fn readLeU32(b: []const u8) u32 {
-    return @as(u32, b[0]) | @as(u32, b[1]) << 8 | @as(u32, b[2]) << 16 | @as(u32, b[3]) << 24;
+    return @as(u32, b[0]) | (@as(u32, b[1]) << 8) | (@as(u32, b[2]) << 16) | (@as(u32, b[3]) << 24);
 }
 
 fn readLeU16(b: []const u8) u16 {
-    return @as(u16, b[0]) | @as(u16, b[1]) << 8;
+    return @as(u16, b[0]) | (@as(u16, b[1]) << 8);
 }
 
 test "PcapWriter writes global header on first receive" {

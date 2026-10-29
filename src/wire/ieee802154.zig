@@ -196,7 +196,7 @@ fn addrPresentFlags(
 }
 
 fn readU16Le(data: []const u8) u16 {
-    return @as(u16, data[1]) << 8 | @as(u16, data[0]);
+    return (@as(u16, data[1]) << 8) | @as(u16, data[0]);
 }
 
 fn writeU16Le(buf: []u8, val: u16) void {

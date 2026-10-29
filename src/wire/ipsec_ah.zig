@@ -26,11 +26,11 @@ pub const Repr = struct {
     icv_len: usize,
 };
 
-pub fn parse(data: []const u8) error{Truncated}!Repr {
+pub fn parse(data: []const u8) error{ Truncated, Malformed }!Repr {
     if (data.len < MIN_HEADER_LEN) return error.Truncated;
     const payload_len = data[1];
     const total = headerLen(data);
-    if (total < MIN_HEADER_LEN) return error.Truncated;
+    if (total < MIN_HEADER_LEN) return error.Malformed;
     if (data.len < total) return error.Truncated;
     return .{
         .next_header = @fromBackingInt(data[0]),
@@ -128,7 +128,11 @@ test "AH parse rejects payload length below minimum header size" {
     var packet: [MIN_HEADER_LEN]u8 = @splat(0);
     packet[0] = @backingInt(ipv4.Protocol.ipsec_esp);
     packet[1] = 0;
-    try testing.expectError(error.Truncated, parse(&packet));
+    try testing.expectError(error.Malformed, parse(&packet));
+
+    packet[1] = 1;
+    const repr = try parse(&packet);
+    try testing.expectEqual(@as(usize, 0), repr.icv_len);
 }
 
 // [smoltcp:wire/ipsec_ah.rs:test_parse]

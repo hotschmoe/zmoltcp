@@ -546,8 +546,8 @@ fn computeT1T2(lease: Duration, renew_secs: ?u32, rebind_secs: ?u32) T1T2 {
 }
 
 fn subnetMaskToPrefixLen(mask: [4]u8) ?u6 {
-    const m: u32 = @as(u32, mask[0]) << 24 | @as(u32, mask[1]) << 16 |
-        @as(u32, mask[2]) << 8 | @as(u32, mask[3]);
+    const m: u32 = (@as(u32, mask[0]) << 24) | (@as(u32, mask[1]) << 16) |
+        (@as(u32, mask[2]) << 8) | @as(u32, mask[3]);
     if (m == 0) return 0;
     // Check that mask is contiguous 1s followed by 0s
     const inverted = ~m;
