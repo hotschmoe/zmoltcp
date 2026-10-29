@@ -1,0 +1,6 @@
+# The sources behind verify/zmoltcp.zvp, as sha256sum writes them (line ends do not count).
+# After editing one: tools/zvc_export.sh verify src/root.zig --only wire.checksum --only wire.tcp.SeqNumber --only socket.tcp
+# (zirakzigil checkout, zig-zv built by tools/build_zig_zv.sh), copy verify/root.zvp to verify/zmoltcp.zvp, and re-pin.
+8d45231795260a65841bb9f1bcbfff69d10c6c935b951bd185daad7a8250fc2a  src/socket/tcp.zig
+137431c42f583c42ca1e7dab7ec9db52bc7fd94cba89e53406eb7cde6fba4bf0  src/wire/checksum.zig
+2960d742f39233419612021aeed539e4201e9cbde83569ebb080051228c9a282  src/wire/tcp.zig

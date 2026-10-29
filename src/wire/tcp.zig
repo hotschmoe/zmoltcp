@@ -11,9 +11,9 @@ pub const assurance = .{
     .SeqNumber = .{
         .fromU32 = .tested,
         .toU32 = .tested,
-        .add = .checked,
-        .sub = .checked,
-        .diff = .checked,
+        .add = .verified,
+        .sub = .verified,
+        .diff = .verified,
         .cmp = .tested,
         .lessThan = .tested,
         .greaterThan = .tested,
@@ -66,12 +66,14 @@ pub const SeqNumber = struct {
     /// Caller contract: `n` is a distance within the 2^31 comparison window.
     pub fn add(self: SeqNumber, n: usize) SeqNumber {
         zv.requires(n <= std.math.maxInt(i32));
-        return .{ .value = self.value +% @as(i32, @intCast(n)) };
+        const result: SeqNumber = .{ .value = self.value +% @as(i32, @intCast(n)) };
+        return zv.ensures(result, result.value -% self.value == @as(i32, @intCast(n)));
     }
 
     pub fn sub(self: SeqNumber, n: usize) SeqNumber {
         zv.requires(n <= std.math.maxInt(i32));
-        return .{ .value = self.value -% @as(i32, @intCast(n)) };
+        const result: SeqNumber = .{ .value = self.value -% @as(i32, @intCast(n)) };
+        return zv.ensures(result, result.value +% @as(i32, @intCast(n)) == self.value);
     }
 
     /// Caller contract: `self` is at or after `other`. Use `cmp` first when the
@@ -79,7 +81,8 @@ pub const SeqNumber = struct {
     pub fn diff(self: SeqNumber, other: SeqNumber) usize {
         const result = self.value -% other.value;
         zv.requires(result >= 0);
-        return @intCast(result);
+        const n: usize = @intCast(result);
+        return zv.ensures(n, other.value +% @as(i32, @intCast(n)) == self.value);
     }
 
     pub fn cmp(self: SeqNumber, other: SeqNumber) std.math.Order {
