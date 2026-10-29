@@ -50,7 +50,7 @@ pub const IPV4_FRAGMENT_ALIGNMENT: usize = 8;
 /// Compute the maximum fragment payload size (excluding IP header),
 /// aligned to 8-byte boundary per RFC 791.
 pub fn maxIpv4FragmentPayload(ip_header_len: usize, ip_mtu: usize) usize {
-    const payload_mtu = ip_mtu - ip_header_len;
+    const payload_mtu = ip_mtu -| ip_header_len;
     return payload_mtu - (payload_mtu % IPV4_FRAGMENT_ALIGNMENT);
 }
 
@@ -135,6 +135,7 @@ pub fn Fragmenter(comptime buffer_size: usize, comptime emit_ethernet: bool) typ
 
             const remaining = self.payload_len - self.sent_bytes;
             const max_frag = maxIpv4FragmentPayload(ipv4.HEADER_LEN, ip_mtu);
+            if (max_frag == 0) return null;
             const this_payload = @min(remaining, max_frag);
             const more_frags = (remaining != this_payload);
 

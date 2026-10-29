@@ -11,6 +11,7 @@ const dns = @import("wire/dns.zig");
 const ethernet = @import("wire/ethernet.zig");
 const icmp = @import("wire/icmp.zig");
 const icmpv6 = @import("wire/icmpv6.zig");
+const ip_mod = @import("wire/ip.zig");
 const ieee802154 = @import("wire/ieee802154.zig");
 const igmp = @import("wire/igmp.zig");
 const ipsec_ah = @import("wire/ipsec_ah.zig");
@@ -207,10 +208,11 @@ fn roundTrip(comptime M: type, data: []const u8, comptime norm: anytype) bool {
 }
 
 /// `min_len` stands in for the payload a header-only frame needs to be accepted.
-fn roundTripMin(comptime M: type, data: []const u8, comptime norm: anytype, comptime min_len: usize) bool {
+fn roundTripMin(comptime M: type, data: []const u8, comptime norm: anytype, min_len: usize) bool {
     var first = M.parse(data) catch return true;
     var buf: [512]u8 = @splat(0xAA);
     const n = M.emit(first, &buf) catch return false;
+    if (@hasDecl(M, "bufferLen") and M.bufferLen(first) != n) return false;
     var second = M.parse(buf[0..@max(n, min_len)]) catch return false;
     norm(&first);
     norm(&second);
@@ -410,6 +412,7 @@ pub const storage = struct {
         var meta_storage: [4]packet_buffer.PacketMeta(u8) = @splat(.{});
         var payload_storage: [32]u8 = @splat(0);
         var buf = Buf.init(meta_storage[0..meta_cap], payload_storage[0..payload_cap]);
+        if (buf.packetCapacity() != meta_cap or buf.payloadCapacity() != payload_cap) return false;
 
         var queued_id: [8]u8 = undefined;
         var queued_size: [8]usize = undefined;
@@ -833,7 +836,8 @@ pub const structured = struct {
         buf[0] = 0x60 | (buf[0] & 0x0f);
         putU16(buf[4..6], @intCast(((@as(usize, buf[4]) << 8) | buf[5]) % (n - ipv6.HEADER_LEN + 2)));
         _ = tally("ipv6*", ipv6.checkLen(buf[0..n]));
-        return tally("ipv6*", ipv6.parse(buf[0..n]));
+        _ = tally("ipv6*", ipv6.parse(buf[0..n]));
+        return roundTripMin(ipv6, buf[0..n], keep, n);
     }
 
     pub fn icmpv6RoundTrip(in: zv.Bytes(96), type_sel: u8, src: [16]u8, dst: [16]u8) bool {
@@ -1380,6 +1384,7 @@ pub const tcp_state = struct {
                 else => {},
             }
             _ = s.pollAt();
+            if (s.isListening() and (!s.isOpen() or s.isActive() or s.maySend() or s.mayRecv())) return false;
             switch (check) {
                 .rings_in_bounds => if (s.rx_buffer.len() > s.rx_buffer.capacity() or s.tx_buffer.len() > s.tx_buffer.capacity()) return false,
                 .window_fits_ring => if (!windowFitsRing(&s)) return false,
@@ -1728,6 +1733,9 @@ pub const framing = struct {
         if (ipv6ext_header.parse(data)) |r| {
             if (!within(data, r.data) or ipv6ext_header.headerLen(r.length) > data.len) return false;
         } else |_| {}
+        if (ipv6ext_header.payloadSlice(data)) |p| {
+            if (!within(data, p) or p.len + 2 != ipv6ext_header.headerLen(data[1])) return false;
+        } else |_| {}
         if (ipv6routing.parse(data)) |r| switch (r) {
             .rpl => |v| if (!within(data, v.addresses)) return false,
             else => {},
@@ -1859,6 +1867,13 @@ pub const configuration = struct {
         var d = dhcp_socket.Socket.initWithTransactionSeed(hw, other_seed);
         d.setTransactionIdSeed(other_seed);
         if (a.transaction_id != d.transaction_id) return false;
+        var prng_c: std.Random.DefaultPrng = .init(seed);
+        var prng_d: std.Random.DefaultPrng = .init(seed);
+        var f = dhcp_socket.Socket.initWithTransactionSeed(hw, other_seed);
+        f.setTransactionIdRandom(prng_c.random());
+        var g = dhcp_socket.Socket.initWithTransactionSeed(hw, other_seed);
+        g.setTransactionIdSeed(prng_d.random().int(u64));
+        if (f.transaction_id != g.transaction_id) return false;
         a.setPorts(server, client);
         a.setIgnoreNaks(ignore);
         a.setMaxLeaseDuration(if (lease_secs) |l| time_mod.Duration.fromSecs(l) else null);
@@ -1889,4 +1904,2320 @@ test "laws: reach report" {
         }
         if (std.mem.endsWith(u8, p.name, "*")) try std.testing.expect(p.ok > 0);
     }
+}
+
+// -------------------------------------------------------------------------
+// Value types, bounded lists and congestion control.
+// -------------------------------------------------------------------------
+
+pub const values = struct {
+    const Dns = dns_socket.Socket(ipv4);
+
+    /// Instants are ordered by their microsecond count, and every comparison agrees with it.
+    pub fn instantsAreTotallyOrdered(a: i64, b: i64) bool {
+        const x = time_mod.Instant.fromMicros(a);
+        const y = time_mod.Instant.fromMicros(b);
+        return x.totalMicros() == a and
+            x.lessThan(y) == (a < b) and
+            x.greaterThanOrEqual(y) == (a >= b) and
+            x.eql(y) == (a == b) and
+            x.cmp(y) == std.math.order(a, b) and
+            y.cmp(x) == x.cmp(y).invert();
+    }
+
+    pub fn durationsAreTotallyOrdered(a: i64, b: i64) bool {
+        const x = time_mod.Duration.fromMicros(a);
+        const y = time_mod.Duration.fromMicros(b);
+        return x.totalMicros() == a and
+            x.lessThan(y) == (a < b) and
+            x.greaterThanOrEqual(y) == (a >= b) and
+            x.eql(y) == (a == b);
+    }
+
+    /// A full list drops later entries instead of overwriting earlier ones.
+    pub fn boundedListsKeepTheFirstEntries(addrs: [10][4]u8, count: u8) bool {
+        const n = count % (addrs.len + 1);
+        var servers: dhcp.DnsServers = .{};
+        var answers: Dns.Addresses = .{};
+        for (addrs[0..n]) |a| {
+            servers.push(a);
+            answers.push(a);
+        }
+        if (servers.len != @min(n, dhcp.MAX_DNS_SERVER_COUNT)) return false;
+        if (answers.len != @min(n, dns_socket.MAX_RESULT_COUNT)) return false;
+        for (0..servers.len) |i| if (!std.mem.eql(u8, &servers.get(i), &addrs[i])) return false;
+        for (0..answers.len) |i| if (!std.mem.eql(u8, &answers.get(i), &addrs[i])) return false;
+        var other = servers;
+        if (other.len > 0) {
+            other.addrs[other.len - 1][3] ^= 1;
+            if (servers.eql(&other)) return false;
+        }
+        return servers.eql(&servers);
+    }
+
+    /// RFC 1035 3.1: a name is length-prefixed labels ending in a zero byte, and parsing it
+    /// gives back each label.
+    pub fn nameLabelsDecodeTheWireName(lens: [4]u8, fill: [4]u8, count: u8) bool {
+        var wire_name: [40]u8 = undefined;
+        const labels = count % 4 + 1;
+        var at: usize = 0;
+        for (0..labels) |i| {
+            const len = lens[i] % 8 + 1;
+            wire_name[at] = len;
+            @memset(wire_name[at + 1 ..][0..len], fill[i]);
+            at += 1 + len;
+        }
+        wire_name[at] = 0;
+        const parsed = dns.parseName(wire_name[0 .. at + 1], 0) catch return false;
+        if (parsed.len != labels) return false;
+        for (0..labels) |i| {
+            const label = parsed.get(i);
+            if (label.len != lens[i] % 8 + 1) return false;
+            for (label) |c| if (c != fill[i]) return false;
+        }
+        return true;
+    }
+
+    /// Two configurations are equal exactly when every field is.
+    pub fn dhcpEventEqualityIsStructural(server: [4]u8, id: [4]u8, addr: [4]u8, prefix: u6, router: ?[4]u8, dns_addr: [4]u8, which: u8) bool {
+        var servers: dhcp.DnsServers = .{};
+        servers.push(dns_addr);
+        const base: dhcp_socket.Config = .{
+            .server = .{ .address = server, .identifier = id },
+            .address = addr,
+            .prefix_len = prefix,
+            .router = router,
+            .dns_servers = servers,
+        };
+        var changed = base;
+        switch (which % 6) {
+            0 => changed.server.address[0] ^= 1,
+            1 => changed.server.identifier[0] ^= 1,
+            2 => changed.address[3] ^= 1,
+            3 => changed.prefix_len ^= 1,
+            4 => if (changed.router) |*r| {
+                r[0] ^= 1;
+            } else {
+                changed.router = .{ 0, 0, 0, 0 };
+            },
+            else => changed.dns_servers.addrs[0][1] ^= 1,
+        }
+        const a: dhcp_socket.Event = .{ .configured = base };
+        const b: dhcp_socket.Event = .{ .configured = changed };
+        const gone: dhcp_socket.Event = .deconfigured;
+        return a.eql(a) and !a.eql(b) and !b.eql(a) and !a.eql(gone) and !gone.eql(a) and gone.eql(gone);
+    }
+
+    /// Both address families satisfy the interface generic code relies on.
+    pub fn bothFamiliesAreIpTypes() bool {
+        ip_mod.assertIsIp(ipv4);
+        ip_mod.assertIsIp(ipv6);
+        return true;
+    }
+};
+
+test "laws: values" {
+    try zv.checkLaws(values, .{ .iterations = iterations, .seed = 15 });
+}
+
+/// CUBIC (RFC 8312): a loss event cuts the window to BETA (0.7) of its value at the loss,
+/// then it grows back, never shrinking until the next loss.
+pub const congestion = struct {
+    const Cubic = tcp_socket.Cubic;
+    const beta = 0.7;
+
+    /// A live connection never has a window below one segment, so that is where laws start.
+    fn afterLoss(window: u16, segment: u16, duplicate_ack: bool, now_ms: u16) Cubic {
+        const mss = @as(usize, segment) + 1;
+        var c: Cubic = .{ .cwnd = @max(window, mss), .w_max = 0 };
+        c.setMss(mss);
+        c.setRemoteWindow(1 << 20);
+        const now = time_mod.Instant.fromMillis(now_ms);
+        if (duplicate_ack) c.onDuplicateAck(now) else c.onRetransmit(now);
+        return c;
+    }
+
+    pub fn lossCutsTheWindowToBeta(window: u16, segment: u16, duplicate_ack: bool, now_ms: u16) bool {
+        var c = afterLoss(window, segment, duplicate_ack, now_ms);
+        const before = c.cwnd;
+        if (c.w_max != before or c.ssthresh != before >> 1) return false;
+        const now = time_mod.Instant.fromMillis(now_ms);
+        c.preTransmit(now);
+        c.postTransmit(now, 1);
+        const expected = @max(@as(f64, @floatFromInt(before)) * beta, @as(f64, @floatFromInt(c.min_cwnd)));
+        return @abs(@as(f64, @floatFromInt(c.window())) - expected) <= 4;
+    }
+
+    pub fn windowNeverShrinksWhileRecovering(window: u16, segment: u16, steps: [12]u16) bool {
+        var c = afterLoss(window, segment, false, 0);
+        var now_ms: i64 = 0;
+        c.preTransmit(time_mod.Instant.fromMillis(now_ms));
+        var last = c.window();
+        for (steps) |dt| {
+            now_ms += dt;
+            c.preTransmit(time_mod.Instant.fromMillis(now_ms));
+            if (c.window() < last) return false;
+            last = c.window();
+        }
+        return true;
+    }
+};
+
+test "laws: congestion control" {
+    try zv.checkLaws(congestion, .{ .iterations = iterations, .seed = 16 });
+}
+
+// -------------------------------------------------------------------------
+// Devices, middleware and seeding.
+// -------------------------------------------------------------------------
+
+const stack_mod = @import("stack.zig");
+const phy_mod = @import("phy.zig");
+
+pub const devices = struct {
+    const Loopback = stack_mod.LoopbackDevice(3);
+
+    const Capped = struct {
+        pub fn capabilities() iface_mod.DeviceCapabilities {
+            return .{ .max_transmission_unit = 1280, .max_burst_size = 4 };
+        }
+    };
+
+    /// An in-memory device is two bounded FIFOs: a full queue drops the new frame, and
+    /// `loopback` moves transmitted frames to the receive side in order.
+    pub fn loopbackIsABoundedFifo(ops: [24]Op) bool {
+        var dev = Loopback.init();
+        var rx: [3]u8 = undefined;
+        var tx: [3]u8 = undefined;
+        var rx_n: usize = 0;
+        var tx_n: usize = 0;
+        for (ops) |op| {
+            const tag = [1]u8{op.a};
+            switch (op.kind % 5) {
+                0 => {
+                    dev.enqueueRx(&tag);
+                    if (rx_n < rx.len) {
+                        rx[rx_n] = op.a;
+                        rx_n += 1;
+                    }
+                },
+                1 => {
+                    dev.transmit(&tag);
+                    if (tx_n < tx.len) {
+                        tx[tx_n] = op.a;
+                        tx_n += 1;
+                    }
+                },
+                2 => {
+                    const got = dev.receive();
+                    if ((got == null) != (rx_n == 0)) return false;
+                    if (got) |frame| {
+                        if (frame.len != 1 or frame[0] != rx[0]) return false;
+                        std.mem.copyForwards(u8, rx[0 .. rx_n - 1], rx[1..rx_n]);
+                        rx_n -= 1;
+                    }
+                },
+                3 => {
+                    const got = dev.dequeueTx();
+                    if ((got == null) != (tx_n == 0)) return false;
+                    if (got) |frame| {
+                        if (frame.len != 1 or frame[0] != tx[0]) return false;
+                        std.mem.copyForwards(u8, tx[0 .. tx_n - 1], tx[1..tx_n]);
+                        tx_n -= 1;
+                    }
+                },
+                else => {
+                    dev.loopback();
+                    for (tx[0..tx_n]) |t| {
+                        if (rx_n < rx.len) {
+                            rx[rx_n] = t;
+                            rx_n += 1;
+                        }
+                    }
+                    tx_n = 0;
+                },
+            }
+        }
+        return true;
+    }
+
+    /// Tracing, fault injection and capture are transparent to the layer above: they report
+    /// the capabilities of the device they wrap (the defaults when it declares none).
+    pub fn middlewareReportsTheWrappedCapabilities() bool {
+        inline for (.{ Loopback, Capped }) |Dev| {
+            const want = if (@hasDecl(Dev, "capabilities")) Dev.capabilities() else iface_mod.DeviceCapabilities{};
+            inline for (.{ phy_mod.Tracer(Dev), phy_mod.FaultInjector(Dev), phy_mod.PcapWriter(Dev) }) |Wrapped| {
+                if (!std.meta.eql(Wrapped.capabilities(), want)) return false;
+            }
+        }
+        return true;
+    }
+};
+
+test "laws: devices" {
+    try zv.checkLaws(devices, .{ .iterations = iterations, .seed = 17 });
+}
+
+pub const seeding = struct {
+    const Dns = dns_socket.Socket(ipv4);
+
+    const FirstQuery = struct { txid: u16, port: u16 };
+
+    fn firstQuery(sock: *Dns) ?FirstQuery {
+        _ = sock.startQuery("example.com", .a) catch return null;
+        var buf: [512]u8 = undefined;
+        const sent = sock.dispatch(time_mod.Instant.fromMillis(0), &buf) orelse return null;
+        return .{ .txid = std.mem.readInt(u16, sent.payload[0..2], .big), .port = sent.src_port };
+    }
+
+    /// Every way of seeding a DNS socket, from a value or from a `Random`, at construction or
+    /// later, gives the same transaction id and source port as seeding with that value.
+    pub fn dnsSeedsDecideTheFirstQuery(seed: u64) bool {
+        const servers = [_]ipv4.Address{.{ 10, 0, 0, 53 }};
+        var slots: [4][1]Dns.QuerySlot = @splat(@splat(.{}));
+        var prng: std.Random.DefaultPrng = .init(seed);
+        const drawn = prng.random().int(u64);
+        var prng_a: std.Random.DefaultPrng = .init(seed);
+        var prng_b: std.Random.DefaultPrng = .init(seed);
+
+        var direct = Dns.initWithSeed(&slots[0], &servers, drawn);
+        var random = Dns.initWithRandom(&slots[1], &servers, prng_a.random());
+        var reseeded = Dns.initWithSeed(&slots[2], &servers, ~drawn);
+        reseeded.setQuerySeed(drawn);
+        var reseeded_random = Dns.initWithSeed(&slots[3], &servers, ~drawn);
+        reseeded_random.setQueryRandom(prng_b.random());
+
+        const want = firstQuery(&direct) orelse return false;
+        for ([_]*Dns{ &random, &reseeded, &reseeded_random }) |sock| {
+            const got = firstQuery(sock) orelse return false;
+            if (!std.meta.eql(want, got)) return false;
+        }
+        return true;
+    }
+
+    /// A TCP socket seeded from a `Random` draws one u64 secret, and a zero secret is never kept
+    /// (initial sequence numbers hashed from it would be predictable).
+    pub fn tcpSeedsDecideTheSecret(seed: u64) bool {
+        const Sock = tcp_socket.Socket(ipv4, 4);
+        var rx: [16]u8 = undefined;
+        var tx: [16]u8 = undefined;
+        var prng: std.Random.DefaultPrng = .init(seed);
+        const drawn = prng.random().int(u64);
+        var prng_a: std.Random.DefaultPrng = .init(seed);
+        var prng_b: std.Random.DefaultPrng = .init(seed);
+
+        const direct = Sock.initWithInitialSequenceSecret(&rx, &tx, drawn);
+        const random = Sock.initWithRandom(&rx, &tx, prng_a.random());
+        var reseeded = Sock.initWithInitialSequenceSecret(&rx, &tx, ~drawn);
+        reseeded.setInitialSequenceRandom(prng_b.random());
+        var zeroed = Sock.initWithInitialSequenceSecret(&rx, &tx, 1);
+        zeroed.setInitialSequenceSecret(0);
+        return direct.isn_secret == random.isn_secret and
+            direct.isn_secret == reseeded.isn_secret and
+            direct.isn_secret != 0 and zeroed.isn_secret != 0 and
+            Sock.initWithInitialSequenceSecret(&rx, &tx, 0).isn_secret != 0;
+    }
+
+    /// Closing an ICMP socket unbinds it and discards what it queued, and it can be bound again.
+    pub fn icmpCloseDiscardsQueues(len: u8, ident: u16) bool {
+        const Sock = icmp_socket.Socket(ipv4);
+        var rx_meta: [1]Sock.PacketMeta = .{.{}};
+        var rx_payload: [32]u8 = undefined;
+        var tx_meta: [1]Sock.PacketMeta = .{.{}};
+        var tx_payload: [64]u8 = undefined;
+        var sock = Sock.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
+        sock.bind(.{ .ident = ident }) catch return false;
+        sock.sendSlice(payload_mem[0 .. len % 16], .{ 10, 0, 0, 9 }) catch return false;
+        if (!sock.isOpen()) return false;
+        sock.close();
+        if (sock.isOpen() or sock.canRecv() or sock.dispatch() != null) return false;
+        sock.bind(.{ .ident = ident }) catch return false;
+        return sock.canSend() and sock.dispatch() == null;
+    }
+};
+
+test "laws: seeding" {
+    try zv.checkLaws(seeding, .{ .iterations = iterations, .seed = 18 });
+}
+
+// -------------------------------------------------------------------------
+// RPL routing state (RFC 6550, RFC 6552, RFC 6206).
+// -------------------------------------------------------------------------
+
+const rpl_state = @import("rpl.zig");
+
+pub const routing = struct {
+    const Seq = rpl_state.SequenceCounter;
+    const Rank = rpl_state.Rank;
+    const Parents = rpl_state.ParentSet(4);
+    const Links = rpl_state.Relations(4);
+    const window = rpl_state.SEQUENCE_WINDOW;
+
+    pub const pinned = .{
+        .objectiveFunctionRanksChildrenBelowTheirParent = .{ .{ 0, 40000 }, .{ 1000, 65535 }, .{ 65535, 22000 } },
+        .trickleToleratesAnyConfiguredExponent = .{ .{ 255, 255, 0, 0, .{ 0, 0, 0, 0 } }, .{ 64, 0, 1, 7, .{ 1, 1, 1, 1 } } },
+    };
+
+    fn region(v: u8) bool {
+        return v >= 128;
+    }
+
+    /// RFC 6550 7.2: counters are comparable when they are in different regions or no more than
+    /// SEQUENCE_WINDOW apart in one region, and comparison is antisymmetric.
+    pub fn sequenceOrderIsAntisymmetric(a: u8, b: u8) bool {
+        const x = Seq{ .value = a };
+        const y = Seq{ .value = b };
+        const xy = x.order(y);
+        const yx = y.order(x);
+        if (a == b) return xy == .eq and yx == .eq;
+        const comparable = region(a) != region(b) or @abs(@as(i16, a) - @as(i16, b)) <= window;
+        if (!comparable) return xy == null and yx == null;
+        return xy != null and yx != null and xy.? == yx.?.invert() and xy.? != .eq;
+    }
+
+    /// Incrementing makes a counter newer than before (the point of a lollipop counter) for up to
+    /// SEQUENCE_WINDOW steps, including the step from the linear region into the circular one.
+    /// The circular region stays below 128, and a wrap inside it is the one case left incomparable.
+    pub fn incrementingMakesACounterNewer(start: u8, steps: u8) bool {
+        const k = steps % (window + 1);
+        const before = Seq{ .value = start };
+        var c = before;
+        for (0..k) |_| c.increment();
+        if (!region(start) and region(c.value)) return false;
+        if (k == 0) return c.order(before).? == .eq;
+        const wrapped_circular = !region(start) and c.value < start;
+        if (wrapped_circular) return c.order(before) == null and before.order(c) == null;
+        return c.order(before).? == .gt and before.order(c).? == .lt;
+    }
+
+    /// Ranks compare by their integer part, DAGRank = rank / MinHopRankIncrease.
+    pub fn rankOrderFollowsTheIntegerPart(v1: u16, m1: u16, v2: u16, m2: u16) bool {
+        const a = Rank{ .value = v1, .min_hop_rank_increase = @max(m1, 1) };
+        const b = Rank{ .value = v2, .min_hop_rank_increase = @max(m2, 1) };
+        return a.dagRank() == v1 / @max(m1, 1) and
+            a.order(b) == std.math.order(a.dagRank(), b.dagRank()) and
+            b.order(a) == a.order(b).invert() and
+            Rank.ROOT.dagRank() == 1 and Rank.INFINITE.order(Rank.ROOT) == .gt;
+    }
+
+    /// RFC 6552 (OF0): a node ranks itself farther from the root than its parent, by three
+    /// hops' worth, saturating at the infinite rank. This must hold for any advertised
+    /// MinHopRankIncrease, which arrives as a 16-bit field from the network.
+    pub fn objectiveFunctionRanksChildrenBelowTheirParent(value: u16, increase: u16) bool {
+        const parent = Rank{ .value = value, .min_hop_rank_increase = @max(increase, 1) };
+        const child = rpl_state.ObjectiveFunction0.computeRank(parent);
+        if (child.min_hop_rank_increase != parent.min_hop_rank_increase or child.value < parent.value) return false;
+        if (child.value == 0xFFFF) return true;
+        return parent.order(child) == .lt;
+    }
+
+    const SetOp = struct { kind: u8, addr: u8, rank: u8 };
+
+    fn setAddr(sel: u8) [16]u8 {
+        var a: [16]u8 = @splat(0);
+        a[0] = 0xfd;
+        a[15] = sel % 6;
+        return a;
+    }
+
+    fn setParent(rank: u8) rpl_state.Parent {
+        return .{
+            .rank = .{ .value = @as(u16, rank % 8) * 256, .min_hop_rank_increase = 256 },
+            .preference = 0,
+            .version_number = Seq.INIT,
+            .dodag_id = @splat(0),
+        };
+    }
+
+    /// A parent set holds distinct addresses up to its capacity; when full it admits only a parent
+    /// strictly better than its worst one, evicting that one. The preferred parent is the first
+    /// of the best-ranked entries, the worst parent the last of the worst-ranked.
+    pub fn parentSetKeepsTheBestParents(ops: [32]SetOp) bool {
+        var set: Parents = .{};
+        for (ops) |op| {
+            const addr = setAddr(op.addr);
+            var before: [6]?u16 = @splat(null);
+            for (0..6) |i| if (set.find(setAddr(@intCast(i)))) |p| {
+                before[i] = p.rank.dagRank();
+            };
+            const full = set.count() == 4;
+            var worst: u16 = 0;
+            for (before) |b| if (b) |d| {
+                worst = @max(worst, d);
+            };
+            const was_present = before[addr[15]] != null;
+            switch (op.kind % 3) {
+                0, 1 => {
+                    const p = setParent(op.rank);
+                    const added = set.add(addr, p);
+                    const should_add = was_present or !full or p.rank.dagRank() < worst;
+                    if (added != should_add) return false;
+                    if (added) {
+                        const got = set.find(addr) orelse return false;
+                        if (got.rank.dagRank() != p.rank.dagRank()) return false;
+                    }
+                    if (!was_present and full) {
+                        var lost: usize = 0;
+                        for (0..6) |i| {
+                            if (i == addr[15]) continue;
+                            if (before[i] != null and set.find(setAddr(@intCast(i))) == null) {
+                                if (!added or before[i].? != worst) return false;
+                                lost += 1;
+                            }
+                        }
+                        if (lost != @intFromBool(added)) return false;
+                    }
+                },
+                else => {
+                    if (set.remove(addr) != was_present or set.find(addr) != null) return false;
+                },
+            }
+            var n: usize = 0;
+            for (0..6) |i| {
+                if (set.find(setAddr(@intCast(i))) != null) n += 1;
+            }
+            if (n != set.count() or n > 4) return false;
+            const best = rpl_state.ObjectiveFunction0.preferredParent(4, &set);
+            const bad = set.worstParent();
+            if ((best == null) != (n == 0) or (bad == null) != (n == 0)) return false;
+            if (best) |bi| {
+                const bd = set.entries[bi].?.parent.rank.dagRank();
+                for (set.entries, 0..) |e, i| if (e) |entry| {
+                    const d = entry.parent.rank.dagRank();
+                    if (d < bd or (d == bd and i < bi)) return false;
+                };
+            }
+            if (bad) |wi| {
+                const wd = set.entries[wi].?.parent.rank.dagRank();
+                for (set.entries, 0..) |e, i| if (e) |entry| {
+                    const d = entry.parent.rank.dagRank();
+                    if (d > wd or (d == wd and i > wi)) return false;
+                };
+            }
+        }
+        return true;
+    }
+
+    const LinkOp = struct { kind: u8, dest: u8, hop: u8, expires: u8 };
+
+    /// A relation table is a bounded map from destination to next hop; purging removes exactly
+    /// the relations whose expiration has been reached.
+    pub fn relationsAreABoundedMap(ops: [32]LinkOp) bool {
+        var table: Links = .{};
+        var hop: [6]?u8 = @splat(null);
+        var expires: [6]u8 = @splat(0);
+        for (ops) |op| {
+            const dest = op.dest % 6;
+            var d: [16]u8 = @splat(0);
+            d[15] = dest;
+            var h: [16]u8 = @splat(0);
+            h[15] = op.hop;
+            var live: usize = 0;
+            for (hop) |x| live += @intFromBool(x != null);
+            switch (op.kind % 4) {
+                0 => {
+                    const added = table.addRelation(d, h, time_mod.Instant.fromSecs(op.expires));
+                    const should = hop[dest] != null or live < 4;
+                    if (added != should) return false;
+                    if (added) {
+                        hop[dest] = op.hop;
+                        expires[dest] = op.expires;
+                    }
+                },
+                1 => {
+                    if (table.removeRelation(d) != (hop[dest] != null)) return false;
+                    hop[dest] = null;
+                },
+                2 => {
+                    table.purge(time_mod.Instant.fromSecs(op.expires));
+                    for (&hop, expires) |*x, e| {
+                        if (x.* != null and op.expires >= e) x.* = null;
+                    }
+                },
+                else => {},
+            }
+            live = 0;
+            for (0..6) |i| {
+                var probe: [16]u8 = @splat(0);
+                probe[15] = @intCast(i);
+                const found = table.findNextHop(probe);
+                if ((found == null) != (hop[i] == null)) return false;
+                if (found) |f| {
+                    if (f[15] != hop[i].?) return false;
+                    live += 1;
+                }
+            }
+            if (table.count() != live) return false;
+        }
+        return true;
+    }
+
+    const TimerOp = struct { kind: u8, dt: u8, rand: u32 };
+
+    /// RFC 6206: the interval stays within [Imin, Imax] and doubles when it ends, the
+    /// transmission point lies in the second half of the interval, a transmission is
+    /// suppressed once k consistent messages were heard, and an inconsistency restarts a
+    /// grown interval at Imin.
+    pub fn trickleFollowsRfc6206(i_min: u8, doublings: u8, k: u8, ops: [32]TimerOp) bool {
+        const min_exp: u32 = i_min % 12;
+        const max_exp = min_exp + doublings % 8;
+        var now_ms: i64 = 0;
+        var t = rpl_state.TrickleTimer.init(min_exp, max_exp - min_exp, k % 4, time_mod.Instant.fromMillis(0), ops[0].rand);
+        if (!intervalIsWellFormed(&t, now_ms, min_exp, max_exp)) return false;
+        for (ops) |op| {
+            const now = time_mod.Instant.fromMillis(now_ms);
+            switch (op.kind % 4) {
+                0 => now_ms += op.dt,
+                1 => {
+                    const was_expired = now.greaterThanOrEqual(t.i_expiration);
+                    const before = t;
+                    const send = t.poll(now, op.rand);
+                    const expect = now.greaterThanOrEqual(before.t_expiration) and (before.k == 0 or before.counter < before.k);
+                    if (send != expect) return false;
+                    if (was_expired and (t.i_exp != @min(before.i_exp + 1, max_exp) or t.counter != 0)) return false;
+                    if (!was_expired and (t.i_exp != before.i_exp or t.counter != before.counter)) return false;
+                    if (was_expired and !intervalIsWellFormed(&t, now_ms, min_exp, max_exp)) return false;
+                },
+                2 => {
+                    const before = t.counter;
+                    t.hearConsistent();
+                    if (t.counter != before +| 1) return false;
+                },
+                else => {
+                    const grown = t.i_exp > min_exp;
+                    t.hearInconsistency(now, op.rand);
+                    if (grown and (t.i_exp != min_exp or t.counter != 0 or !intervalIsWellFormed(&t, now_ms, min_exp, max_exp))) return false;
+                },
+            }
+            if (t.i_exp < min_exp or t.i_exp > max_exp) return false;
+            const earliest = if (t.t_expiration.lessThan(t.i_expiration)) t.t_expiration else t.i_expiration;
+            if (!t.pollAt().eql(earliest)) return false;
+        }
+        return true;
+    }
+
+    /// The interval that started at `start_ms`, if the timer was just (re)started there.
+    fn intervalIsWellFormed(t: *const rpl_state.TrickleTimer, start_ms: i64, min_exp: u32, max_exp: u32) bool {
+        const interval: i64 = @as(i64, 1) << @intCast(t.i_exp);
+        if (t.i_exp < min_exp or t.i_exp > max_exp) return false;
+        const i_end = t.i_expiration.totalMillis();
+        const t_at = t.t_expiration.totalMillis();
+        if (i_end != start_ms + interval) return false;
+        if (interval < 2) return t_at == start_ms;
+        return t_at >= start_ms + (interval >> 1) and t_at < i_end;
+    }
+
+    /// Intervals are configured by 8-bit exponents on the wire; no value may overflow time.
+    pub fn trickleToleratesAnyConfiguredExponent(i_min: u8, doublings: u8, k: u8, rand: u32, steps: [4]u16) bool {
+        var now_ms: i64 = 0;
+        var t = rpl_state.TrickleTimer.init(i_min, doublings, k, time_mod.Instant.fromMillis(0), rand);
+        for (steps) |dt| {
+            now_ms += dt;
+            _ = t.poll(time_mod.Instant.fromMillis(now_ms), rand);
+            t.hearInconsistency(time_mod.Instant.fromMillis(now_ms), rand);
+        }
+        return t.pollAt().greaterThanOrEqual(time_mod.Instant.ZERO);
+    }
+};
+
+test "laws: rpl routing state" {
+    try zv.checkLaws(routing, .{ .iterations = iterations, .seed = 19 });
+}
+
+// -------------------------------------------------------------------------
+// Fragmentation (RFC 791, RFC 4944) and reassembly keys.
+// -------------------------------------------------------------------------
+
+const frag_mod = @import("fragmentation.zig");
+
+pub const fragments = struct {
+    const Frag = frag_mod.Fragmenter(300, true);
+    const Reasm = frag_mod.Reassembler(frag_mod.FragKey, .{ .buffer_size = 300, .max_segments = 4 });
+    const Frag6 = frag_mod.SixlowpanFragmenter(64);
+
+    pub const pinned = .{
+        .fragmenterRefusesAnMtuThatCannotCarryData = .{ .{0}, .{19}, .{20}, .{27} },
+    };
+
+    fn pattern(buf: []u8, salt: u16) void {
+        for (buf, 0..) |*b, i| b.* = @truncate(i *% 31 +% salt);
+    }
+
+    /// RFC 791: the fragments of a payload carry it in order at 8-byte aligned offsets, every one
+    /// but the last has More Fragments set, and reassembling them gives back the payload.
+    pub fn ipv4FragmentsReassembleToTheOriginal(len: u16, mtu_extra: u8, ident: u16) bool {
+        var payload: [300]u8 = undefined;
+        pattern(&payload, ident);
+        const n: usize = len % 301;
+        const mtu: usize = 28 + @as(usize, mtu_extra) % 200;
+        const hw = ethernet.Address{ 2, 0, 0, 0, 0, 1 };
+        const src = ipv4.Address{ 10, 0, 0, 1 };
+        const dst = ipv4.Address{ 10, 0, 0, 2 };
+        var f = Frag{};
+        if (!f.stage(payload[0..n], src, dst, .udp, 64, ident, .{ 2, 0, 0, 0, 0, 2 })) return false;
+        if (n == 0) return f.isEmpty() and f.emitNext(&framebuf, hw, mtu) == null;
+
+        var r = Reasm{};
+        if (!r.isFree()) return false;
+        const key = frag_mod.FragKey{ .id = ident, .src_addr = src, .dst_addr = dst, .protocol = .udp };
+        var next_offset: usize = 0;
+        var frames: usize = 0;
+        while (f.emitNext(&framebuf, hw, mtu)) |total| {
+            frames += 1;
+            if (frames > 300) return false;
+            const eth = ethernet.parse(framebuf[0..total]) catch return false;
+            if (eth.ethertype != .ipv4) return false;
+            const ip_bytes = framebuf[ethernet.HEADER_LEN..total];
+            const repr = ipv4.parse(ip_bytes) catch return false;
+            const body = ip_bytes[ipv4.HEADER_LEN..];
+            if (repr.identification != ident or repr.protocol != .udp or repr.total_length != ip_bytes.len) return false;
+            if (@as(usize, repr.fragment_offset) * 8 != next_offset or ip_bytes.len > mtu) return false;
+            if (repr.more_fragments != !f.finished()) return false;
+            if (repr.more_fragments and body.len % 8 != 0) return false;
+            if (!std.mem.eql(u8, body, payload[next_offset..][0..body.len])) return false;
+            if (frag_mod.isFragment(repr) != (!f.finished() or next_offset != 0)) return false;
+            r.accept(key, time_mod.Instant.fromSecs(60));
+            if (r.isFree() or !r.add(body, next_offset)) return false;
+            next_offset += body.len;
+        }
+        if (next_offset != n or !f.finished()) return false;
+        r.setTotalSize(n);
+        const whole = r.assemble() orelse return false;
+        return std.mem.eql(u8, whole, payload[0..n]) and r.isFree();
+    }
+
+    var framebuf: [1514]u8 = undefined;
+
+    /// A link too small for the IP header plus one 8-byte unit cannot carry fragments at all;
+    /// asking for one must fail instead of looping on empty fragments or underflowing.
+    pub fn fragmenterRefusesAnMtuThatCannotCarryData(mtu: u8) bool {
+        var f = Frag{};
+        var payload: [64]u8 = undefined;
+        pattern(&payload, 7);
+        if (!f.stage(&payload, .{ 10, 0, 0, 1 }, .{ 10, 0, 0, 2 }, .udp, 64, 1, .{ 2, 0, 0, 0, 0, 2 })) return false;
+        return f.emitNext(&framebuf, .{ 2, 0, 0, 0, 0, 1 }, mtu % 28) == null and !f.finished();
+    }
+
+    /// RFC 4944 5.3: a datagram's fragments are keyed by tag, size and link-layer addresses;
+    /// the link addresses are compared in EUI-64 form.
+    pub fn sixlowpanKeysIdentifyADatagram(tag: u16, size: u16, a: [8]u8, b: [8]u8, short: [2]u8, flip: u8) bool {
+        const src = ieee802154.Address{ .extended = a };
+        const dst = ieee802154.Address{ .short = short };
+        const key = frag_mod.FragKey6LoWPAN.fromAddrs(src, dst, tag, size);
+        const same = frag_mod.FragKey6LoWPAN.fromAddrs(src, dst, tag, size);
+        if (!key.eql(same) or !same.eql(key)) return false;
+        if (key.datagram_tag != tag or key.datagram_size != size) return false;
+        if (!std.mem.eql(u8, &key.ll_src_addr, &src.asEui64()) or !std.mem.eql(u8, &key.ll_dst_addr, &dst.asEui64())) return false;
+        const other = switch (flip % 4) {
+            0 => frag_mod.FragKey6LoWPAN.fromAddrs(src, dst, tag +% 1, size),
+            1 => frag_mod.FragKey6LoWPAN.fromAddrs(src, dst, tag, size +% 1),
+            2 => frag_mod.FragKey6LoWPAN.fromAddrs(.{ .extended = b }, dst, tag, size),
+            else => frag_mod.FragKey6LoWPAN.fromAddrs(src, .{ .short = .{ short[0] ^ 1, short[1] } }, tag, size),
+        };
+        const expected = flip % 4 == 2 and std.mem.eql(u8, &a, &b);
+        return key.eql(other) == expected and other.eql(key) == expected;
+    }
+
+    /// RFC 8200 4.5 and RFC 6946: a fragment header with offset zero and no More Fragments is an
+    /// atomic fragment, a complete datagram, not a fragment to reassemble.
+    pub fn ipv6FragmentKeysAndAtomicFragments(id: u32, offset: u16, more: bool, a: [16]u8, b: [16]u8) bool {
+        const repr = ipv6fragment.Repr{ .next_header = 17, .frag_offset = offset, .more_frags = more, .ident = id };
+        if (frag_mod.isFragmentV6(repr) != (more or offset != 0)) return false;
+        const k1 = frag_mod.FragKeyV6{ .id = id, .src_addr = a, .dst_addr = b };
+        const k2 = frag_mod.FragKeyV6{ .id = id +% 1, .src_addr = a, .dst_addr = b };
+        const k3 = frag_mod.FragKeyV6{ .id = id, .src_addr = b, .dst_addr = a };
+        return k1.eql(k1) and !k1.eql(k2) and !k2.eql(k1) and k1.eql(k3) == std.mem.eql(u8, &a, &b);
+    }
+
+    /// The 6LoWPAN fragmenter splits one compressed datagram across 802.15.4 frames that fit the
+    /// radio's frame size; the fragment headers carry the datagram's size and tag, and the
+    /// payloads, in order, are the staged bytes. Staging too much is refused without harm.
+    pub fn sixlowpanFragmenterCoversTheDatagram(len: u8, tag: u16, diff: u8, mac_seq: u8) bool {
+        var payload: [65]u8 = undefined;
+        pattern(&payload, tag);
+        const n: usize = len % 65;
+        var f = Frag6{};
+        if (!f.isEmpty() or f.finished()) return false;
+        const src = ieee802154.Address{ .extended = .{ 1, 2, 3, 4, 5, 6, 7, 8 } };
+        const dst = ieee802154.Address{ .short = .{ 0xab, 0xcd } };
+        const size: u16 = @intCast(ipv6.HEADER_LEN + n + diff);
+        if (!f.stage(payload[0..n], size, tag, diff, src, dst, 0x1234)) return false;
+        if (f.stage(&payload, size, tag +% 1, diff, src, dst, 0x1234)) return false;
+        if (n == 0) return f.isEmpty();
+        var sent: usize = 0;
+        var frame: [ieee802154.MAX_FRAME_LEN]u8 = undefined;
+        var count: usize = 0;
+        while (f.emitNext(&frame, mac_seq +% @as(u8, @intCast(count)))) |total| {
+            count += 1;
+            if (count > 64 or total > ieee802154.MAX_FRAME_LEN) return false;
+            const body = ieee802154.payloadSlice(frame[0..total]) catch return false;
+            const header = sixlowpan_frag.parse(body) catch return false;
+            const hdr_len: usize = switch (header) {
+                .first_fragment => |h| blk: {
+                    if (sent != 0 or h.datagram_size != size or h.datagram_tag != tag) return false;
+                    break :blk sixlowpan_frag.FIRST_FRAGMENT_HEADER_SIZE;
+                },
+                .next_fragment => |h| blk: {
+                    if (sent == 0 or h.datagram_size != size or h.datagram_tag != tag) return false;
+                    if (@as(usize, h.datagram_offset) * 8 != sent + diff) return false;
+                    break :blk sixlowpan_frag.NEXT_FRAGMENT_HEADER_SIZE;
+                },
+            };
+            const data = body[hdr_len..];
+            if (!std.mem.eql(u8, data, payload[sent..][0..data.len])) return false;
+            sent += data.len;
+            if (sent < n and data.len % 8 != 0) return false;
+        }
+        const done = sent == n and f.finished() and f.emitNext(&frame, 0) == null;
+        f.reset();
+        return done and f.isEmpty() and !f.finished();
+    }
+};
+
+test "laws: fragmentation" {
+    try zv.checkLaws(fragments, .{ .iterations = 20_000, .seed = 20 });
+}
+
+// -------------------------------------------------------------------------
+// Time arithmetic, address classes and text forms.
+// -------------------------------------------------------------------------
+
+pub const arithmetic = struct {
+    const Instant = time_mod.Instant;
+    const Duration = time_mod.Duration;
+
+    pub const pinned = .{
+        .clockUnitsAgree = .{ .{ -2147483648, 2147483647 }, .{ -1500000, 0 }, .{ 0, -1500000 } },
+    };
+
+    /// Instants and durations decompose into whole seconds and milliseconds, and moving an instant
+    /// by a duration and back returns it.
+    pub fn clockUnitsAgree(micros: i32, delta: i32) bool {
+        const t = Instant.fromMicros(micros);
+        const d = Duration.fromMicros(delta);
+        const ms: i64 = @divTrunc(@as(i64, micros), 1000);
+        if (t.totalMillis() != ms or Instant.fromMillis(ms).totalMicros() != ms * 1000) return false;
+        if (t.secs() != @divTrunc(@as(i64, micros), 1_000_000)) return false;
+        if (t.secs() * 1000 + t.millis() != ms) return false;
+        if (Instant.fromSecs(t.secs()).totalMicros() != t.secs() * 1_000_000) return false;
+        if (d.totalMillis() != @divTrunc(@as(i64, delta), 1000) or d.secs() != @divTrunc(@as(i64, delta), 1_000_000)) return false;
+        if (d.secs() * 1000 + d.millis() != d.totalMillis()) return false;
+        if (Duration.fromMillis(d.totalMillis()).totalMicros() != d.totalMillis() * 1000) return false;
+        if (Duration.fromSecs(d.secs()).totalMicros() != d.secs() * 1_000_000) return false;
+        return t.add(d).sub(d).eql(t) and t.sub(d).add(d).eql(t) and t.add(d).diff(t).totalMicros() == @abs(@as(i64, delta));
+    }
+
+    /// Duration algebra: addition commutes, subtraction saturates at zero, and min, max and clamp
+    /// are the lattice operations on the microsecond count.
+    pub fn durationAlgebra(a: i32, b: i32, lo: i32, hi: i32, factor: u16, shift: u3, divisor: u16) bool {
+        const x = Duration.fromMicros(a);
+        const y = Duration.fromMicros(b);
+        if (!x.add(y).eql(y.add(x)) or x.add(y).totalMicros() != @as(i64, a) + b) return false;
+        if (x.subSaturating(y).totalMicros() != @max(@as(i64, a) - b, 0)) return false;
+        if (x.max(y).totalMicros() != @max(a, b) or x.min(y).totalMicros() != @min(a, b)) return false;
+        if (x.mul(factor).totalMicros() != @as(i64, a) * factor) return false;
+        if (divisor != 0 and x.divFloor(divisor).totalMicros() != @divTrunc(@as(i64, a), divisor)) return false;
+        if (x.shl(shift).totalMicros() != @as(i64, a) << shift) return false;
+        const l = Duration.fromMicros(@min(lo, hi));
+        const h = Duration.fromMicros(@max(lo, hi));
+        const c = x.clamp(l, h);
+        return !c.lessThan(l) and !h.lessThan(c) and c.clamp(l, h).eql(c) and (x.lessThan(l) or h.lessThan(x) or c.eql(x));
+    }
+};
+
+test "laws: time arithmetic" {
+    try zv.checkLaws(arithmetic, .{ .iterations = iterations, .seed = 21 });
+}
+
+fn u128Of(addr: [16]u8) u128 {
+    return std.mem.readInt(u128, &addr, .big);
+}
+
+pub const addresses = struct {
+    /// Shapes the interesting prefixes out of random bytes, which would otherwise almost never
+    /// be loopback, link-local or multicast.
+    fn shape4(raw: [4]u8, class: u8) [4]u8 {
+        var a = raw;
+        switch (class % 8) {
+            1 => a[0] = 127,
+            2 => a[0..2].* = .{ 169, 254 },
+            3 => a[0] = 224 + a[0] % 16,
+            4 => a = .{ 255, 255, 255, 255 },
+            5 => a = .{ 0, 0, 0, 0 },
+            else => {},
+        }
+        return a;
+    }
+
+    fn shape6(raw: [16]u8, class: u8) [16]u8 {
+        var a = raw;
+        switch (class % 10) {
+            1 => {
+                a = @splat(0);
+                a[15] = 1;
+            },
+            2 => a = @splat(0),
+            3 => a[0] = 0xff,
+            4 => {
+                a[0] = 0xfe;
+                a[1] = 0x80 | (a[1] & 0x3f);
+            },
+            5 => a[0] = 0xfc | (a[0] & 1),
+            6 => a[0] = 0x20 | (a[0] & 0x1f),
+            7 => a[0..13].* = .{ 0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xff },
+            else => {},
+        }
+        return a;
+    }
+
+    /// RFC 1122, 3927 and 5771 define the IPv4 classes by prefix.
+    pub fn ipv4ClassesFollowTheirPrefixes(raw: [4]u8, class: u8) bool {
+        const a = shape4(raw, class);
+        const v = std.mem.readInt(u32, &a, .big);
+        return ipv4.isLoopback(a) == (v >> 24 == 127) and
+            ipv4.isLinkLocal(a) == (v >> 16 == 0xa9fe) and
+            ipv4.isMulticast(a) == (v >> 28 == 0xe) and
+            ipv4.isBroadcast(a) == (v == 0xffffffff) and
+            ipv4.isUnspecified(a) == (v == 0);
+    }
+
+    /// RFC 4291 defines the IPv6 classes by prefix; RFC 4291 2.7.1 the solicited-node group.
+    pub fn ipv6ClassesFollowTheirPrefixes(raw: [16]u8, class: u8) bool {
+        const a = shape6(raw, class);
+        const v = u128Of(a);
+        if (ipv6.isLoopback(a) != (v == 1) or ipv6.isUnspecified(a) != (v == 0)) return false;
+        if (ipv6.isMulticast(a) != (v >> 120 == 0xff) or ipv6.isBroadcast(a)) return false;
+        if (ipv6.isLinkLocal(a) != (v >> 118 == 0x3fa)) return false;
+        if (ipv6.isUniqueLocal(a) != (v >> 121 == 0x7e)) return false;
+        if (ipv6.isGlobalUnicast(a) != (v >> 125 == 1)) return false;
+        const sn = ipv6.solicitedNode(a);
+        const mask: u128 = (1 << 24) - 1;
+        if (!ipv6.isSolicitedNodeMulticast(sn) or u128Of(sn) & mask != v & mask or u128Of(sn) >> 24 != 0xff02_0000_0000_0000_0000_0001_ff) return false;
+        return ipv6.isSolicitedNodeMulticast(a) == (v >> 24 == 0xff02_0000_0000_0000_0000_0001_ff);
+    }
+
+    fn parseV4(text: []const u8) ?[4]u8 {
+        var out: [4]u8 = undefined;
+        var it = std.mem.splitScalar(u8, text, '.');
+        for (&out) |*b| {
+            const part = it.next() orelse return null;
+            if (part.len > 1 and part[0] == '0') return null;
+            b.* = std.fmt.parseInt(u8, part, 10) catch return null;
+        }
+        return if (it.next() == null) out else null;
+    }
+
+    fn parseGroups(text: []const u8, out: []u16) ?usize {
+        if (text.len == 0) return 0;
+        var n: usize = 0;
+        var it = std.mem.splitScalar(u8, text, ':');
+        while (it.next()) |part| {
+            if (part.len == 0 or part.len > 4 or n == out.len) return null;
+            out[n] = std.fmt.parseInt(u16, part, 16) catch return null;
+            n += 1;
+        }
+        return n;
+    }
+
+    fn parseV6(text: []const u8) ?[16]u8 {
+        var halves = std.mem.splitSequence(u8, text, "::");
+        const head_text = halves.next().?;
+        const tail_text = halves.next();
+        if (halves.next() != null) return null;
+        var groups: [8]u16 = @splat(0);
+        const head = parseGroups(head_text, &groups) orelse return null;
+        if (tail_text) |t| {
+            var tail: [8]u16 = undefined;
+            const n = parseGroups(t, &tail) orelse return null;
+            if (head + n > 7) return null;
+            @memcpy(groups[8 - n ..], tail[0..n]);
+        } else if (head != 8) return null;
+        var out: [16]u8 = undefined;
+        for (groups, 0..) |g, i| std.mem.writeInt(u16, out[i * 2 ..][0..2], g, .big);
+        return out;
+    }
+
+    /// The text forms read back as the address: dotted decimal, and RFC 5952 for IPv6 (lower
+    /// case, no leading zeros, the longest run of zero groups compressed, a single zero group not).
+    pub fn textFormsReadBack(raw4: [4]u8, raw6: [16]u8, class: u8, zero_run: u8) bool {
+        const a4 = shape4(raw4, class);
+        var buf4: [15]u8 = undefined;
+        const t4 = ipv4.formatAddr(a4, &buf4);
+        const back4 = parseV4(t4) orelse return false;
+        if (!std.mem.eql(u8, &a4, &back4)) return false;
+
+        var a6 = shape6(raw6, class);
+        const start = zero_run % 8;
+        const len = (zero_run >> 3) % 9;
+        for (start..@min(8, start + len)) |g| a6[g * 2 ..][0..2].* = .{ 0, 0 };
+        var buf6: [39]u8 = undefined;
+        const t6 = ipv6.formatAddr(a6, &buf6);
+        const back6 = parseV6(t6) orelse return false;
+        if (!std.mem.eql(u8, &a6, &back6)) return false;
+        for (t6) |c| if (std.ascii.isUpper(c)) return false;
+        var run_len: usize = 0;
+        var best_len: usize = 0;
+        for (0..9) |g| {
+            const zero = g < 8 and a6[g * 2] == 0 and a6[g * 2 + 1] == 0;
+            if (zero) {
+                run_len += 1;
+            } else {
+                best_len = @max(best_len, run_len);
+                run_len = 0;
+            }
+        }
+        const compressed = std.mem.indexOf(u8, t6, "::") != null;
+        return compressed == (best_len >= 2);
+    }
+
+    /// A CIDR block contains exactly the addresses sharing its network part, and its network
+    /// and broadcast addresses are the first and last of those.
+    pub fn cidrBlocksAreNetworkPrefixes(raw: [4]u8, other: [4]u8, prefix: u8) bool {
+        const Cidr = ip_mod.Cidr(ipv4);
+        const len = prefix % 33;
+        const block = Cidr{ .address = raw, .prefix_len = len };
+        const mask: u32 = if (len == 0) 0 else ~@as(u32, 0) << @intCast(32 - len);
+        const net = std.mem.readInt(u32, &raw, .big) & mask;
+        const net_addr = block.networkAddr();
+        if (std.mem.readInt(u32, &net_addr, .big) != net or !block.contains(raw) or !block.contains(net_addr)) return false;
+        if (block.contains(other) != (std.mem.readInt(u32, &other, .big) & mask == net)) return false;
+        if (block.broadcast()) |b| {
+            if (!block.contains(b) or std.mem.readInt(u32, &b, .big) != net | ~mask) return false;
+        } else if (len < 31) return false;
+        return true;
+    }
+};
+
+test "laws: addresses" {
+    try zv.checkLaws(addresses, .{ .iterations = iterations, .seed = 22 });
+}
+
+// -------------------------------------------------------------------------
+// Congestion windows (RFC 5681), TCP byte streams and datagram sockets.
+// -------------------------------------------------------------------------
+
+pub const windows = struct {
+    const CC = tcp_socket.CongestionController;
+    const Host = tcp_socket.Socket(ipv4, 1);
+
+    const CcOp = struct { kind: u8, len: u16 };
+
+    /// A sender that is not controlled may always send; a Reno sender follows RFC 5681: slow
+    /// start adds what was acknowledged until the slow-start threshold, after which it adds one
+    /// segment per acknowledgment, a timeout halves the window, three duplicate acknowledgments
+    /// lower the threshold without touching the window, and the window stays within
+    /// [one segment, the peer's window] once an acknowledgment arrives.
+    pub fn renoFollowsRfc5681(window: u16, segment: u16, peer: u16, ops: [24]CcOp) bool {
+        const mss = @as(usize, segment) + 1;
+        var none: CC = .{ .none = .{} };
+        var reno: CC = .{ .reno = .{ .cwnd = @max(window, mss), .min_cwnd = mss, .rwnd = @max(peer, mss) } };
+        var empty: [0]u8 = .{};
+        const host = Host.init(&empty, &empty);
+        const rtte = &host.rtte;
+        reno.setMss(mss);
+        none.setMss(mss);
+        var now_ms: i64 = 0;
+        for (ops) |op| {
+            now_ms += 10;
+            const now = time_mod.Instant.fromMillis(now_ms);
+            const r = &reno.reno;
+            const before = r.*;
+            switch (op.kind % 6) {
+                0 => {
+                    reno.onAck(now, op.len, rtte);
+                    const growth: usize = if (before.cwnd < before.ssthresh) op.len else before.min_cwnd;
+                    const want = @min(@max(before.cwnd +| growth, before.min_cwnd), before.rwnd);
+                    if (reno.window() != want) return false;
+                },
+                1 => {
+                    reno.onRetransmit(now);
+                    if (reno.window() != @max(before.cwnd >> 1, before.min_cwnd)) return false;
+                },
+                2 => {
+                    reno.onDuplicateAck(now);
+                    if (reno.window() != before.cwnd or r.ssthresh != @max(before.cwnd >> 1, before.min_cwnd)) return false;
+                },
+                3 => {
+                    reno.preTransmit(now);
+                    reno.postTransmit(now, op.len);
+                    if (reno.window() != before.cwnd) return false;
+                },
+                4 => {
+                    reno.setRemoteWindow(op.len);
+                    if (r.rwnd != @max(before.rwnd, op.len)) return false;
+                },
+                else => {
+                    reno.setMss(op.len);
+                    if (r.min_cwnd != op.len) return false;
+                },
+            }
+            none.onAck(now, op.len, rtte);
+            none.onRetransmit(now);
+            none.onDuplicateAck(now);
+            none.preTransmit(now);
+            none.postTransmit(now, op.len);
+            none.setRemoteWindow(op.len);
+            if (none.window() != std.math.maxInt(usize)) return false;
+        }
+        return true;
+    }
+
+    /// Cubic grows like Reno in slow start: it adds what was acknowledged, within [one segment,
+    /// the peer's window], and the dispatching wrapper reaches it unchanged.
+    pub fn cubicSlowStartAddsAcknowledgedBytes(window: u16, segment: u16, acked: u16, dup: bool) bool {
+        const mss = @as(usize, segment) + 1;
+        var cc: CC = .{ .cubic = .{ .cwnd = @max(window, mss), .min_cwnd = mss, .w_max = @max(window, mss), .rwnd = 1 << 20 } };
+        const before = cc.cubic;
+        const now = time_mod.Instant.fromMillis(5);
+        var empty: [0]u8 = .{};
+        const host = Host.init(&empty, &empty);
+        cc.onAck(now, acked, &host.rtte);
+        if (cc.window() != @min(@max(before.cwnd + acked, before.min_cwnd), before.rwnd)) return false;
+        if (!dup) return true;
+        const w = cc.window();
+        cc.onDuplicateAck(now);
+        return cc.cubic.w_max == w and cc.cubic.ssthresh == w >> 1;
+    }
+
+    pub const pinned = .{
+        .emptySegmentsCarryNoFlagsExceptPush = .{ .{ 3, 0 }, .{ 4, 0 } },
+    };
+
+    /// smoltcp (wire/tcp.rs): a segment is empty when it carries no data and no flag but PSH.
+    /// Only SYN and FIN take sequence space, but RST is not empty either.
+    pub fn emptySegmentsCarryNoFlagsExceptPush(control: u8, len: u8) bool {
+        const repr: tcp_socket.TcpRepr = .{
+            .src_port = 1,
+            .dst_port = 2,
+            .control = switch (control % 5) {
+                0 => .none,
+                1 => .syn,
+                2 => .fin,
+                3 => .psh,
+                else => .rst,
+            },
+            .payload = payload_mem[0 .. len % 3],
+        };
+        const bare = repr.payload.len == 0 and (repr.control == .none or repr.control == .psh);
+        if (repr.isEmpty() != bare) return false;
+        return !repr.isEmpty() or repr.segmentLen() == 0;
+    }
+};
+
+test "laws: congestion windows" {
+    try zv.checkLaws(windows, .{ .iterations = iterations, .seed = 23 });
+}
+
+pub const streams = struct {
+    const Sock = tcp_socket.Socket(ipv4, 4);
+    const server_addr = ipv4.Address{ 10, 0, 0, 1 };
+    const client_addr = ipv4.Address{ 10, 0, 0, 2 };
+
+    var client_rx: [3000]u8 = undefined;
+    var client_tx: [3000]u8 = undefined;
+    var server_rx: [3000]u8 = undefined;
+    var server_tx: [3000]u8 = undefined;
+
+    const Settings = struct {
+        nagle: bool,
+        ack_delay_ms: u8,
+        keep_alive: bool,
+        cc: u2,
+        timestamps: bool,
+        hop: u8,
+    };
+
+    fn byteAt(offset: usize) u8 {
+        return @truncate(offset *% 131 +% 7);
+    }
+
+    const Pull = struct { offset: usize = 0, ok: bool = true };
+
+    fn check(pull: *Pull, data: []const u8) usize {
+        for (data) |b| {
+            if (b != byteAt(pull.offset)) pull.ok = false;
+            pull.offset += 1;
+        }
+        return data.len;
+    }
+
+    const Push = struct { offset: usize = 0, limit: usize };
+
+    fn produce(push: *Push, buf: []u8) usize {
+        const n = @min(buf.len, push.limit);
+        for (buf[0..n]) |*b| {
+            b.* = byteAt(push.offset);
+            push.offset += 1;
+        }
+        return n;
+    }
+
+    fn configure(s: *Sock, cfg: Settings) !void {
+        s.setNagleEnabled(cfg.nagle);
+        s.setAckDelay(if (cfg.ack_delay_ms == 0) null else time_mod.Duration.fromMillis(cfg.ack_delay_ms));
+        s.setKeepAlive(if (cfg.keep_alive) time_mod.Duration.fromSecs(5) else null);
+        s.setTimeout(time_mod.Duration.fromSecs(30));
+        s.setCongestionControl(switch (cfg.cc) {
+            0 => .{ .none = .{} },
+            1 => .{ .reno = .{} },
+            else => .{ .cubic = .{} },
+        });
+        if (cfg.timestamps) s.setTsvalGenerator(&tsGen);
+        try s.setHopLimit(if (cfg.hop == 0) null else cfg.hop);
+    }
+
+    fn tsGen() u32 {
+        return 1000;
+    }
+
+    /// Moves every segment both sockets have ready to the other, until the link is quiet.
+    fn pump(a: *Sock, b: *Sock, now: time_mod.Instant) void {
+        var quiet = false;
+        var rounds: usize = 0;
+        while (!quiet and rounds < 64) : (rounds += 1) {
+            quiet = true;
+            if (a.dispatch(now)) |d| {
+                quiet = false;
+                if (b.accepts(d.src_addr, d.dst_addr, d.repr)) _ = b.process(now, d.src_addr, d.dst_addr, d.repr);
+            }
+            if (b.dispatch(now)) |d| {
+                quiet = false;
+                if (a.accepts(d.src_addr, d.dst_addr, d.repr)) _ = a.process(now, d.src_addr, d.dst_addr, d.repr);
+            }
+        }
+    }
+
+    /// Whatever the options, a TCP connection delivers a byte stream intact and in order with
+    /// either side's API (copying, zero-copy, peeking), reports its endpoints and queues
+    /// consistently, negotiates timestamps only when both sides want them, and closes cleanly.
+    pub fn byteStreamsAreDeliveredInOrder(cfg: Settings, other_ts: bool, chunks: [10]u16, reads: [4]u8) bool {
+        var client = Sock.init(&client_rx, &client_tx);
+        var server = Sock.init(&server_rx, &server_tx);
+        configure(&client, cfg) catch return false;
+        var server_cfg = cfg;
+        server_cfg.timestamps = other_ts;
+        configure(&server, server_cfg) catch return false;
+        const cc_tag = std.meta.activeTag(client.congestionControl());
+        if (cc_tag != @as(@TypeOf(cc_tag), switch (cfg.cc) {
+            0 => .none,
+            1 => .reno,
+            else => .cubic,
+        })) return false;
+        if (client.sendCapacity() != client_tx.len or client.recvCapacity() != client_rx.len) return false;
+
+        server.listen(.{ .port = 80 }) catch return false;
+        var now = time_mod.Instant.fromMillis(0);
+        client.connect(server_addr, 80, client_addr, 49152) catch return false;
+        for (0..40) |_| {
+            now = now.add(time_mod.Duration.fromMillis(10));
+            pump(&client, &server, now);
+            if (client.mayRecv() and server.maySend()) break;
+        }
+        if (!client.maySend() or !server.maySend()) return false;
+        if (client.timestampEnabled() != (cfg.timestamps and other_ts) or server.timestampEnabled() != client.timestampEnabled()) return false;
+        const remote = client.remoteEndpoint() orelse return false;
+        const local = client.localEndpoint() orelse return false;
+        const peer = server.remoteEndpoint() orelse return false;
+        if (remote.port != 80 or local.port != 49152 or peer.port != 49152 or !std.mem.eql(u8, &peer.addr, &client_addr)) return false;
+
+        var total: usize = 0;
+        for (chunks) |c| total += c % 1200;
+        var push: Push = .{ .limit = 0 };
+        var pull: Pull = .{};
+        var sent: usize = 0;
+        var round: usize = 0;
+        var closed = false;
+        while (round < 3000) : (round += 1) {
+            now = now.add(time_mod.Duration.fromMillis(7));
+            if (sent < total) {
+                const want = @min(total - sent, chunks[round % chunks.len] % 1200 + 1);
+                if (round % 2 == 0) {
+                    var bytes: [1200]u8 = undefined;
+                    for (bytes[0..want], 0..) |*b, i| b.* = byteAt(sent + i);
+                    sent += client.sendSlice(bytes[0..want]) catch return false;
+                } else {
+                    push.offset = sent;
+                    push.limit = want;
+                    sent += client.send(&push, &produce) catch return false;
+                }
+            } else if (!closed and pull.offset == total) {
+                client.close();
+                closed = true;
+            }
+            if (client.sendQueue() > client.sendCapacity() or server.recvQueue() > server.recvCapacity()) return false;
+            pump(&client, &server, now);
+
+            const step: usize = @as(usize, reads[round % reads.len]) % 300 + 1;
+            switch (round % 3) {
+                0 => {
+                    var bytes: [300]u8 = undefined;
+                    const n = server.recvSlice(bytes[0..step]) catch 0;
+                    _ = check(&pull, bytes[0..n]);
+                },
+                1 => {
+                    const view = server.peek(step) catch &.{};
+                    const before = pull.offset;
+                    if (view.len > 0) {
+                        var shadow = pull;
+                        _ = check(&shadow, view);
+                        if (!shadow.ok) return false;
+                        const n = server.recv(&pull, &check) catch return false;
+                        if (n == 0 or pull.offset != before + n) return false;
+                    }
+                },
+                else => {
+                    _ = server.recv(&pull, &check) catch 0;
+                },
+            }
+            if (!pull.ok) return false;
+            pump(&client, &server, now);
+            if (closed and pull.offset == total and !server.mayRecv() and server.getState() == .close_wait) {
+                server.close();
+                pump(&client, &server, now);
+                break;
+            }
+        }
+        if (pull.offset != total or !pull.ok) return false;
+        var tail: [1]u8 = undefined;
+        if (server.recvSlice(&tail)) |_| return false else |_| {}
+        for (0..40) |_| {
+            now = now.add(time_mod.Duration.fromSecs(5));
+            pump(&client, &server, now);
+        }
+        return !server.isOpen() and !client.isActive();
+    }
+};
+
+test "laws: tcp byte streams" {
+    try zv.checkLaws(streams, .{ .iterations = 400, .seed = 24 });
+}
+
+pub const datagrams = struct {
+    const Udp = udp_socket.Socket(ipv4);
+    const Raw = raw_socket.Socket(ipv4, .{ .payload_size = 16 });
+    const Icmp = icmp_socket.Socket(ipv4);
+
+    const DatagramOp = struct { kind: u8, tag: u8, len: u8 };
+
+    /// UDP is a FIFO of datagrams: what is accepted comes out in order with its source,
+    /// `peek` shows the next one without taking it, the hop limit rides on what is sent, and
+    /// closing discards both queues.
+    pub fn udpIsAFifoOfDatagrams(hop: ?u8, ops: [32]DatagramOp) bool {
+        var rx_meta: [3]Udp.PacketMeta = @splat(.{});
+        var rx_payload: [48]u8 = undefined;
+        var tx_meta: [3]Udp.PacketMeta = @splat(.{});
+        var tx_payload: [48]u8 = undefined;
+        var sock = Udp.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
+        sock.bind(.{ .port = 5000 }) catch return false;
+        if (sock.setHopLimit(0)) |_| return false else |_| {}
+        const limit: ?u8 = if (hop) |h| (if (h == 0) null else h) else null;
+        sock.setHopLimit(limit) catch return false;
+        var inbox: [8]struct { tag: u8, len: u8 } = undefined;
+        var in_n: usize = 0;
+        var outbox: [8]struct { tag: u8, len: u8 } = undefined;
+        var out_n: usize = 0;
+        const peer = ipv4.Address{ 10, 0, 0, 7 };
+        const me = ipv4.Address{ 10, 0, 0, 1 };
+        for (ops) |op| {
+            const len: u8 = op.len % 12;
+            switch (op.kind % 7) {
+                0 => {
+                    @memset(payload_mem[0..len], op.tag);
+                    if (!sock.accepts(peer, me, .{ .src_port = 40000 + @as(u16, op.tag), .dst_port = 5000 })) return false;
+                    if (sock.accepts(peer, me, .{ .src_port = 40000, .dst_port = 5001 })) return false;
+                    const before = sock.canRecv();
+                    sock.process(peer, me, .{ .src_port = 40000 + @as(u16, op.tag), .dst_port = 5000 }, payload_mem[0..len]);
+                    if (sock.canRecv() and !before) {
+                        if (in_n != 0) return false;
+                    }
+                    if (sock.canRecv()) {
+                        // accepted unless the ring was full: learn it from the queue depth
+                        var probe = sock;
+                        var depth: usize = 0;
+                        var scratch: [48]u8 = undefined;
+                        while (probe.recvSlice(&scratch)) |_| depth += 1 else |_| {}
+                        if (depth == in_n + 1) {
+                            inbox[in_n] = .{ .tag = op.tag, .len = len };
+                            in_n += 1;
+                        } else if (depth != in_n) return false;
+                    }
+                },
+                1, 2 => {
+                    var out: [48]u8 = undefined;
+                    if (in_n == 0) {
+                        if (sock.canRecv()) return false;
+                        if (sock.recvSlice(&out)) |_| return false else |e| if (e != error.Exhausted) return false;
+                        if (sock.peek()) |_| return false else |_| {}
+                        continue;
+                    }
+                    const want = inbox[0];
+                    const peeked = sock.peek() catch return false;
+                    if (peeked.payload.len != want.len or peeked.meta.endpoint.port != 40000 + @as(u16, want.tag)) return false;
+                    if (!std.mem.eql(u8, &peeked.meta.endpoint.addr, &peer)) return false;
+                    const copied = sock.peekSlice(&out) catch return false;
+                    if (copied.data_len != want.len or !sock.canRecv()) return false;
+                    if (op.kind % 7 == 2) {
+                        if (sock.peekSlice(out[0..0])) |_| {
+                            if (want.len != 0) return false;
+                        } else |e| if (e != error.Truncated or want.len == 0) return false;
+                        continue;
+                    }
+                    const got = sock.recvSlice(&out) catch return false;
+                    if (got.data_len != want.len) return false;
+                    for (out[0..want.len]) |b| if (b != want.tag) return false;
+                    std.mem.copyForwards(@TypeOf(inbox[0]), inbox[0 .. in_n - 1], inbox[1..in_n]);
+                    in_n -= 1;
+                },
+                3 => {
+                    @memset(payload_mem[0..len], op.tag);
+                    const dest: Udp.Metadata = .{ .endpoint = .{ .addr = peer, .port = 9000 + @as(u16, op.tag) } };
+                    if (sock.sendSlice(payload_mem[0..len], dest)) |_| {
+                        if (out_n == outbox.len) return false;
+                        outbox[out_n] = .{ .tag = op.tag, .len = len };
+                        out_n += 1;
+                    } else |e| if (e != error.BufferFull or sock.canSend() and out_n == 0) return false;
+                },
+                4 => {
+                    if (sock.dispatch()) |d| {
+                        if (out_n == 0) return false;
+                        const want = outbox[0];
+                        if (d.payload.len != want.len or d.repr.dst_port != 9000 + @as(u16, want.tag) or d.repr.src_port != 5000) return false;
+                        if (d.hop_limit != limit) return false;
+                        std.mem.copyForwards(@TypeOf(outbox[0]), outbox[0 .. out_n - 1], outbox[1..out_n]);
+                        out_n -= 1;
+                    } else if (out_n != 0) return false;
+                },
+                5 => {
+                    sock.close();
+                    if (sock.isOpen() or sock.canRecv() or sock.dispatch() != null) return false;
+                    in_n = 0;
+                    out_n = 0;
+                    sock.bind(.{ .port = 5000 }) catch return false;
+                    if (!sock.canSend()) return false;
+                },
+                else => {
+                    if ((sock.pollAt() != null) != (out_n != 0)) return false;
+                },
+            }
+        }
+        return true;
+    }
+
+    /// A raw socket queues whole packets of one IP protocol: it refuses to send before it is
+    /// bound, fills after its storage does, hands packets out in order, and closing empties it.
+    pub fn rawSocketsAreBoundedPacketQueues(hop: ?u8, ops: [32]DatagramOp) bool {
+        var rx: [3]Raw.Packet = undefined;
+        var tx: [3]Raw.Packet = undefined;
+        var sock = Raw.init(&rx, &tx);
+        const peer = ipv4.Address{ 10, 0, 0, 7 };
+        if (sock.isOpen() or sock.canSend()) return false;
+        if (sock.sendSlice("x", peer)) |_| return false else |e| if (e != error.Unbound) return false;
+        if (sock.setHopLimit(0)) |_| return false else |_| {}
+        const limit: ?u8 = if (hop) |h| (if (h == 0) null else h) else null;
+        sock.setHopLimit(limit) catch return false;
+        sock.bind(.udp) catch return false;
+        if (!sock.isOpen() or !sock.canSend() or !sock.accepts(.udp) or sock.accepts(.tcp)) return false;
+        var inbox: [3]u8 = undefined;
+        var in_n: usize = 0;
+        var outbox: [3]u8 = undefined;
+        var out_n: usize = 0;
+        for (ops) |op| {
+            const len: u8 = op.len % 17;
+            switch (op.kind % 6) {
+                0 => {
+                    @memset(payload_mem[0..len], op.tag);
+                    sock.process(peer, .udp, payload_mem[0..len]);
+                    if (in_n < inbox.len) {
+                        inbox[in_n] = op.tag;
+                        in_n += 1;
+                    }
+                },
+                1 => {
+                    var out: [16]u8 = undefined;
+                    if (in_n == 0) {
+                        if (sock.canRecv()) return false;
+                        if (sock.peek()) |_| return false else |e| if (e != error.Exhausted) return false;
+                        continue;
+                    }
+                    const peeked = sock.peek() catch return false;
+                    if (!std.mem.eql(u8, &peeked.src_addr, &peer) or (peeked.payload.len > 0 and peeked.payload[0] != inbox[0])) return false;
+                    const got = sock.recvSlice(&out) catch return false;
+                    if (got.data_len != peeked.payload.len) return false;
+                    std.mem.copyForwards(u8, inbox[0 .. in_n - 1], inbox[1..in_n]);
+                    in_n -= 1;
+                },
+                2 => {
+                    @memset(payload_mem[0..len], op.tag);
+                    if (sock.sendSlice(payload_mem[0..len], peer)) |_| {
+                        if (out_n == outbox.len) return false;
+                        outbox[out_n] = op.tag;
+                        out_n += 1;
+                    } else |e| {
+                        if (e != error.BufferFull or out_n != outbox.len) return false;
+                    }
+                    if (sock.canSend() != (out_n < outbox.len)) return false;
+                },
+                3 => {
+                    if (sock.peekDstAddr() != null and out_n == 0) return false;
+                    if (sock.dispatch()) |d| {
+                        if (out_n == 0 or d.ip_protocol != .udp or d.hop_limit != limit or !std.mem.eql(u8, &d.dst_addr, &peer)) return false;
+                        if (d.payload.len > 0 and d.payload[0] != outbox[0]) return false;
+                        std.mem.copyForwards(u8, outbox[0 .. out_n - 1], outbox[1..out_n]);
+                        out_n -= 1;
+                    } else if (out_n != 0) return false;
+                },
+                4 => {
+                    sock.close();
+                    if (sock.isOpen() or sock.canSend() or sock.canRecv() or sock.dispatch() != null or sock.accepts(.udp)) return false;
+                    in_n = 0;
+                    out_n = 0;
+                    sock.bind(.udp) catch return false;
+                },
+                else => if ((sock.pollAt() != null) != (out_n != 0)) return false,
+            }
+            if (sock.canRecv() != (in_n != 0)) return false;
+        }
+        return true;
+    }
+
+    /// The hop limit configured on an ICMP socket is the one its packets leave with, and zero
+    /// is refused.
+    pub fn icmpSocketsStampTheirHopLimit(hop: u8, len: u8) bool {
+        var rx_meta: [1]Icmp.PacketMeta = .{.{}};
+        var rx_payload: [16]u8 = undefined;
+        var tx_meta: [2]Icmp.PacketMeta = .{ .{}, .{} };
+        var tx_payload: [64]u8 = undefined;
+        var sock = Icmp.init(&rx_meta, &rx_payload, &tx_meta, &tx_payload);
+        if (sock.setHopLimit(0)) |_| return false else |_| {}
+        sock.setHopLimit(if (hop == 0) null else hop) catch return false;
+        sock.sendSlice(payload_mem[0 .. len % 20], .{ 10, 0, 0, 9 }) catch return false;
+        const d = sock.dispatch() orelse return false;
+        return d.hop_limit == (if (hop == 0) null else hop);
+    }
+};
+
+test "laws: datagram sockets" {
+    try zv.checkLaws(datagrams, .{ .iterations = iterations, .seed = 25 });
+}
+
+// -------------------------------------------------------------------------
+// Wire formats built from fields: RFC layouts and iterators.
+// -------------------------------------------------------------------------
+
+pub const layouts = struct {
+    pub const pinned = .{
+        .ipsecHeadersFollowTheirRfcs = .{ .{ 0, 0, 51, 254, 0 }, .{ 7, 9, 50, 0, 1 } },
+    };
+
+    /// RFC 4303 2 and RFC 4302 2: ESP starts with the SPI and a sequence number; AH adds the
+    /// next header, a length in 32-bit words minus two, a reserved zero and an ICV filling the rest.
+    pub fn ipsecHeadersFollowTheirRfcs(spi: u32, seq_no: u32, next: u8, icv_words: u8, fill: u8) bool {
+        var buf: [1100]u8 = @splat(0xAA);
+        const esp_repr: ipsec_esp.Repr = .{ .spi = spi, .sequence_number = seq_no };
+        ipsec_esp.emit(esp_repr, &buf) catch return false;
+        if (ipsec_esp.bufferLen(esp_repr) != 8 or std.mem.readInt(u32, buf[0..4], .big) != spi or std.mem.readInt(u32, buf[4..8], .big) != seq_no) return false;
+        const esp_back = ipsec_esp.parse(buf[0..8]) catch return false;
+        if (esp_back.spi != spi or esp_back.sequence_number != seq_no) return false;
+
+        const icv_len = @as(usize, icv_words % 255) * 4;
+        var icv: [1024]u8 = undefined;
+        @memset(icv[0..icv_len], fill);
+        const ah_repr: ipsec_ah.Repr = .{ .next_header = @fromBackingInt(next), .spi = spi, .sequence_number = seq_no, .icv_len = icv_len };
+        const total = ipsec_ah.bufferLen(ah_repr);
+        if (total != 12 + icv_len or total % 4 != 0) return false;
+        ipsec_ah.emit(ah_repr, icv[0..icv_len], &buf) catch return false;
+        if (buf[0] != next or buf[1] != total / 4 - 2 or buf[2] != 0 or buf[3] != 0) return false;
+        if (std.mem.readInt(u32, buf[4..8], .big) != spi or std.mem.readInt(u32, buf[8..12], .big) != seq_no) return false;
+        if (ipsec_ah.headerLen(buf[0..total]) != total) return false;
+        const back = ipsec_ah.parse(buf[0..total]) catch return false;
+        if (back.spi != spi or back.sequence_number != seq_no or back.icv_len != icv_len or @backingInt(back.next_header) != next) return false;
+        const odd: ipsec_ah.Repr = .{ .next_header = @fromBackingInt(next), .spi = spi, .sequence_number = seq_no, .icv_len = icv_len + 1 + fill % 3 };
+        const huge: ipsec_ah.Repr = .{ .next_header = @fromBackingInt(next), .spi = spi, .sequence_number = seq_no, .icv_len = ipsec_ah.MAX_ICV_LEN + 4 };
+        var big: [1100]u8 = undefined;
+        return ipsec_ah.emit(odd, icv[0..odd.icv_len], &big) == error.BadIcvLen and ipsec_ah.emit(huge, big[0..huge.icv_len], &big) == error.BadIcvLen;
+    }
+
+    /// Walking IPv6 options yields exactly what parsing at each offset yields, consumes the
+    /// whole buffer unless an option is malformed, and stays finished once it is.
+    pub fn ipv6OptionIteratorWalksTheBuffer(in: zv.Bytes(40)) bool {
+        const data = in.slice();
+        var it = ipv6option.iterator(data);
+        var at: usize = 0;
+        var count: usize = 0;
+        while (it.next()) |opt| {
+            const want = ipv6option.parse(data[at..]) catch return false;
+            if (!std.meta.eql(opt, want)) return false;
+            at += opt.bufferLen();
+            count += 1;
+            if (at > data.len or count > data.len) return false;
+        }
+        if (it.next() != null) return false;
+        return it.hit_error == (at < data.len) and (it.hit_error or at == data.len);
+    }
+
+    /// RFC 3810 5.1: an MLDv2 report rides in a hop-by-hop header carrying a Router Alert
+    /// option (RFC 2711) with value 0, which survives emit and parse.
+    pub fn mldv2ReportsCarryARouterAlert() bool {
+        const repr = ipv6hbh.mldv2RouterAlert();
+        var buf: [8]u8 = undefined;
+        const n = ipv6hbh.emit(repr, &buf) catch return false;
+        if (n != 4 or !std.mem.eql(u8, buf[0..4], &.{ 0x05, 0x02, 0x00, 0x00 })) return false;
+        const back = ipv6hbh.parse(buf[0..n]) catch return false;
+        return back.count == 1 and std.meta.eql(back.options[0], repr.options[0]);
+    }
+
+    /// RFC 3810 5.2: a multicast address record is its type, auxiliary data length, number of
+    /// sources and the group address, in that order and network byte order.
+    pub fn mldAddressRecordsFollowTheirLayout(kind: u8, aux: u8, sources: u16, group: [16]u8) bool {
+        const record: mld.AddressRecordRepr = .{ .record_type = @fromBackingInt(kind), .aux_data_len = aux, .num_srcs = sources, .mcast_addr = group };
+        var buf: [24]u8 = undefined;
+        if (mld.emitAddressRecord(record, buf[0..19])) |_| return false else |_| {}
+        const n = mld.emitAddressRecord(record, &buf) catch return false;
+        return n == 20 and buf[0] == kind and buf[1] == aux and std.mem.readInt(u16, buf[2..4], .big) == sources and
+            std.mem.eql(u8, buf[4..20], &group) and mld.addressRecordLen(record) == 20 + @as(usize, sources) * 16 + @as(usize, aux) * 4;
+    }
+
+    /// RFC 4944 6 and RFC 4291 A: a link-local address is fe80::/64 followed by the interface
+    /// identifier, which for a 64-bit link address is the address with its universal/local bit
+    /// inverted and for a 16-bit one is 0000:00ff:fe00:xxxx. Only 0xffff is the broadcast address.
+    pub fn ieee802154LinkAddressesMapToIpv6(ext: [8]u8, short: [2]u8, which: u8) bool {
+        const a: ieee802154.Address = switch (which % 3) {
+            0 => .absent,
+            1 => .{ .short = short },
+            else => .{ .extended = ext },
+        };
+        const ll = a.asLinkLocalAddress();
+        if (!std.mem.eql(u8, ll[0..8], &.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0 }) or !std.mem.eql(u8, ll[8..], &a.asEui64())) return false;
+        switch (a) {
+            .extended => |e| if (ll[8] != e[0] ^ 0x02 or !std.mem.eql(u8, ll[9..], e[1..])) return false,
+            .short => |s| if (!std.mem.eql(u8, ll[8..], &.{ 0, 0, 0, 0xff, 0xfe, 0, s[0], s[1] })) return false,
+            .absent => {},
+        }
+        const short_broadcast = ieee802154.Address{ .short = .{ 0xff, 0xff } };
+        const absent: ieee802154.Address = .absent;
+        return a.isBroadcast() == (which % 3 == 1 and short[0] == 0xff and short[1] == 0xff) and short_broadcast.isBroadcast() and
+            !(ieee802154.Address{ .extended = @splat(0xff) }).isBroadcast() and !absent.isBroadcast();
+    }
+
+    /// The payload after a 6LoWPAN fragment header is the rest of the frame.
+    pub fn sixlowpanFragmentPayloadFollowsTheHeader(in: zv.Bytes(32)) bool {
+        const data = in.slice();
+        const header = sixlowpan_frag.parse(data) catch return true;
+        const p = sixlowpan_frag.payloadSlice(data) catch return false;
+        return within(data, p) and p.len + sixlowpan_frag.bufferLen(header) == data.len;
+    }
+
+    /// RFC 1035 4.1.1: the header is six big-endian 16-bit fields, flags carrying the opcode
+    /// in bits 11-14 and the response code in bits 0-3.
+    pub fn dnsHeaderFieldsAreBigEndianWords(in: zv.Bytes(16)) bool {
+        var buf: [16]u8 = @splat(0);
+        const n = in.slice().len;
+        @memcpy(buf[0..n], in.slice());
+        if (n < dns.HEADER_LEN) {
+            if (dns.transactionId(buf[0..n])) |_| return false else |_| {}
+            if (dns.additionalCount(buf[0..n])) |_| return false else |_| {}
+            return true;
+        }
+        const data = buf[0..n];
+        const word = struct {
+            fn at(d: []const u8, i: usize) u16 {
+                return std.mem.readInt(u16, d[i * 2 ..][0..2], .big);
+            }
+        }.at;
+        const flags = word(data, 1);
+        return (dns.transactionId(data) catch return false) == word(data, 0) and
+            (dns.flags(data) catch return false) == flags & dns.Flags.MASK and
+            @backingInt(dns.opcode(data) catch return false) == (flags >> 11) & 0xf and
+            @backingInt(dns.rcode(data) catch return false) == flags & 0xf and
+            (dns.questionCount(data) catch return false) == word(data, 2) and
+            (dns.answerCount(data) catch return false) == word(data, 3) and
+            (dns.authorityCount(data) catch return false) == word(data, 4) and
+            (dns.additionalCount(data) catch return false) == word(data, 5) and
+            std.mem.eql(u8, dns.payload(data) catch return false, data[dns.HEADER_LEN..]);
+    }
+
+    /// Writing parsed labels back gives the wire name, with room for the terminating zero.
+    pub fn dnsNamesSurviveBeingCopiedBack(lens: [4]u8, fill: [4]u8, count: u8, room: u8) bool {
+        var wire_name: [40]u8 = undefined;
+        const labels = count % 4 + 1;
+        var at: usize = 0;
+        for (0..labels) |i| {
+            const len = lens[i] % 8 + 1;
+            wire_name[at] = len;
+            @memset(wire_name[at + 1 ..][0..len], fill[i]);
+            at += 1 + len;
+        }
+        wire_name[at] = 0;
+        const parsed = dns.parseName(wire_name[0 .. at + 1], 0) catch return false;
+        var out: [40]u8 = undefined;
+        const n = dns.copyName(out[0 .. @as(usize, room) % 41], parsed) catch return room % 41 < at + 1;
+        return n == at + 1 and std.mem.eql(u8, out[0..n], wire_name[0..n]) and dns.eqNames(parsed, parsed);
+    }
+
+    /// RFC 6550 6.7.6, 6.7.7, 6.7.8 and RFC 6553: each option reads back what was written.
+    pub fn rplOptionsReadBackWhatWasEmitted(cfg: rpl.DodagConfigurationOption, prefix_len: u8, prefix: [16]u8, transit: rpl.TransitInformationOption, flags: [3]bool, instance: u8, rank: u16) bool {
+        var buf: [32]u8 = undefined;
+        var n = cfg.emit(buf[0 .. rpl.DodagConfigurationOption.WIRE_LEN - 1]) catch 0;
+        if (n != 0) return false;
+        n = cfg.emit(&buf) catch return false;
+        const cfg_back = rpl.DodagConfigurationOption.parseOption(buf[0..n]) catch return false;
+        if (n != 14 or !std.meta.eql(cfg_back, cfg) or buf[10] != 0) return false;
+
+        const target: rpl.RplTargetOption = .{ .prefix_length = prefix_len, .prefix = prefix };
+        n = target.emit(&buf) catch return false;
+        const target_back = rpl.RplTargetOption.parseOption(buf[0..n]) catch return false;
+        if (n != 18 or !std.meta.eql(target_back, target)) return false;
+
+        n = transit.emit(&buf) catch return false;
+        const transit_back = rpl.TransitInformationOption.parseOption(buf[0..n]) catch return false;
+        if (n != transit.wireLen() or n != (if (transit.parent_address != null) @as(usize, 20) else 4) or !std.meta.eql(transit_back, transit)) return false;
+        if (transit.emit(buf[0 .. n - 1])) |_| return false else |_| {}
+
+        const hop: rpl.HopByHopRepr = .{ .down = flags[0], .rank_error = flags[1], .forwarding_error = flags[2], .instance_id = rpl.InstanceId.fromByte(instance), .sender_rank = rank };
+        n = hop.emit(&buf) catch return false;
+        const hop_back = rpl.HopByHopRepr.parseOption(buf[0..n]) catch return false;
+        return n == 4 and hop_back.instance_id.toByte() == instance and hop_back.down == flags[0] and hop_back.rank_error == flags[1] and
+            hop_back.forwarding_error == flags[2] and hop_back.sender_rank == rank and buf[1] == instance;
+    }
+
+    /// RPL control message options are type-length-value triples with a one-byte Pad1; walking
+    /// them never leaves the buffer, and stops at a truncated option.
+    pub fn rplOptionIteratorStaysInTheBuffer(in: zv.Bytes(48)) bool {
+        const data = in.slice();
+        var it = rpl.OptionIterator.init(data);
+        var steps: usize = 0;
+        var last_offset: usize = 0;
+        while (it.next()) |opt| {
+            steps += 1;
+            if (steps > data.len or it.offset <= last_offset or it.offset > data.len) return false;
+            if (opt.option_type == .pad1 and (opt.value.len != 0 or it.offset != last_offset + 1)) return false;
+            if (opt.option_type != .pad1 and it.offset != last_offset + 2 + opt.value.len) return false;
+            if (opt.value.len > 0 and !within(data, opt.value)) return false;
+            last_offset = it.offset;
+        }
+        return it.next() == null;
+    }
+
+    /// RFC 6282 4.2: a compressed extension header starts with 1110 EID NH and is followed by its
+    /// next header (when not compressed), a length and the data. The emitted length is what the
+    /// length helper predicted.
+    pub fn sixlowpanExtensionHeadersCompressConsistently(eid: u8, payload_len: u8, next: u8, compressed: bool) bool {
+        const repr: sixlowpan.ExtHeaderNhcRepr = .{
+            .id = @fromBackingInt(@as(u3, @truncate(eid))),
+            .next_header = if (compressed) .compressed else .{ .uncompressed = @fromBackingInt(next) },
+            .length = payload_len,
+        };
+        var buf: [8]u8 = undefined;
+        const predicted = sixlowpan.extHeaderNhcBufLen(repr);
+        if (sixlowpan.emitExtHeaderNhc(repr, buf[0 .. predicted - 1])) |_| return false else |_| {}
+        const n = sixlowpan.emitExtHeaderNhc(repr, &buf) catch return false;
+        if (n != predicted or buf[0] >> 4 != 0xe or (buf[0] >> 1) & 7 != eid % 8 or (buf[0] & 1 == 1) != compressed) return false;
+        const back = sixlowpan.parseExtHeaderNhc(buf[0..n]) catch return false;
+        return back.consumed == n and std.meta.eql(back.repr, repr);
+    }
+};
+
+test "laws: wire layouts" {
+    try zv.checkLaws(layouts, .{ .iterations = iterations, .seed = 26 });
+}
+
+// -------------------------------------------------------------------------
+// Interface: addresses, routes, multicast membership, SLAAC and the answers
+// a host gives to frames addressed to it.
+// -------------------------------------------------------------------------
+
+pub const addressing = struct {
+    const State = iface_mod.IpState(ipv4);
+    const Cidr = iface_mod.IpCidr;
+    const Routes = iface_mod.RoutesFor(ipv4);
+
+    const AddrOp = struct { kind: u8, host: u8, prefix: u8 };
+
+    fn cidrOf(op: AddrOp) Cidr {
+        return .{ .address = .{ 10, op.host % 4, 0, op.host / 4 % 4 + 1 }, .prefix_len = 16 + op.prefix % 3 * 8 };
+    }
+
+    /// An interface keeps a bounded list of addresses: adding past the limit is ignored, removing
+    /// takes the most recently added match, replacing swaps the whole list, and the source
+    /// address for a destination is the one on its network, else the first.
+    pub fn addressListsAreBounded(ops: [32]AddrOp, probe: [4]u8) bool {
+        var state: State = .{};
+        var model: [iface_mod.MAX_ADDR_COUNT]Cidr = undefined;
+        var n: usize = 0;
+        for (ops) |op| {
+            const cidr = cidrOf(op);
+            switch (op.kind % 4) {
+                0, 1 => {
+                    state.addIpAddr(cidr);
+                    if (n < model.len) {
+                        model[n] = cidr;
+                        n += 1;
+                    }
+                },
+                2 => {
+                    var at: ?usize = null;
+                    for (model[0..n], 0..) |m, i| {
+                        if (std.mem.eql(u8, &m.address, &cidr.address)) at = i;
+                    }
+                    const removed = state.removeIpAddr(cidr.address);
+                    if (removed != (at != null)) return false;
+                    if (at) |i| {
+                        std.mem.copyForwards(Cidr, model[i .. n - 1], model[i + 1 .. n]);
+                        n -= 1;
+                    }
+                },
+                else => {
+                    const batch = [_]Cidr{ cidr, cidrOf(.{ .kind = 0, .host = op.host +% 1, .prefix = op.prefix }), cidrOf(.{ .kind = 0, .host = op.host +% 2, .prefix = 0 }), cidrOf(.{ .kind = 0, .host = op.host +% 3, .prefix = 0 }), cidrOf(.{ .kind = 0, .host = op.host +% 5, .prefix = 0 }) };
+                    const count = op.prefix % batch.len + 1;
+                    state.setAddrs(batch[0..count]);
+                    n = @min(count, model.len);
+                    @memcpy(model[0..n], batch[0..n]);
+                },
+            }
+            const got = state.ipAddrs();
+            if (got.len != n) return false;
+            for (got, model[0..n]) |g, m| if (!std.meta.eql(g, m)) return false;
+            var want_source: ?ipv4.Address = if (n == 0) null else model[0].address;
+            var on_net = false;
+            for (model[0..n]) |m| {
+                if (m.contains(probe)) {
+                    want_source = m.address;
+                    on_net = true;
+                    break;
+                }
+            }
+            const source = state.getSourceAddress(probe);
+            if ((source == null) != (want_source == null)) return false;
+            if (source) |s| if (!std.mem.eql(u8, &s, &want_source.?)) return false;
+            if (state.inSameNetwork(probe) != on_net) return false;
+            if (state.hasIpAddr(probe) != for (model[0..n]) |m| {
+                if (std.mem.eql(u8, &m.address, &probe)) break true;
+            } else false) return false;
+        }
+        return true;
+    }
+
+    const RouteOp = struct { gateway: u8, prefix: u8, host: u8, expires: u8 };
+
+    /// RFC 1812 5.2.4.3: forwarding takes the most specific route that matches the destination
+    /// and has not expired, the first one added on a tie, and a full table refuses further routes.
+    pub fn routingPrefersTheMostSpecificLiveRoute(ops: [6]RouteOp, dst: [4]u8, now_secs: u8) bool {
+        var table: Routes = .{};
+        var accepted: [iface_mod.MAX_ROUTE_COUNT]RouteOp = undefined;
+        var n: usize = 0;
+        for (ops) |op| {
+            const route: iface_mod.RouteFor(ipv4) = .{
+                .cidr = .{ .address = .{ 10, op.host % 3, 0, 0 }, .prefix_len = op.prefix % 3 * 8 + 8 },
+                .via_router = .{ 192, 168, 0, op.gateway },
+                .expires_at = if (op.expires < 64) null else time_mod.Instant.fromSecs(op.expires),
+            };
+            const added = table.add(route);
+            if (added != (n < accepted.len)) return false;
+            if (added) {
+                accepted[n] = op;
+                n += 1;
+            }
+        }
+        const now = time_mod.Instant.fromSecs(now_secs);
+        var best: ?u8 = null;
+        var best_gateway: u8 = 0;
+        for (accepted[0..n]) |op| {
+            const len = op.prefix % 3 * 8 + 8;
+            const net: ipv4.Address = .{ 10, op.host % 3, 0, 0 };
+            const live = op.expires < 64 or now_secs <= op.expires;
+            const matches = std.mem.eql(u8, net[0 .. len / 8], dst[0 .. len / 8]);
+            if (live and matches and (best == null or len > best.?)) {
+                best = len;
+                best_gateway = op.gateway;
+            }
+        }
+        const got = table.lookup(dst, now);
+        if ((got == null) != (best == null)) return false;
+        if (got) |g| if (!std.mem.eql(u8, &g, &.{ 192, 168, 0, best_gateway })) return false;
+        const gw = iface_mod.RouteFor(ipv4).newDefaultGateway(.{ 1, 2, 3, 4 });
+        return gw.cidr.prefix_len == 0 and gw.cidr.contains(dst) and gw.expires_at == null and std.mem.eql(u8, &gw.via_router, &.{ 1, 2, 3, 4 });
+    }
+};
+
+test "laws: addressing and routes" {
+    try zv.checkLaws(addressing, .{ .iterations = iterations, .seed = 27 });
+}
+
+pub const membership = struct {
+    const Group = ipv6.Address;
+
+    fn group4(id: u8) ipv4.Address {
+        return .{ 224, 0, 1, id % 7 };
+    }
+
+    fn group6(id: u8) Group {
+        var g: Group = @splat(0);
+        g[0] = 0xff;
+        g[1] = 0x0e;
+        g[15] = id % 10 + 1;
+        return g;
+    }
+
+    const MemberOp = struct { kind: u8, group: u8 };
+
+    /// IPv4 group membership is a bounded set: joining twice is joining once, a full table
+    /// refuses a new group, and only a member can be left.
+    pub fn ipv4GroupsAreABoundedSet(ops: [32]MemberOp) bool {
+        var iface = iface_mod.Interface.init(.{ 2, 0, 0, 0, 0, 1 });
+        var members: [7]bool = @splat(false);
+        for (ops) |op| {
+            const id = op.group % 7;
+            var count: usize = 0;
+            for (members) |m| count += @intFromBool(m);
+            switch (op.kind % 3) {
+                0 => {
+                    const ok = iface.joinMulticastGroup(group4(id));
+                    if (ok != (members[id] or count < iface_mod.MAX_MULTICAST_GROUPS)) return false;
+                    members[id] = members[id] or ok;
+                },
+                1 => {
+                    if (iface.leaveMulticastGroup(group4(id)) != members[id]) return false;
+                    members[id] = false;
+                },
+                else => {},
+            }
+            for (members, 0..) |m, i| if (iface.hasMulticastGroup(group4(@intCast(i))) != m) return false;
+        }
+        return true;
+    }
+
+    const Phase = enum { joining, joined, leaving };
+    const MldOp = struct { kind: u8, group: u8, hop: u8 };
+
+    /// RFC 3810 and RFC 4861 on the host side: a group being joined is reported once and then
+    /// stays joined; leaving is announced before the group disappears; a general query makes
+    /// every joined group report again, a group-specific query only that group, and only a query
+    /// with hop limit 1 (so, from the local link) counts.
+    pub fn multicastListenersReportAsQueried(ops: [40]MldOp) bool {
+        var iface = iface_mod.Interface.init(.{ 2, 0, 0, 0, 0, 1 });
+        var phase: [10]?Phase = @splat(null);
+        for (ops) |op| {
+            const id = op.group % 10;
+            const g = group6(id);
+            var present: usize = 0;
+            for (phase) |p| present += @intFromBool(p != null);
+            switch (op.kind % 8) {
+                0 => {
+                    const ok = iface.joinMulticastGroupV6(g);
+                    const should = phase[id] != null or present < iface_mod.MAX_MULTICAST_GROUPS_V6;
+                    if (ok != should) return false;
+                    if (phase[id]) |p| {
+                        if (p == .leaving) phase[id] = .joined;
+                    } else if (ok) phase[id] = .joining;
+                },
+                1 => {
+                    const ok = iface.leaveMulticastGroupV6(g);
+                    const should = phase[id] != null and phase[id].? != .leaving;
+                    if (ok != should) return false;
+                    if (ok) phase[id] = .leaving;
+                },
+                2 => {
+                    iface.markMldReported(g);
+                    if (phase[id]) |p| switch (p) {
+                        .joining => phase[id] = .joined,
+                        .leaving => phase[id] = null,
+                        .joined => {},
+                    };
+                },
+                3 => {
+                    iface.markAllGroupsForReport();
+                    for (&phase) |*p| if (p.* != null and p.*.? == .joined) {
+                        p.* = .joining;
+                    };
+                },
+                4 => {
+                    iface.markGroupForReport(g);
+                    if (phase[id] != null and phase[id].? == .joined) phase[id] = .joining;
+                },
+                else => {
+                    const general = op.kind % 8 == 5;
+                    const ip: ipv6.Repr = .{ .src_addr = iface_mod.Interface.linkLocalFromMac(.{ 2, 0, 0, 0, 0, 9 }), .dst_addr = ipv6.LINK_LOCAL_ALL_NODES, .next_header = .icmpv6, .payload_len = 24, .hop_limit = if (op.hop % 3 == 0) 1 else op.hop };
+                    iface.processMldQuery(ip, .{ .query = .{ .max_resp_code = 1000, .mcast_addr = if (general) ipv6.UNSPECIFIED else g, .s_flag = false, .qrv = 2, .qqic = 125, .num_srcs = 0 } });
+                    if (ip.hop_limit == 1) {
+                        if (general) {
+                            for (&phase) |*p| if (p.* != null and p.*.? == .joined) {
+                                p.* = .joining;
+                            };
+                        } else if (phase[id] != null and phase[id].? != .leaving) {
+                            if (phase[id].? == .joined) phase[id] = .joining;
+                        }
+                    }
+                    iface.processMldQuery(ip, .{ .report = .{ .nr_mcast_addr_rcrds = 0 } });
+                },
+            }
+            var pending = false;
+            for (phase, 0..) |p, i| {
+                const listening = p != null and p.? != .leaving;
+                if (iface.hasMulticastGroupV6(group6(@intCast(i))) != listening) return false;
+                pending = pending or (p != null and p.? != .joined);
+            }
+            if (iface.hasPendingMldV6() != pending) return false;
+        }
+        return true;
+    }
+};
+
+test "laws: multicast membership" {
+    try zv.checkLaws(membership, .{ .iterations = iterations, .seed = 28 });
+}
+
+pub const autoconfiguration = struct {
+    const mac_of = struct {
+        fn f(m: [6]u8) ethernet.Address {
+            return m;
+        }
+    }.f;
+
+    /// RFC 4291 Appendix A: the interface identifier is the MAC with FF FE in the middle and the
+    /// universal/local bit inverted; the link-local address is fe80::/64 followed by it.
+    pub fn interfaceIdentifiersFollowRfc4291(mac: [6]u8) bool {
+        const iid = iface_mod.Interface.eui64InterfaceId(mac);
+        const ll = iface_mod.Interface.linkLocalFromMac(mac);
+        return iid[0] == mac[0] ^ 0x02 and iid[1] == mac[1] and iid[2] == mac[2] and iid[3] == 0xff and iid[4] == 0xfe and
+            std.mem.eql(u8, iid[5..], mac[3..]) and
+            std.mem.eql(u8, ll[0..8], &.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0 }) and std.mem.eql(u8, ll[8..], &iid) and ipv6.isLinkLocal(ll);
+    }
+
+    const RaOp = struct { lifetime: u16, valid: u32, preferred: u32, prefix: u8, len_sel: u8, addrconf: bool, advance: u16 };
+
+    /// RFC 4862 5.5: a host configures a link-local address, then for each advertised /64 prefix
+    /// flagged for autoconfiguration an address made of the prefix and its interface identifier,
+    /// for as long as the prefix is valid; a router lifetime of zero withdraws the default router.
+    pub fn routerAdvertisementsConfigureAddresses(mac: [6]u8, ops: [10]RaOp) bool {
+        var iface = iface_mod.Interface.init(mac);
+        iface.enableSlaac();
+        const ll = iface_mod.Interface.linkLocalFromMac(mac);
+        if (!std.mem.eql(u8, &(iface.linkLocalIpv6Addr() orelse return false), &ll)) return false;
+        if (!std.mem.eql(u8, &(iface.ipv6Addr() orelse return false), &ll) or !iface.hasMulticastGroupV6(ipv6.LINK_LOCAL_ALL_NODES) or !iface.hasSolicitedNode(ipv6.solicitedNode(ll))) return false;
+        const router = iface_mod.Interface.linkLocalFromMac(.{ 2, 0, 0, 0, 0, 0xee });
+        const iid = iface_mod.Interface.eui64InterfaceId(mac);
+        var now_secs: i64 = 0;
+        var valid_until: [3]?i64 = @splat(null);
+        for (ops) |op| {
+            now_secs += op.advance % 600;
+            const now = time_mod.Instant.fromSecs(now_secs);
+            iface.now = now;
+            iface.slaacMaintenance(now);
+            for (&valid_until) |*v| if (v.* != null and v.*.? <= now_secs) {
+                v.* = null;
+            };
+            var prefix: ipv6.Address = @splat(0);
+            prefix[0] = 0x20;
+            prefix[7] = op.prefix % 3;
+            const len: u8 = if (op.len_sel % 4 == 0) 48 else 64;
+            const ip: ipv6.Repr = .{ .src_addr = router, .dst_addr = ipv6.LINK_LOCAL_ALL_NODES, .next_header = .icmpv6, .payload_len = 64, .hop_limit = 255 };
+            iface.processRouterAdvertisement(ip, .{ .router_advert = .{
+                .hop_limit = 64,
+                .flags = .{ .managed = false, .other = false },
+                .router_lifetime = op.lifetime,
+                .reachable_time = 0,
+                .retrans_time = 0,
+                .lladdr = null,
+                .mtu = null,
+                .prefix_info = .{ .prefix_len = len, .flags = .{ .on_link = true, .addrconf = op.addrconf }, .valid_lifetime = op.valid % 2000, .preferred_lifetime = op.preferred % 2000, .prefix = prefix },
+            } });
+            const slaac = iface.slaac.?;
+            if (op.lifetime > 0 and !std.mem.eql(u8, &(slaac.default_router orelse return false), &router)) return false;
+            if (op.lifetime == 0 and slaac.default_router != null) return false;
+            const configurable = len == 64 and op.addrconf;
+            if (configurable) valid_until[op.prefix % 3] = if (op.valid % 2000 == 0) null else now_secs + op.valid % 2000;
+            for (valid_until, 0..) |until, i| {
+                var addr = prefix;
+                addr[7] = @intCast(i);
+                @memcpy(addr[8..], &iid);
+                if (iface.v6.hasIpAddr(addr) != (until != null)) return false;
+                if (until != null and !iface.hasSolicitedNode(ipv6.solicitedNode(addr))) return false;
+            }
+            if (!iface.v6.hasIpAddr(ll)) return false;
+        }
+        now_secs += 100_000;
+        iface.slaacMaintenance(time_mod.Instant.fromSecs(now_secs));
+        const after = iface.slaac.?;
+        return after.default_router == null and after.phase != .configured and iface.v6.ipAddrs().len == 1 and
+            (iface.slaacPollAt() == null or !iface.slaacPollAt().?.lessThan(time_mod.Instant.ZERO));
+    }
+};
+
+test "laws: autoconfiguration" {
+    try zv.checkLaws(autoconfiguration, .{ .iterations = iterations, .seed = 29 });
+}
+
+pub const hosts = struct {
+    const me_mac = ethernet.Address{ 2, 0, 0, 0, 0, 1 };
+    const peer_mac = ethernet.Address{ 2, 0, 0, 0, 0, 2 };
+    const me4 = ipv4.Address{ 10, 0, 0, 1 };
+    const peer4 = ipv4.Address{ 10, 0, 0, 2 };
+
+    fn host() iface_mod.Interface {
+        var iface = iface_mod.Interface.init(me_mac);
+        iface.setIpAddrs(&.{.{ .address = me4, .prefix_len = 24 }});
+        iface.setIpv6Addrs(&.{.{ .address = iface_mod.Interface.linkLocalFromMac(me_mac), .prefix_len = 64 }});
+        return iface;
+    }
+
+    fn frame(buf: []u8, kind: ethernet.EtherType, len_after: usize) usize {
+        const n = ethernet.emit(.{ .dst_addr = me_mac, .src_addr = peer_mac, .ethertype = kind }, buf) catch unreachable;
+        return n + len_after;
+    }
+
+    /// RFC 826: an ARP request for the interface's address is answered with its hardware
+    /// address and teaches it the requester's; a request for another address is ignored.
+    pub fn arpRequestsAreAnsweredForOwnAddressesOnly(who: [4]u8, requester: u8) bool {
+        var iface = host();
+        var buf: [64]u8 = undefined;
+        const target: ipv4.Address = if (who[0] % 2 == 0) me4 else who;
+        const source: ipv4.Address = .{ 10, 0, 0, 2 + requester % 100 };
+        var at = ethernet.emit(.{ .dst_addr = ethernet.BROADCAST, .src_addr = peer_mac, .ethertype = .arp }, &buf) catch return false;
+        at += arp.emit(.{ .operation = .request, .source_hardware_addr = peer_mac, .source_protocol_addr = source, .target_hardware_addr = .{ 0, 0, 0, 0, 0, 0 }, .target_protocol_addr = target }, buf[at..]) catch return false;
+        const response = iface.processEthernet(buf[0..at]);
+        const ours = std.mem.eql(u8, &target, &me4);
+        if ((response != null) != ours) return false;
+        if (!ours) return !iface.hasNeighbor(source);
+        const reply = response.?.arp_reply;
+        return reply.operation == .reply and std.mem.eql(u8, &reply.source_hardware_addr, &me_mac) and std.mem.eql(u8, &reply.target_hardware_addr, &peer_mac) and
+            std.mem.eql(u8, &reply.source_protocol_addr, &me4) and std.mem.eql(u8, &reply.target_protocol_addr, &source) and iface.hasNeighbor(source);
+    }
+
+    /// RFC 1122 3.2.2.1 and RFC 792: a datagram for an unknown IP protocol is answered with an
+    /// ICMP "protocol unreachable" quoting the offender, unless it was a broadcast.
+    pub fn unknownIpv4ProtocolsAreRefused(protocol: u8, payload_len: u8, broadcast: bool) bool {
+        var iface = host();
+        var buf: [128]u8 = @splat(0);
+        const proto: ipv4.Protocol = @fromBackingInt(protocol);
+        if (proto == .icmp or proto == .igmp or proto == .udp or proto == .tcp) return true;
+        const len = payload_len % 40;
+        const repr: ipv4.Repr = .{
+            .version = 4,
+            .ihl = 5,
+            .dscp_ecn = 0,
+            .total_length = @intCast(ipv4.HEADER_LEN + len),
+            .identification = 7,
+            .dont_fragment = false,
+            .more_fragments = false,
+            .fragment_offset = 0,
+            .ttl = 64,
+            .protocol = proto,
+            .checksum = 0,
+            .src_addr = peer4,
+            .dst_addr = if (broadcast) ipv4.BROADCAST else me4,
+        };
+        var at = frame(&buf, .ipv4, 0);
+        _ = ipv4.emit(repr, buf[at..]) catch return false;
+        at += ipv4.HEADER_LEN + len;
+        const response = iface.processEthernet(buf[0..at]);
+        if (broadcast) return response == null;
+        const r = (response orelse return false).ipv4;
+        const unreachable_ = switch (r.payload) {
+            .icmp_dest_unreachable => |d| d,
+            else => return false,
+        };
+        return unreachable_.code == 2 and std.mem.eql(u8, &r.ip.src_addr, &me4) and std.mem.eql(u8, &r.ip.dst_addr, &peer4) and
+            unreachable_.invoking_repr.protocol == proto and unreachable_.data.len == len;
+    }
+
+    /// RFC 4443 3.4: an IPv6 packet whose next header is unknown is answered with a parameter
+    /// problem pointing at the Next Header field (offset 6); multicast packets are not answered.
+    pub fn unknownIpv6NextHeadersAreRefused(next: u8, payload_len: u8, multicast: bool) bool {
+        var iface = host();
+        var buf: [128]u8 = @splat(0);
+        const proto: ipv6.Protocol = @fromBackingInt(next);
+        switch (proto) {
+            .hop_by_hop, .tcp, .udp, .routing, .fragment, .destination, .icmpv6, .no_next_header => return true,
+            else => {},
+        }
+        const len = payload_len % 40;
+        const me6 = iface_mod.Interface.linkLocalFromMac(me_mac);
+        const repr: ipv6.Repr = .{ .src_addr = iface_mod.Interface.linkLocalFromMac(peer_mac), .dst_addr = if (multicast) ipv6.LINK_LOCAL_ALL_NODES else me6, .next_header = proto, .payload_len = len, .hop_limit = 64 };
+        var at = frame(&buf, .ipv6, 0);
+        _ = ipv6.emit(repr, buf[at..]) catch return false;
+        at += ipv6.HEADER_LEN + len;
+        const response = iface.processEthernet(buf[0..at]);
+        if (multicast) return response == null or response.?.ipv6.payload == .icmpv6_param_problem;
+        const r = (response orelse return false).ipv6;
+        const problem = switch (r.payload) {
+            .icmpv6_param_problem => |p| p,
+            else => return false,
+        };
+        return problem.reason == .unrecognized_nxt_hdr and problem.pointer == 6 and std.mem.eql(u8, &r.ip.src_addr, &me6) and problem.data.len == len;
+    }
+
+    /// RFC 4861 7.2.4 and 7.1.1: a neighbor solicitation for one of the interface's addresses is
+    /// answered with an advertisement carrying its link-layer address, and only if it arrived
+    /// with hop limit 255; the solicitor is learned unless the solicitation came from `::`.
+    pub fn neighborSolicitationsAreAnswered(hop_limit: u8, from_unspecified: bool, other_target: bool) bool {
+        var iface = host();
+        var buf: [160]u8 = @splat(0);
+        const me6 = iface_mod.Interface.linkLocalFromMac(me_mac);
+        const peer6 = iface_mod.Interface.linkLocalFromMac(peer_mac);
+        const src = if (from_unspecified) ipv6.UNSPECIFIED else peer6;
+        const target = if (other_target) iface_mod.Interface.linkLocalFromMac(.{ 2, 0, 0, 0, 0, 9 }) else me6;
+        const solicit: ndisc.Repr = .{ .neighbor_solicit = .{ .target_addr = target, .lladdr = if (from_unspecified) null else peer_mac } };
+        const dst = ipv6.solicitedNode(target);
+        var at = frame(&buf, .ipv6, 0);
+        const body_len = icmpv6.bufferLen(.{ .ndisc = solicit });
+        const ip: ipv6.Repr = .{ .src_addr = src, .dst_addr = dst, .next_header = .icmpv6, .payload_len = @intCast(body_len), .hop_limit = hop_limit };
+        _ = ipv6.emit(ip, buf[at..]) catch return false;
+        at += ipv6.HEADER_LEN;
+        _ = icmpv6.emit(.{ .ndisc = solicit }, src, dst, buf[at..]) catch return false;
+        at += body_len;
+        const response = iface.processEthernet(buf[0..at]);
+        const answered = hop_limit == 255 and !other_target;
+        if ((response != null) != answered) return false;
+        if (!answered) return true;
+        const r = response.?.ipv6;
+        const advert = switch (r.payload) {
+            .ndisc => |n| switch (n) {
+                .neighbor_advert => |a| a,
+                else => return false,
+            },
+            else => return false,
+        };
+        return std.mem.eql(u8, &advert.target_addr, &me6) and std.mem.eql(u8, &(advert.lladdr orelse return false), &me_mac) and advert.flags.override_ and
+            advert.flags.solicited == !from_unspecified and r.ip.hop_limit == 255 and
+            std.mem.eql(u8, &r.ip.dst_addr, if (from_unspecified) &ipv6.LINK_LOCAL_ALL_NODES else &peer6) and
+            (iface.neighbor_cache_v6.hasNeighbor(peer6) == !from_unspecified);
+    }
+};
+
+test "laws: host behavior" {
+    try zv.checkLaws(hosts, .{ .iterations = iterations, .seed = 30 });
+}
+
+// -------------------------------------------------------------------------
+// DHCP client lifecycle (RFC 2131).
+// -------------------------------------------------------------------------
+
+pub const leases = struct {
+    const Socket = dhcp_socket.Socket;
+    const Instant = time_mod.Instant;
+    const Duration = time_mod.Duration;
+
+    const mac = [6]u8{ 2, 0, 0, 0, 0, 7 };
+    const server = [4]u8{ 10, 0, 0, 254 };
+    const lease_ip = [4]u8{ 10, 0, 0, 42 };
+
+    pub const pinned = .{
+        .unansweredRequestsBackOffAndGiveUp = .{ .{ 1, 100 }, .{ 7, 199 } },
+    };
+
+    fn reply(kind: dhcp.MessageType, xid: u32, lease: ?u32, t1: ?u32, t2: ?u32) dhcp.Repr {
+        return .{
+            .message_type = kind,
+            .transaction_id = xid,
+            .secs = 0,
+            .client_hardware_address = mac,
+            .client_ip = .{ 0, 0, 0, 0 },
+            .your_ip = lease_ip,
+            .server_ip = server,
+            .router = server,
+            .subnet_mask = .{ 255, 255, 255, 0 },
+            .relay_agent_ip = .{ 0, 0, 0, 0 },
+            .broadcast = false,
+            .requested_ip = null,
+            .client_identifier = null,
+            .server_identifier = server,
+            .parameter_request_list = null,
+            .max_size = null,
+            .lease_duration = lease,
+            .renew_duration = t1,
+            .rebind_duration = t2,
+            .dns_servers = null,
+        };
+    }
+
+    /// Acquire a lease at `at`: discover, offer, request, acknowledgment.
+    fn acquire(s: *Socket, at: Instant, lease: ?u32, t1: ?u32, t2: ?u32) bool {
+        const discover = s.dispatch(at) orelse return false;
+        if (discover.dhcp_repr.message_type != .discover or !std.mem.eql(u8, &discover.dst_ip, &.{ 255, 255, 255, 255 })) return false;
+        s.process(at, server, reply(.offer, discover.dhcp_repr.transaction_id, lease, t1, t2));
+        const request = s.dispatch(at) orelse return false;
+        if (request.dhcp_repr.message_type != .request or !std.mem.eql(u8, &request.dhcp_repr.requested_ip.?, &lease_ip)) return false;
+        s.process(at, server, reply(.ack, request.dhcp_repr.transaction_id, lease, t1, t2));
+        return true;
+    }
+
+    /// RFC 2131 4.4.5: a lease is renewed at T1 (by default half of it), rebound with a
+    /// broadcast at T2 (by default 7/8) and lost at its end, with T1 < T2 < lease whatever the
+    /// server sent; the client announces its configuration once and its loss once, and `reset`
+    /// goes back to discovery at once.
+    pub fn leasesRenewRebindAndExpire(seed: u64, lease_secs: u16, t1: ?u16, t2: ?u16) bool {
+        const lease: u32 = @as(u32, lease_secs) + 8;
+        var s = Socket.initWithTransactionSeed(mac, seed);
+        if (!s.pollAt().eql(Instant.ZERO) or s.poll() == null) return false;
+        const t0 = Instant.fromSecs(100);
+        if (!acquire(&s, t0, lease, if (t1) |v| v else null, if (t2) |v| v else null)) return false;
+
+        const event = s.poll() orelse return false;
+        const cfg = switch (event) {
+            .configured => |c| c,
+            .deconfigured => return false,
+        };
+        if (!std.mem.eql(u8, &cfg.address, &lease_ip) or cfg.prefix_len != 24 or !std.mem.eql(u8, &cfg.router.?, &server) or s.poll() != null) return false;
+
+        const lease_end = t0.add(Duration.fromSecs(lease));
+        const timers = switch (s.state) {
+            .renewing => |r| r,
+            else => return false,
+        };
+        if (!timers.expires_at.eql(lease_end) or timers.renew_at.lessThan(t0) or timers.rebind_at.lessThan(timers.renew_at) or lease_end.lessThan(timers.rebind_at)) return false;
+        if (t1 == null and t2 == null and (!timers.renew_at.eql(t0.add(Duration.fromSecs(lease).divFloor(2))) or
+            timers.rebind_at.totalMicros() != t0.totalMicros() + @divTrunc(Duration.fromSecs(lease).totalMicros() * 7, 8))) return false;
+        if (!s.pollAt().eql(timers.renew_at)) return false;
+
+        if (s.dispatch(timers.renew_at.sub(Duration.fromMicros(1))) != null) return false;
+        const renew = s.dispatch(timers.renew_at) orelse return false;
+        if (renew.dhcp_repr.message_type != .request or !std.mem.eql(u8, &renew.dhcp_repr.client_ip, &lease_ip)) return false;
+        const renew_is_unicast = timers.renew_at.lessThan(timers.rebind_at);
+        if (std.mem.eql(u8, &renew.dst_ip, &server) != renew_is_unicast) return false;
+        const rebind_at = switch (s.state) {
+            .renewing => |r| r.rebind_at,
+            else => return false,
+        };
+        if (rebind_at.lessThan(lease_end)) {
+            const rebind = s.dispatch(rebind_at) orelse return false;
+            if (!std.mem.eql(u8, &rebind.dst_ip, &.{ 255, 255, 255, 255 }) or rebind.dhcp_repr.message_type != .request) return false;
+        }
+
+        const lost = s.dispatch(lease_end);
+        if (lost != null or s.state != .discovering) return false;
+        if (s.poll() == null or !s.pollAt().eql(Instant.ZERO)) return false;
+
+        if (!acquire(&s, lease_end.add(Duration.fromSecs(1)), lease, null, null)) return false;
+        if (s.poll() == null) return false;
+        s.reset();
+        const gone = s.poll() orelse return false;
+        return gone == .deconfigured and s.state == .discovering and s.pollAt().eql(Instant.ZERO);
+    }
+
+    /// RFC 2131 4.1: unanswered requests back off and then give up; the retry timer never moves
+    /// backwards however many retries are configured.
+    pub fn unansweredRequestsBackOffAndGiveUp(seed: u64, retries: u16) bool {
+        var s = Socket.initWithTransactionSeed(mac, seed);
+        s.setRetryConfig(.{ .request_retries = retries % 200 });
+        const discover = s.dispatch(Instant.ZERO) orelse return false;
+        s.process(Instant.ZERO, server, reply(.offer, discover.dhcp_repr.transaction_id, 3600, null, null));
+        var now = Instant.ZERO;
+        var sent: usize = 0;
+        var last_gap = Duration.ZERO;
+        while (sent <= retries % 200) : (sent += 1) {
+            const due = s.pollAt();
+            if (due.lessThan(now)) return false;
+            if (sent > 0 and due.diff(now).lessThan(last_gap)) return false;
+            if (sent > 0) last_gap = due.diff(now);
+            now = due;
+            if (s.dispatch(now)) |request| {
+                if (request.dhcp_repr.message_type != .request) return false;
+            } else break;
+        }
+        return sent == retries % 200 and s.state == .discovering and s.pollAt().eql(Instant.ZERO);
+    }
+};
+
+test "laws: dhcp leases" {
+    try zv.checkLaws(leases, .{ .iterations = 3_000, .seed = 31 });
 }

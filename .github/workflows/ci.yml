@@ -54,6 +54,9 @@ jobs:
       - name: Run demos
         run: zig build demo
 
+      - name: Phase 0 gate (every classified function executed by a law or scenario)
+        run: zig build assurance
+
       - name: Run bounded fuzz smoke
         env:
           FUZZ_SMOKE_LIMIT: "1K"

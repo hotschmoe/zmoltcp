@@ -104,7 +104,10 @@ pub const TcpRepr = struct {
     }
 
     pub fn isEmpty(self: TcpRepr) bool {
-        return self.control == .none and self.payload.len == 0;
+        return switch (self.control) {
+            .syn, .fin, .rst => false,
+            .none, .psh => self.payload.len == 0,
+        };
     }
 
     pub fn fromWireBytes(data: []const u8) ?TcpRepr {

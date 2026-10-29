@@ -172,7 +172,7 @@ mise run fuzz-long
 Verification uses [zirakzigil](https://github.com/hotschmoe/zirakzigil) (`zv`), pinned in `build.zig.zon`.
 
 - `zig build test` runs the executable laws in `src/laws.zig` with fixed seeds: parser totality and parse/emit round-trips for every wire format (plus structure-aware variants that get past checksum and version guards), framing and single-bit-integrity shapes, SeqNumber and storage model laws, a stateful TCP socket law, neighbor-cache and send-limit laws, and pinned counterexamples. A failing law prints its arguments and a `zv.laws.replay(...)` call; a law that panics is re-run with `.trace = true`. Set `report_reach = true` in `src/laws.zig` to print how often each parser reaches a value versus each error.
-- `zig build assurance` prints one line per module: every module carries `pub const assurance` and gates itself with `zv.requireAssurance(@This(), .tested)`, so a new public function without a classification fails the build. `-Dghost=true` compiles zv ghost code.
+- `zig build assurance` is the Phase 0 gate, and a plain `zig build` runs it. Every module carries `pub const assurance` and gates itself with `zv.requireAssurance(@This(), .tested)`, so a new public function without a classification fails the build; and `.tested` is measured, not declared: the build runs a copy of `src/` with a probe in every function and every unit test removed, runs the laws in `src/laws.zig` and the `examples/` scenarios against it, and fails naming any classified function that neither executed. A unit test cannot raise a function's level; a law or scenario can. The table shows, per module, how many functions each suite reached. `-Dghost=true` compiles zv ghost code.
 
 ### Interop with smoltcp
 
