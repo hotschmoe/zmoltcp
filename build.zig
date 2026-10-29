@@ -203,6 +203,13 @@ pub fn build(b: *std.Build) void {
         .scenarios = &demo_roots,
     });
 
+    // `zig build verify`: every `.verified` function proved from the checked-in AIR packs (verify/).
+    _ = zirakzigil.addVerifyGate(b, .{
+        .packs = &.{"verify/zmoltcp.zvp"},
+        .pins = "verify/PINS",
+        .src = "src",
+    });
+
     addInterop(b, zmoltcp_mod, zv, optimize);
 }
 

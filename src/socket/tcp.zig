@@ -24,6 +24,7 @@ pub const assurance = .{
         .toWireRepr = .tested,
     },
     .rstReply = .tested,
+    .windowShiftFor = .verified,
     .NoControl = .{
         .window = .tested,
         .onAck = .tested,
@@ -156,6 +157,18 @@ pub const TcpRepr = struct {
         };
     }
 };
+
+/// The shift that lets a receive buffer of `rx_cap` bytes be advertised in the 16-bit window field
+/// (RFC 7323 section 2.3): the least one that makes the largest window fit, but never above MAX_WINDOW_SCALE,
+/// the largest the option may carry. A buffer of 1 GiB or more gets MAX_WINDOW_SCALE and advertises less than it
+/// has, as the window field saturates. Before this bound a buffer of 1 GiB got 15, an invalid option that a
+/// receiver ignores, so the peer then read every window as unscaled.
+pub fn windowShiftFor(rx_cap: usize) u8 {
+    const rx_cap_log2 = if (rx_cap == 0) 0 else @as(usize, @sizeOf(usize) * 8) - @as(usize, @clz(@as(usize, rx_cap)));
+    const shift = if (rx_cap_log2 > 16) rx_cap_log2 - 16 else 0;
+    const result: u8 = @intCast(@min(shift, wire_tcp.MAX_WINDOW_SCALE));
+    return zv.ensures(result, result <= wire_tcp.MAX_WINDOW_SCALE and ((rx_cap >> @intCast(result)) <= 0xFFFF or result == wire_tcp.MAX_WINDOW_SCALE));
+}
 
 pub fn rstReply(repr: TcpRepr) TcpRepr {
     var reply = TcpRepr{
@@ -748,11 +761,6 @@ pub fn Socket(comptime Ip: type, comptime max_asm_segs: usize) type {
 
         nagle: bool,
         congestion_controller: CongestionController,
-
-        fn windowShiftFor(rx_cap: usize) u8 {
-            const rx_cap_log2 = if (rx_cap == 0) 0 else @as(usize, @sizeOf(usize) * 8) - @as(usize, @clz(@as(usize, rx_cap)));
-            return @intCast(if (rx_cap_log2 > 16) rx_cap_log2 - 16 else 0);
-        }
 
         pub fn init(rx_storage: []u8, tx_storage: []u8) Self {
             return initWithInitialSequenceSecret(rx_storage, tx_storage, defaultInitialSequenceSecret(rx_storage, tx_storage));
@@ -6693,9 +6701,12 @@ test "listen syn window scale for various buffer sizes" {
         .{ .buf = 524288, .shift = 4 },
         .{ .buf = 655350, .shift = 4 },
         .{ .buf = 1048576, .shift = 5 },
+        .{ .buf = (1 << 30) - 1, .shift = 14 },
+        .{ .buf = 1 << 30, .shift = 14 },
+        .{ .buf = std.math.maxInt(usize), .shift = 14 },
     };
     for (cases) |c| {
-        try testing.expectEqual(c.shift, TestSocket.windowShiftFor(c.buf));
+        try testing.expectEqual(c.shift, windowShiftFor(c.buf));
     }
 }
 

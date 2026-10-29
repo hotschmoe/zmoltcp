@@ -8,9 +8,9 @@
 const zv = @import("zv");
 
 pub const assurance = .{
-    .internetChecksum = .tested,
-    .calculate = .tested,
-    .finish = .tested,
+    .internetChecksum = .verified,
+    .calculate = .verified,
+    .finish = .verified,
     .pseudoHeaderChecksumV6 = .tested,
     .readU16 = .tested,
     .readU32 = .tested,
@@ -28,11 +28,20 @@ pub fn internetChecksum(data: []const u8) u16 {
 
 /// Accumulate checksum over a byte slice, starting from a partial sum.
 /// Use this to checksum non-contiguous data (e.g., pseudo-header + payload).
+/// n * 0xFFFF, written as n * 0x10000 - n: the prover decides sums of shifts far faster than products.
+inline fn times0xFFFF(n: u64) u64 {
+    return (n << 16) - n;
+}
+
 pub fn calculate(data: []const u8, initial: u32) u32 {
+    // A sum of at most 65535 words, started at most at 0xFFFF, cannot wrap the 32-bit accumulator.
+    const bounded = data.len <= 131070 and initial <= 0xFFFF;
     var sum: u32 = initial;
     var i: usize = 0;
 
     while (i + 1 < data.len) : (i += 2) {
+        zv.invariant(i <= data.len and i % 2 == 0 and (!bounded or (sum >= initial and sum - initial <= times0xFFFF(i / 2))));
+        zv.decreases(data.len - i);
         const word: u16 = (@as(u16, data[i]) << 8) | @as(u16, data[i + 1]);
         sum +%= word;
     }
@@ -42,16 +51,25 @@ pub fn calculate(data: []const u8, initial: u32) u32 {
         sum +%= @as(u32, data[i]) << 8;
     }
 
-    return sum;
+    return zv.ensures(sum, !bounded or (sum >= initial and sum - initial <= times0xFFFF((data.len + 1) / 2)));
 }
 
-/// Fold a 32-bit accumulator to 16 bits and complement.
+/// Fold a 32-bit accumulator to 16 bits and complement. The folded value is `sum` less a whole number of
+/// 0xFFFF, so it is congruent to `sum` modulo 0xFFFF, and it is 0 only for a zero sum: the end-around carry of
+/// RFC 1071 is addition in one's complement arithmetic.
 pub fn finish(sum: u32) u16 {
     var s = sum;
+    // Folding replaces s = hi * 0x10000 + lo by hi + lo, which takes away hi * 0xFFFF: the ghost counts them.
+    var taken: zv.Ghost(u64) = if (zv.ghost) 0 else {};
     while ((s >> 16) != 0) {
+        zv.invariant(!zv.ghost or (taken <= 0x20000 and @as(u64, sum) == @as(u64, s) + times0xFFFF(taken) and (s == 0) == (sum == 0)));
+        zv.decreases(s);
+        if (zv.ghost) taken += s >> 16;
         s = (s & 0xFFFF) +% (s >> 16);
     }
-    return @truncate(~s);
+    const result: u16 = @truncate(~s);
+    const folded: u32 = ~result;
+    return zv.ensures(result, (!zv.ghost or @as(u64, sum) == @as(u64, folded) + times0xFFFF(taken)) and (folded == 0) == (sum == 0));
 }
 
 /// Build the IPv6 pseudo-header checksum accumulator per RFC 8200 S8.1.

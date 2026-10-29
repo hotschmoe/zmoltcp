@@ -57,6 +57,12 @@ jobs:
       - name: Phase 0 gate (every classified function executed by a law or scenario)
         run: zig build assurance
 
+      - name: Z3 (pinned release, checked against its digest)
+        run: echo "ZV_Z3=$(sh scripts/install_z3.sh "$RUNNER_TEMP/z3")" >> "$GITHUB_ENV"
+
+      - name: Verifier (every .verified function proved from the checked-in AIR packs)
+        run: zig build verify
+
       - name: Cross-compile check (aarch64-freestanding)
         run: zig build -Dtarget=aarch64-freestanding-none
 
